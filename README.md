@@ -10,15 +10,21 @@ bucket credential client, private package, queue access, or inbound server.
 The owner accepted GPL-3.0-only for the original worker code. That code is
 licensed under GNU GPL version 3 only; see [LICENSE](LICENSE). Third-party
 components retain their own terms. The separate `packages/protocol` contract
-is licensed under MIT; see its LICENSE.
+is licensed under MIT; see its LICENSE. RoMa/DINOv3-based processing is also
+subject to the [model terms](docs/model-terms.md), including the complete
+DINOv3 agreement and its use restrictions.
 License acceptance does not clear the redistribution blockers in
 [the dependency review](docs/dependency-review.md).
 
 ## Standalone scans
 
 Install Python 3.12+, FFmpeg, the required engine and its documented plugins.
-Create a virtual environment and install `pipeline/requirements.txt`. Set
-`LICHTFELD_BIN`, `LICHTFELD_COLMAP_PLUGIN`, `LICHTFELD_DENSIFICATION_PLUGIN`, or
+Create a virtual environment and install `pipeline/requirements.txt` plus
+CUDA-enabled pycolmap 4.0.2 in that environment (see
+[Windows instructions](docs/windows-worker.md#reconstruction-dependency); Linux
+uses `pycolmap-cuda12==4.0.2`). Reconstruction uses our own direct pycolmap
+pipeline; the LichtFeld COLMAP plugin is not required. Set
+`LICHTFELD_BIN`, `LICHTFELD_DENSIFICATION_PLUGIN`, or
 `SPIRULA_BIN` when overriding normal install locations.
 
 ```sh

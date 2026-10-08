@@ -9,7 +9,7 @@ namespace Guerrilla.Worker;
 internal sealed class Profile
 {
     internal const string DefaultServer = "https://guerrilla.dad";
-    internal static readonly string[] Keys = ["PYTHON", "SPIRULA_BIN", "LICHTFELD_BIN", "LICHTFELD_COLMAP_PLUGIN", "LICHTFELD_DENSIFICATION_PLUGIN", "WORKER_CONTROL_URL"];
+    internal static readonly string[] Keys = ["PYTHON", "SPIRULA_BIN", "LICHTFELD_BIN", "LICHTFELD_DENSIFICATION_PLUGIN", "WORKER_CONTROL_URL"];
     internal string DirectoryPath { get; }
     internal string Credentials => Path.Combine(DirectoryPath, "credentials.json");
     internal string StopFile => Path.Combine(DirectoryPath, "tray.stop");
@@ -39,6 +39,7 @@ internal sealed class Profile
         var config = Path.Combine(DirectoryPath, "config.json");
         Settings = File.Exists(config)
             ? JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(config)) ?? [] : [];
+        Settings.Remove("LICHTFELD_COLMAP_PLUGIN"); // Migrate profiles from the former plugin runtime.
         if (Settings.Keys.Except(Keys).Any()) throw new InvalidDataException("Unknown worker configuration. Check config.json in the worker data folder.");
         Settings.TryAdd("WORKER_CONTROL_URL", DefaultServer);
         var preferences = Path.Combine(DirectoryPath, "tray.json");
@@ -58,7 +59,6 @@ internal sealed class Profile
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         Candidate("SPIRULA_BIN", Path.Combine(local, "Guerrilla", "runtimes", "spirula-2026.9.30", "spirula.exe"));
         Candidate("LICHTFELD_BIN", Path.Combine(local, "Programs", "LichtFeld Studio", "bin", "LichtFeld-Studio.exe"));
-        Candidate("LICHTFELD_COLMAP_PLUGIN", Path.Combine(home, ".lichtfeld", "plugins", "colmap_plugin"));
         Candidate("LICHTFELD_DENSIFICATION_PLUGIN", Path.Combine(home, ".lichtfeld", "plugins", "densification"));
         // Portable checkouts often have their Python environment in an ancestor.
         for (var ancestor = new DirectoryInfo(AppContext.BaseDirectory); ancestor != null; ancestor = ancestor.Parent)

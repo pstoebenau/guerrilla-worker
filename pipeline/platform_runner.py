@@ -461,7 +461,7 @@ def runtime_versions(backend):
     versions['lichtfeld'] = subprocess.check_output([str(studio), '--version'], text=True, stderr=subprocess.STDOUT).strip()
     if os.name == 'nt':
         versions['mode'] = 'native-development'
-        for name, plugin in (('colmapPlugin', common.plugin_path()), ('densificationPlugin', common.densification_plugin_path())):
+        for name, plugin in (('densificationPlugin', common.densification_plugin_path()),):
             sources = sorted(path for path in plugin.rglob('*.py') if '.venv' not in path.parts and '__pycache__' not in path.parts)
             if sources:
                 versions[name] = common.fingerprint(sources)
@@ -481,13 +481,13 @@ def preflight():
         try:
             result['runtimeVersions'].update(runtime_versions(backend))
             if backend == 'lichtfeld':
+                from colmap_worker import probe as probe_colmap
+                probe_colmap(scan_settings.defaults()['reconstruction'])
                 if os.name == 'nt':
                     studio_python = common.studio_path().parent / 'python.exe'
                     probe = ('import sys,site; from pathlib import Path; '
                              'p=Path(sys.argv[1]); site.addsitedir(str(p/".venv/Lib/site-packages")); '
-                             'import torch,pycolmap,lichtfeld; '
-                             'assert torch.cuda.is_available(); assert pycolmap.has_cuda; '
-                             'assert hasattr(pycolmap,"global_mapping")')
+                             'import torch,lichtfeld; assert torch.cuda.is_available()')
                     subprocess.run([str(studio_python), '-c', probe, str(common.densification_plugin_path())],
                                    capture_output=True, text=True, check=True, timeout=60)
                     result['backends'][backend] = {'available': True, 'workflowVerified': False}
@@ -496,14 +496,12 @@ def preflight():
                 import torch
                 if not pycolmap.has_cuda or not torch.cuda.is_available():
                     raise RuntimeError('CUDA reconstruction/training is unavailable')
-                for plugin, filename in ((common.plugin_path(), 'panels/main_panel.py'),
-                                         (common.densification_plugin_path(), 'densify.py')):
+                for plugin, filename in ((common.densification_plugin_path(), 'densify.py'),):
                     if not (plugin / filename).is_file():
                         raise RuntimeError(f'Missing Linux plugin: {plugin.name}')
                 import lichtfeld  # noqa: F401 — native plugin dependency must load
                 import importlib
-                sys.path.insert(0, str(common.plugin_path().parent))
-                importlib.import_module(common.plugin_path().name + '.panels.main_panel')
+                sys.path.insert(0, str(common.densification_plugin_path().parent))
                 importlib.import_module(common.densification_plugin_path().name + '.densify')
             else:
                 if os.name == 'nt':
@@ -787,7 +785,9 @@ class Runner:
                           '--retain-artifacts', '--max-cap', self.cap], self.output / f'{folder.name}.log')
         reconstructed = self.stage('reconstruction', reconstruct)
         # Dataset paths in the desktop manifest are not used here: scratch is relocatable.
-        dataset = reconstructed / 'dataset'
+        result_file = reconstructed / 'colmap-result.json'
+        result = json.loads(result_file.read_text()) if result_file.exists() else {}
+        dataset = retained_path(reconstructed.resolve(), result.get('dataset_relative', 'dataset'))
 
         def densify(folder):
             # Densification publishes into a copy, keeping reconstruction immutable.

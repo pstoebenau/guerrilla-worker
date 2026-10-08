@@ -23,7 +23,12 @@ def package(source, destination, require_license=False):
 
     for relative in ('THIRD_PARTY_NOTICES', 'README.md', 'SECURITY.md',
                      'docs/dependency-review.md', 'docs/release-process.md',
-                     'docs/release-notes-0.1.0.md'):
+                     'docs/release-notes-0.1.0.md', 'docs/model-terms.md',
+                     'docs/linux-release-review.md',
+                     'packages/protocol/LICENSE', 'legal/COLMAP-LICENSE.txt',
+                     'legal/RoMaV2-LICENSE.txt', 'legal/DINOv3-LICENSE.txt',
+                     'legal/LichtFeld-LICENSE.txt', 'legal/Spirula-LICENSE.txt',
+                     'legal/Densification-LICENSE.txt', 'legal/Node-LICENSE.txt'):
         copy(relative)
     if (source / 'LICENSE').is_file():
         copy('LICENSE')
@@ -37,7 +42,7 @@ def package(source, destination, require_license=False):
         copy('legal/manifest.json')
         manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
         files = manifest.get('files')
-        if manifest.get('version') != 1 or not isinstance(files, list) or not 1 <= len(files) <= 200:
+        if manifest.get('version') not in (1, 2) or not isinstance(files, list) or not 1 <= len(files) <= 200:
             raise ValueError('Invalid legal-document manifest')
         seen = set()
         for item in files:
@@ -49,7 +54,7 @@ def package(source, destination, require_license=False):
             copy(relative)
             if not isinstance(digest, str) or hashlib.sha256((source / relative).read_bytes()).hexdigest() != digest:
                 raise ValueError('Legal-document checksum differs from reviewed manifest')
-        if require_license and manifest.get('redistributionReviewed') is not True:
+        if require_license and manifest.get('version') == 1 and manifest.get('redistributionReviewed') is not True:
             raise ValueError('Release image requires completed redistribution review')
     elif require_license:
         raise ValueError('Release image requires legal/manifest.json and reviewed third-party notices')

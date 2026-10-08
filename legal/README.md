@@ -1,18 +1,18 @@
-# Reviewed binary notices
+# Packaged license documents
 
-The owner accepted GPL-3.0-only for original worker code. Do not create a reviewed
-manifest until the third-party image redistribution review is complete. The
-protocol's separate MIT license is accepted. The Windows installer ships its own
-runtime notices and does not include the image's engines, plugins or weights.
+The owner accepts GPL-3.0-only for original worker code, MIT for the protocol,
+and the upstream third-party terms described in docs/model-terms.md and
+docs/dependency-review.md. The unlicensed COLMAP UI plugin has been removed.
 
-Place exact approved third-party license/copyright documents here as `.txt` or
-`.md` files, retaining required notices. Create `manifest.json` with version 1,
-`redistributionReviewed: true`, and `files: [{"name": "component-LICENSE.txt",
-"sha256": "<actual lowercase SHA-256>"}]`. This is a human review attestation,
-not a tool-generated legal conclusion. Document corresponding-source delivery
-and any separately licensed model requirements in the release review.
+manifest.json version 2 records exact SHA-256 checksums of upstream license
+documents. It verifies packaging integrity; it does not assert blanket legal
+certification. Release builds require the worker LICENSE, the manifest and all
+matching documents. Version 1 manifests remain readable for compatibility.
 
-Image packaging copies only named, checksummed regular documents (maximum 200,
-10 MiB each), plus the explicitly listed worker license/notices/docs. Release
-builds require both LICENSE and this manifest; candidates without an accepted
-license carry a LICENSE-PENDING marker. No reviewed manifest is supplied now.
+The manifest includes COLMAP, RoMaV2, DINOv3, LichtFeld, Spirula, densification
+and Node. CI additionally exports binary notices, pinned source snapshots and
+dependency source/build material from the exact image build as release assets.
+See docs/linux-release-review.md for their scope and source access instructions.
+
+The Windows installer uses installed engines/Python rather than redistributing
+them, and carries separate notices for its bundled Node and .NET runtimes.

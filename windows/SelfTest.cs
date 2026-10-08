@@ -13,7 +13,10 @@ internal static class SelfTest
             if (profile.Server != Profile.DefaultServer || !profile.AutoStart) throw new Exception("Defaults failed");
             var values = new Dictionary<string, string> { ["PYTHON"] = Environment.ProcessPath!, ["WORKER_CONTROL_URL"] = "http://localhost:23456/" };
             profile.Save(values, false, registerStartup: false);
+            var legacy = new Dictionary<string, string>(profile.Settings) { ["LICHTFELD_COLMAP_PLUGIN"] = directory };
+            File.WriteAllText(Path.Combine(directory, "config.json"), JsonSerializer.Serialize(legacy));
             profile = new Profile(directory);
+            if (profile.Settings.ContainsKey("LICHTFELD_COLMAP_PLUGIN")) throw new Exception("Legacy COLMAP setting was not migrated");
             if (profile.Server != "http://localhost:23456" || profile.AutoStart) throw new Exception("Settings persistence failed");
             foreach (var invalid in new[] { "file:///C:/secret", "https://user:secret@example.com", "https://example.com/?token=secret", "not a URL" })
             {

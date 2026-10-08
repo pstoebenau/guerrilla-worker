@@ -34,7 +34,7 @@ internal sealed class SettingsForm : Form
         Wide(new Label { Text = "Your GPU. Your worker.", Font = new Font(Font, FontStyle.Bold), AutoSize = true, Margin = new Padding(0, 0, 0, 8) });
         Wide(new Label { Text = "Enroll once, then let Guerrilla run in your system tray. Closing this window keeps the worker running.", AutoSize = true, MaximumSize = new Size(620, 0), Margin = new Padding(0, 0, 0, 18) });
         foreach (var (key, title) in new[] { ("WORKER_CONTROL_URL", "Server"), ("PYTHON", "Python executable"), ("SPIRULA_BIN", "Spirula executable"),
-                     ("LICHTFELD_BIN", "LichtFeld executable"), ("LICHTFELD_COLMAP_PLUGIN", "COLMAP plugin folder"), ("LICHTFELD_DENSIFICATION_PLUGIN", "Densification folder") })
+                     ("LICHTFELD_BIN", "LichtFeld executable"), ("LICHTFELD_DENSIFICATION_PLUGIN", "Densification folder") })
         {
             var row = layout.RowCount++;
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));

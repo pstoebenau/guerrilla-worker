@@ -182,7 +182,7 @@ def run(args):
                 reconstruction = attempt("colmap")
                 common.run_logged([sys.executable, ROOT / "colmap_worker.py", selected, reconstruction],
                                   output / f"{reconstruction.name}.log")
-                dataset = reconstruction / "dataset"
+                dataset = owned_path(reconstruction, json.loads((reconstruction / 'colmap-result.json').read_text()).get('dataset_relative', 'dataset'))
                 sparse_files = list((dataset / "sparse").rglob("*.bin"))
                 if not all(any(p.name == name for p in sparse_files)
                            for name in ("cameras.bin", "images.bin", "points3D.bin")):
@@ -190,16 +190,17 @@ def run(args):
                 complete("colmap", reconstruction, sparse_files + list((dataset / "images").glob("*.png"))
                          + [reconstruction / "colmap-result.json"])
             reconstruction = owned_path(output, state["artifacts"]["colmap"]["directory"])
+            dataset = owned_path(reconstruction, json.loads((reconstruction / 'colmap-result.json').read_text()).get('dataset_relative', 'dataset'))
             if 'densify' not in state['completed']:
                 previous_dense = next((item for item in reversed(state['attempts'])
                                        if item['stage'] == 'densify'), None)
                 dense_attempt = (owned_path(output, previous_dense['directory']) if previous_dense
                                  else attempt('densify'))
-                dense = common.densify(args.studio, reconstruction / 'dataset', dense_attempt, TRAINING['max_cap'])
+                dense = common.densify(args.studio, dataset, dense_attempt, TRAINING['max_cap'])
                 complete('densify', dense_attempt, [dense_attempt / 'result.json', Path(dense['pointcloud'])])
             if "train" not in state["completed"]:
                 training = attempt("train")
-                ply = common.train(args.studio, reconstruction / "dataset", training, TRAINING)
+                ply = common.train(args.studio, dataset, training, TRAINING)
                 state["ply"] = str(ply.relative_to(output))
                 complete("train", training, [ply, training / "config.json"] + list(training.glob("*.ppisp")))
             if "export" not in state["completed"]:

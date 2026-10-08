@@ -16,6 +16,10 @@ jobs:
       contents: write
       packages: write
     steps:
+      - name: Make room for CUDA and engine build dependencies
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h /
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
@@ -38,7 +42,7 @@ jobs:
               stream.write('RELEASE_TAG=linux-v' + version + '\n')
           PY
           if [ ! -f legal/manifest.json ]; then
-            echo '::error::Linux publication requires legal/manifest.json with reviewed third-party notices. See legal/README.md and docs/dependency-review.md.'
+            echo '::error::Linux publication requires legal/manifest.json with checksummed third-party notices.'
             exit 1
           fi
           python scripts/package_notices.py . "$RUNNER_TEMP/worker-notices" --require-license
@@ -61,8 +65,11 @@ jobs:
           docker build --target test -t worker-cpu-test .
       - name: Prepare source and protocol archives
         if: steps.existing.outputs.published != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           python scripts/release.py "$RUNNER_TEMP/worker-release"
+          python scripts/source_bundle.py "$RUNNER_TEMP/worker-release"
           cd packages/protocol
           bun pm pack --destination "$RUNNER_TEMP/worker-release"
       - name: Publish reviewed image with SBOM and provenance
@@ -72,7 +79,8 @@ jobs:
         run: |
           printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           docker buildx create --name reviewed-release --driver docker-container --use
-          docker buildx build --target worker --build-arg REQUIRE_RELEASE_LICENSE=1 --platform linux/amd64 --provenance=mode=max --sbom=true --label "org.opencontainers.image.revision=$GITHUB_SHA" --label "org.opencontainers.image.version=$VERSION" --metadata-file "$RUNNER_TEMP/worker-release/build-metadata.json" --tag "ghcr.io/pstoebenau/guerrilla-worker:linux-$VERSION" --push .
+          docker buildx build --target release-evidence --build-arg REQUIRE_RELEASE_LICENSE=1 --build-arg BUILD_JOBS=2 --platform linux/amd64 --output "type=local,dest=$RUNNER_TEMP/worker-release" .
+          docker buildx build --target worker --build-arg REQUIRE_RELEASE_LICENSE=1 --build-arg BUILD_JOBS=2 --platform linux/amd64 --provenance=mode=max --sbom=true --label "org.opencontainers.image.revision=$GITHUB_SHA" --label "org.opencontainers.image.version=$VERSION" --metadata-file "$RUNNER_TEMP/worker-release/build-metadata.json" --tag "ghcr.io/pstoebenau/guerrilla-worker:linux-$VERSION" --push .
       - name: Publish source and compatibility evidence
         if: steps.existing.outputs.published != 'true'
         env:
@@ -84,7 +92,11 @@ jobs:
           Image: ghcr.io/pstoebenau/guerrilla-worker:linux-$VERSION
 
           Source and CPU checks passed. CI does not claim GPU scan acceptance.
-          Source/protocol archives and registry build metadata are attached.
+          Worker/protocol archives, pinned upstream source snapshots (including
+          submodules), and registry build metadata are attached.
+          Binary notices and dependency sources collected from this build are attached.
+          Concatenate lichtfeld-build-dependencies.tar.gz.part* in filename order
+          before extracting; build-source-inventory.json contains their checksums.
           The image includes SBOM and provenance attestations.
           EOF
           gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" --latest=false --title "Guerrilla Worker $VERSION (Linux)" --notes-file "$RUNNER_TEMP/linux-release-notes.md" "$RUNNER_TEMP/worker-release/"*

@@ -7,7 +7,7 @@ PowerShell, Bun, Node or .NET installation is required.
 
 ## Setup and enrollment
 
-1. Review detected Python, Spirula, LichtFeld and plugin paths. Browse to your
+1. Review detected Python, Spirula, LichtFeld and densification paths. Browse to your
    existing installations if needed. Python must have the pipeline dependencies;
    FFmpeg and `nvidia-smi` must be on PATH. Exactly one NVIDIA GPU must be visible.
 2. The server defaults to `https://guerrilla.dad`; change it before enrolling if
@@ -67,3 +67,18 @@ and a GitHub Release with the installer, matching source and checksums. Each
 successful push receives a distinct `windows-vMAJOR.MINOR.RUN_NUMBER` tag.
 Failed checks produce no release. Updates to the parent monorepo alone do not
 trigger a worker release. Local builds remain uncommitted generated artifacts.
+
+## Reconstruction dependency
+
+Reconstruction runs Guerrilla's code directly against CUDA-enabled pycolmap
+4.0.2 in the selected Python environment. It does not load the LichtFeld COLMAP
+plugin or Studio's Python for reconstruction. Existing profiles automatically
+discard the obsolete COLMAP plugin setting; other settings are preserved.
+Install the reconstruction wheel into the Python selected in the tray app:
+
+```powershell
+python -m pip install "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.0.2/pycolmap-4.0.2%2Bcuda.cudss-cp312-cp312-win_amd64.whl"
+```
+
+This Windows CUDA wheel requires Python 3.12 x64. The Linux image already includes
+`pycolmap-cuda12==4.0.2`. Dependency checks reject a CPU-only or incompatible build.

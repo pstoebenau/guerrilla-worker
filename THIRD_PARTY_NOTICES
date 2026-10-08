@@ -12,12 +12,17 @@ Spirula Studio: GNU GPL version 3 license text at pinned release.
 LichtFeld densification plugin: GNU GPL version 3 license text at pinned source.
 Vendored RoMaV2: MIT, Copyright (c) 2025 Johan Edstedt.
 DINOv3: Meta DINOv3 License, updated August 19, 2025; separate restricted terms.
-LichtFeld COLMAP plugin: no license found at the pinned revision. Redistribution
-is blocked until rights are established or the component is replaced.
+COLMAP/pycolmap: BSD-3-Clause; see legal/COLMAP-LICENSE.txt.
+Reconstruction uses Guerrilla code calling pycolmap directly. The separately
+authored LichtFeld COLMAP plugin is neither required nor included.
 
-This notice inventory is not the final binary notice bundle. Before any binary
-release, include full applicable licenses and copyright notices, all bundled
-library/model notices, the exact source/build material required by GPL, and a
-matching machine-readable dependency inventory. Model weights require separate
-provenance verification. NVIDIA, Python, Node, Bun, Ubuntu, FFmpeg and package
-terms are not superseded by the worker LICENSE.
+DINOv3 restrictions apply to the DINO materials; see the complete agreement in
+legal/DINOv3-LICENSE.txt and the usage summary in docs/model-terms.md.
+RoMaV2 code notices are in legal/RoMaV2-LICENSE.txt.
+
+The release includes upstream source snapshots, the build's dependency source
+material and a binary-notices archive collected from installed packages. See
+docs/linux-release-review.md for source access and the scope of these assets.
+NVIDIA, Python, Node, Bun, Ubuntu, FFmpeg and package terms are not superseded
+by the worker LICENSE. The license manifest verifies document checksums rather
+than asserting a blanket legal certification.

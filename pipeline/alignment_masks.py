@@ -11,22 +11,6 @@ def mask_files(images, folder):
     return paths
 
 
-def install_feature_masks(pycolmap, folder, database_copy):
-    """Wrap this worker's extraction call, preserving the installed plugin on disk."""
-    original = pycolmap.extract_features
-
-    def extract(*args, **kwargs):
-        kwargs['reader_options'].mask_path = str(Path(folder).resolve())
-        result = original(*args, **kwargs)
-        # The plugin discards its staging database after publishing the dataset.
-        with closing(sqlite3.connect(kwargs['database_path'])) as source:
-            with closing(sqlite3.connect(database_copy)) as destination:
-                source.backup(destination)
-        return result
-
-    pycolmap.extract_features = extract
-
-
 def audit_features(database, folder, images):
     """Verify native feature extraction excluded every masked keypoint."""
     import cv2

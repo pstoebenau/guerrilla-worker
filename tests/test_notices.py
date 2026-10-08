@@ -16,7 +16,12 @@ class NoticePackagingTests(unittest.TestCase):
         self.source = Path(self.directory.name) / 'source'
         self.target = Path(self.directory.name) / 'target'
         for name in ('THIRD_PARTY_NOTICES', 'README.md', 'SECURITY.md', 'docs/dependency-review.md',
-                     'docs/release-process.md', 'docs/release-notes-0.1.0.md'):
+                     'docs/release-process.md', 'docs/release-notes-0.1.0.md', 'docs/model-terms.md',
+                     'docs/linux-release-review.md',
+                     'packages/protocol/LICENSE', 'legal/COLMAP-LICENSE.txt',
+                     'legal/RoMaV2-LICENSE.txt', 'legal/DINOv3-LICENSE.txt',
+                     'legal/LichtFeld-LICENSE.txt', 'legal/Spirula-LICENSE.txt',
+                     'legal/Densification-LICENSE.txt', 'legal/Node-LICENSE.txt'):
             file = self.source / name
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_text('reviewed document')
@@ -37,7 +42,7 @@ class NoticePackagingTests(unittest.TestCase):
     def test_release_copies_only_checksum_verified_reviewed_notices(self):
         (self.source / 'LICENSE').write_text('accepted license')
         legal = self.source / 'legal'
-        legal.mkdir()
+        legal.mkdir(exist_ok=True)
         content = b'upstream copyright and license'
         (legal / 'component-LICENSE.txt').write_bytes(content)
         (legal / 'unreviewed.txt').write_text('not included')
@@ -53,7 +58,19 @@ class NoticePackagingTests(unittest.TestCase):
 
     def test_manifest_rejects_path_escape(self):
         legal = self.source / 'legal'
-        legal.mkdir()
+        legal.mkdir(exist_ok=True)
         (legal / 'manifest.json').write_text(json.dumps({'version': 1, 'files': [{'name': '../outside.txt', 'sha256': '0' * 64}]}))
         with self.assertRaisesRegex(ValueError, 'filename'):
             package(self.source, self.target)
+
+    def test_version_two_checks_integrity_without_blanket_attestation(self):
+        (self.source / 'LICENSE').write_text('accepted license')
+        document = self.source / 'legal/component-LICENSE.txt'
+        document.write_bytes(b'upstream notice')
+        manifest = {'version': 2, 'files': [{'name': document.name,
+                    'sha256': hashlib.sha256(document.read_bytes()).hexdigest()}]}
+        (self.source / 'legal/manifest.json').write_text(json.dumps(manifest))
+        package(self.source, self.target, True)
+        document.write_text('tampered')
+        with self.assertRaisesRegex(ValueError, 'checksum'):
+            package(self.source, self.target, True)

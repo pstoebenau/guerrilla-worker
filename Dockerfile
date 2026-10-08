@@ -87,7 +87,6 @@ FROM node:22.22.0-bookworm-slim AS node-runtime
 FROM engine-runtime AS worker
 ARG SPIRULA_VERSION=2026.9.30
 ARG SPIRULA_SHA256=123d6d0b826388abb64129b6fcf2a8d34fe0662a57ba34e53212a148c891431d
-ARG COLMAP_PLUGIN_COMMIT=1afb0b1076da9f60aedc114041cbf21801be745c
 ARG DENSIFICATION_PLUGIN_COMMIT=ab0b04e35b12bff65ee87bdaacfa3177c21521d6
 ARG ROMAV2_SHA256=3516ccdbbd8eb89d50dfc0bc4562ccdcc2c60b7908e1819d5aae0cbe1bf979bc
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -105,8 +104,6 @@ RUN mkdir -p /opt/spirula && curl -fL --retry 3 \
     && test -n "$executable" && chmod +x "$executable" \
     && if [ "$executable" != /opt/spirula/spirula ]; then ln -s "$executable" /opt/spirula/spirula; fi
 RUN mkdir -p /opt/plugins \
-    && git clone https://github.com/shadygm/Lichtfeld-COLMAP-Plugin.git /opt/plugins/colmap_plugin \
-    && git -C /opt/plugins/colmap_plugin checkout --detach ${COLMAP_PLUGIN_COMMIT} \
     && git clone https://github.com/shadygm/lichtfeld-densification-plugin.git /opt/plugins/densification \
     && git -C /opt/plugins/densification checkout --detach ${DENSIFICATION_PLUGIN_COMMIT} \
     && git -C /opt/plugins/densification submodule update --init --recursive
@@ -131,7 +128,6 @@ COPY pipeline/*.py pipeline/scan-settings.schema.json /opt/pipeline/
 COPY --from=worker-bundle /app/worker.mjs /opt/worker/worker.mjs
 COPY --from=legal-bundle /notices/ /usr/share/doc/guerrilla-worker/
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,video \
-    LICHTFELD_COLMAP_PLUGIN=/opt/plugins/colmap_plugin \
     LICHTFELD_DENSIFICATION_PLUGIN=/opt/plugins/densification \
     SPIRULA_BIN=/opt/spirula/spirula \
     PYTHONPATH=/opt/lichtfeld/bin:/opt/plugins \
@@ -140,8 +136,27 @@ ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,video \
     WORKER_AGENT_LOCK_DIRECTORY=/gpu \
     GPU_LOCK_PATH=/gpu/pipeline.lock
 RUN pip freeze --all > /opt/pipeline/python-environment.txt \
-    && python -c "import hashlib,json; from pathlib import Path; json.dump({'spirulaRelease':'v${SPIRULA_VERSION}','colmapPlugin':'${COLMAP_PLUGIN_COMMIT}','densificationPlugin':'${DENSIFICATION_PLUGIN_COMMIT}','romaWeightsSha256':'${ROMAV2_SHA256}','dinov3Commit':'${DINOV3_COMMIT}','dinov3SourceSha256':'${DINOV3_SHA256}','pythonEnvironmentSha256':hashlib.sha256(Path('/opt/pipeline/python-environment.txt').read_bytes()).hexdigest()},open('/opt/pipeline/runtime-versions.json','w'))" \
+    && python -c "import hashlib,json; from pathlib import Path; json.dump({'spirulaRelease':'v${SPIRULA_VERSION}','reconstructionEngine':'guerrilla-pycolmap','densificationPlugin':'${DENSIFICATION_PLUGIN_COMMIT}','romaWeightsSha256':'${ROMAV2_SHA256}','dinov3Commit':'${DINOV3_COMMIT}','dinov3SourceSha256':'${DINOV3_SHA256}','pythonEnvironmentSha256':hashlib.sha256(Path('/opt/pipeline/python-environment.txt').read_bytes()).hexdigest()},open('/opt/pipeline/runtime-versions.json','w'))" \
     && /opt/spirula/spirula train --help >/dev/null \
     && node --version
 ENTRYPOINT ["node", "/opt/worker/worker.mjs"]
 CMD []
+
+# Export release material from the exact build, before publishing its image.
+FROM lichtfeld-build AS build-source-evidence
+COPY scripts/build_source_bundle.py /tmp/build_source_bundle.py
+RUN python3 /tmp/build_source_bundle.py
+
+FROM worker AS image-notice-evidence
+COPY scripts/image_notices.py /tmp/image_notices.py
+RUN mkdir -p /release-evidence \
+    && python /tmp/image_notices.py > /release-evidence/binary-notices.tar.gz \
+    && dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\t${source:Package}\t${source:Version}\n' > /release-evidence/os-packages.tsv \
+    && cp /opt/pipeline/python-environment.txt /opt/pipeline/runtime-versions.json /release-evidence/
+
+FROM scratch AS release-evidence
+COPY --from=build-source-evidence /release-evidence/ /
+COPY --from=image-notice-evidence /release-evidence/ /
+
+# Preserve the worker as the default target for ordinary docker builds.
+FROM worker AS default-worker

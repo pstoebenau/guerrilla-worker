@@ -27,9 +27,13 @@
 !docs/dependency-review.md
 !docs/release-process.md
 !docs/release-notes-0.1.0.md
+!docs/model-terms.md
+!docs/linux-release-review.md
 !legal/
 !legal/manifest.json
 !legal/*.txt
 !legal/*.md
 !scripts/
 !scripts/package_notices.py
+!scripts/image_notices.py
+!scripts/build_source_bundle.py

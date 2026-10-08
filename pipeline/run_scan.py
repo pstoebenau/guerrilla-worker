@@ -24,7 +24,6 @@ def main(argv=None):
     parser.add_argument("--output", type=Path,
                         help="New job folder (default: <video-stem>-splat beside the video)")
     parser.add_argument("--studio", type=Path, help="Override the LichtFeld Studio executable")
-    parser.add_argument("--plugin", type=Path, help="Override the installed COLMAP plugin folder")
     parser.add_argument("--max-images", type=int, help="Override the shared frame selection default")
     parser.add_argument("--selected-images", type=Path, help="Reuse an already reviewed selection folder")
     parser.add_argument("--colmap-masks", type=Path, help="Feature exclusion masks for alignment only; never used for training")
@@ -64,7 +63,6 @@ def main(argv=None):
         parser.error("--max-cap must be positive")
     settings = dict(video=args.video if remote else str(source), max_images=args.max_images,
                     max_cap=args.max_cap, studio=str((args.studio or common.studio_path()).resolve()),
-                    plugin=str((args.plugin or common.plugin_path()).resolve()),
                     reconstruction_mode=args.reconstruction_mode,
                     calibrate_intrinsics=options['reconstruction']['calibrate_intrinsics'],
                     densification=scan_settings.densification(options),
@@ -85,6 +83,8 @@ def main(argv=None):
     try:
         if args.resume:
             state = json.loads(manifest.read_text())
+            # The old plugin path is no longer a reconstruction setting.
+            state['settings'].pop('plugin', None)
             state['settings'].setdefault('reconstruction_mode', 'global')
             state['settings'].setdefault('selected_images', None)
             state['settings'].setdefault('colmap_masks', None)
@@ -158,7 +158,6 @@ def main(argv=None):
             command = [sys.executable, '-u', ROOT/'reconstruct_splat.py',
                        '--images', state['selection'], '--output', reconstruction,
                        '--max-cap', args.max_cap, '--studio', settings['studio'],
-                       '--plugin', settings['plugin'],
                        '--reconstruction-mode', args.reconstruction_mode,
                        '--settings', resolved_settings]
             if args.colmap_masks:

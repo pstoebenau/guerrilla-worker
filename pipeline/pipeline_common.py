@@ -28,11 +28,6 @@ def studio_path():
     return Path("/opt/lichtfeld/bin/run_lichtfeld.sh")
 
 
-def plugin_path():
-    return Path(os.environ.get("LICHTFELD_COLMAP_PLUGIN",
-                               str(Path.home() / ".lichtfeld/plugins/colmap_plugin")))
-
-
 def densification_plugin_path():
     return Path(os.environ.get("LICHTFELD_DENSIFICATION_PLUGIN",
                                str(Path.home() / ".lichtfeld/plugins/densification")))
