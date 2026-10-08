@@ -6,7 +6,7 @@ ARG VCPKG_COMMIT=58845ed63eb19aff55e896ea1f5d51f2a0df5b66
 ARG BUILD_JOBS=4
 ENV DEBIAN_FRONTEND=noninteractive VCPKG_ROOT=/opt/vcpkg \
     CC=gcc-14 CXX=g++-14 VCPKG_FORCE_SYSTEM_BINARIES=1 \
-    VCPKG_MAX_CONCURRENCY=${BUILD_JOBS}
+    VCPKG_MAX_CONCURRENCY=${BUILD_JOBS} VCPKG_BINARY_SOURCES=clear
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates git curl unzip zip tar pkg-config python3 python3-dev python3-venv \
     gcc-14 g++-14 ccache ninja-build nasm autoconf autoconf-archive automake libtool \
@@ -32,8 +32,9 @@ RUN mkdir -p /opt/vcpkg/downloads \
       https://codeload.github.com/mirror/x264/tar.gz/31e19f92f00c7003fa115047ce50978bc98c3a0d \
       -o /opt/vcpkg/downloads/videolan-x264-31e19f92f00c7003fa115047ce50978bc98c3a0d.tar.gz \
     && echo "707ff486677a1b5502d6d8faa588e7a03b0dee45491c5cba89341be4be23d3f2e48272c3b11d54cfc7be1b8bf4a3dfc3c3bb6d9643a6b5a2ed77539c85ecf294  /opt/vcpkg/downloads/videolan-x264-31e19f92f00c7003fa115047ce50978bc98c3a0d.tar.gz" | sha512sum -c -
-RUN --mount=type=cache,target=/root/.cache/vcpkg \
-    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_PORTABLE=ON \
+# BuildKit already caches this layer; avoid a second copy of every vcpkg
+# binary package. Keep downloads and extracted sources for release evidence.
+RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_PORTABLE=ON \
       -DBUILD_TESTS=OFF -DBUILD_PYTHON_STUBS=OFF -DBUILD_CUDA_MIN_SM=75 \
       -DCMAKE_MAKE_PROGRAM=/usr/bin/ninja -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
       -DLFS_DEV_IMPORT_SOURCE_PYTHON=OFF -DLFS_DEV_IMPORT_SOURCE_RESOURCES=OFF \
@@ -116,7 +117,7 @@ RUN mkdir -p /opt/plugins \
     && git -C /opt/plugins/densification checkout --detach ${DENSIFICATION_PLUGIN_COMMIT} \
     && git -C /opt/plugins/densification submodule update --init --recursive
 COPY pipeline/docker/worker-requirements.txt /opt/pipeline/worker-requirements.txt
-RUN --mount=type=cache,target=/root/.cache/pip pip install -r /opt/pipeline/worker-requirements.txt
+RUN pip install --no-cache-dir -r /opt/pipeline/worker-requirements.txt
 RUN mkdir -p /opt/models/hub/checkpoints \
     && curl -fL --retry 3 https://github.com/Parskatt/RoMaV2/releases/download/weights/romav2.pt \
        -o /opt/models/hub/checkpoints/romav2.pt \
