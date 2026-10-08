@@ -24,6 +24,14 @@ RUN git init /src/lichtfeld && git -C /src/lichtfeld remote add origin https://g
     && git -C /src/lichtfeld checkout --detach FETCH_HEAD \
     && git -C /src/lichtfeld submodule update --init --recursive --depth 1
 WORKDIR /src/lichtfeld
+# VideoLAN's archive endpoint can return an error/challenge page. Its GitHub
+# mirror serves identical bytes: keep the pinned port's filename and SHA-512
+# so vcpkg verifies and reuses this download without changing the dependency.
+RUN mkdir -p /opt/vcpkg/downloads \
+    && curl -fL --retry 3 \
+      https://codeload.github.com/mirror/x264/tar.gz/31e19f92f00c7003fa115047ce50978bc98c3a0d \
+      -o /opt/vcpkg/downloads/videolan-x264-31e19f92f00c7003fa115047ce50978bc98c3a0d.tar.gz \
+    && echo "707ff486677a1b5502d6d8faa588e7a03b0dee45491c5cba89341be4be23d3f2e48272c3b11d54cfc7be1b8bf4a3dfc3c3bb6d9643a6b5a2ed77539c85ecf294  /opt/vcpkg/downloads/videolan-x264-31e19f92f00c7003fa115047ce50978bc98c3a0d.tar.gz" | sha512sum -c -
 RUN --mount=type=cache,target=/root/.cache/vcpkg \
     cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_PORTABLE=ON \
       -DBUILD_TESTS=OFF -DBUILD_PYTHON_STUBS=OFF -DBUILD_CUDA_MIN_SM=75 \
