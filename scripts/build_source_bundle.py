@@ -18,8 +18,8 @@ def main():
     roots.extend(Path('/opt/vcpkg/buildtrees/versioning_').glob('versions/*'))
     roots.extend(Path('/src/lichtfeld/build/vcpkg_installed').glob('*/share'))
     roots = sorted({path for path in roots if path.exists()})
-    if not any('/buildtrees/' in str(path) and path.name == 'src' for path in roots):
-        raise RuntimeError('Builder dependency sources are missing; cannot package release evidence')
+    if not Path('/opt/vcpkg/downloads').is_dir() or not any(Path('/opt/vcpkg/downloads').iterdir()):
+        raise RuntimeError('Dependency source downloads are missing; cannot package release evidence')
     archive = destination / 'lichtfeld-build-dependencies.tar.gz'
     def include(member):
         if '.git' in Path(member.name).parts:

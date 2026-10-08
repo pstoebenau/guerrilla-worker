@@ -145,7 +145,12 @@ CMD []
 # Export release material from the exact build, before publishing its image.
 FROM lichtfeld-build AS build-source-evidence
 COPY scripts/build_source_bundle.py /tmp/build_source_bundle.py
-RUN python3 /tmp/build_source_bundle.py
+# A builder may have restored vcpkg binaries without extracting their source.
+# Resolve the same manifest into a fresh install root in download-only mode.
+RUN /opt/vcpkg/vcpkg install --only-downloads --triplet x64-linux \
+      --x-install-root=/tmp/source-inventory --downloads-root=/opt/vcpkg/downloads \
+      --binarysource=clear \
+    && python3 /tmp/build_source_bundle.py
 
 FROM worker AS image-notice-evidence
 COPY scripts/image_notices.py /tmp/image_notices.py
