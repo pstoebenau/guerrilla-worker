@@ -1,0 +1,17 @@
+Guerrilla Worker for Windows
+
+Original worker and tray application: GPL-3.0-only; see ../LICENSE.
+Shared protocol: MIT; see Protocol-LICENSE.txt.
+Bundled Node.js 22.22.0: see Node-LICENSE.txt (including third-party notices).
+Bundled .NET 8.0.31 and Windows Forms: see Dotnet-LICENSE.txt,
+Dotnet-NOTICES.txt, WinForms-LICENSE.txt and WinForms-NOTICES.txt.
+
+The release includes the matching worker source archive and build scripts.
+Runtime upstream sources: https://github.com/nodejs/node/tree/v22.22.0,
+https://github.com/dotnet/runtime/tree/v8.0.31,
+https://github.com/dotnet/winforms/tree/v8.0.31.
+
+Python, FFmpeg, NVIDIA drivers, engines, engine plugins and model weights are
+user-installed dependencies and are not included in this installer. Their
+licenses are supplied by their respective distributions. The separate Docker
+image redistribution review does not attest to this Windows package.

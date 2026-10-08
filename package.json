@@ -10,6 +10,8 @@
   "scripts": {
     "start": "bun agent/main.ts",
     "build": "bun build agent/main.ts --target=node --outfile=dist/worker.mjs",
+    "build:windows": "bun scripts/build-windows.ts",
+    "build:installer": "bun scripts/build-windows.ts -Installer",
     "check": "tsc --noEmit",
     "test": "bun test tests",
     "test:pipeline": "cd pipeline && bun ../scripts/python.mjs -m unittest discover -s tests",

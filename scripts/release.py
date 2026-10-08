@@ -13,7 +13,7 @@ destination.mkdir(parents=True, exist_ok=True)
 files = [root / name for name in ('package.json', 'bun.lock', 'tsconfig.json', 'Dockerfile', '.dockerignore', '.gitignore', 'README.md', 'SECURITY.md', 'THIRD_PARTY_NOTICES')]
 if (root / 'LICENSE').is_file():
     files.append(root / 'LICENSE')
-for folder, patterns in {'agent': ['*.ts'], 'tests': ['*.ts', '*.py'], 'packages/protocol': ['package.json', 'README.md', 'tsconfig.json', 'src/*.ts', 'scan-settings.schema.json'], 'pipeline': ['*.py', '*.json', 'requirements.txt', 'docker/*requirements.txt', 'tests/*.py'], 'docs': ['*.md', '*.txt'], 'scripts': ['*.py', '*.mjs'], '.github/workflows': ['*.yml'], 'legal': ['*.md', '*.txt', 'manifest.json']}.items():
+for folder, patterns in {'agent': ['*.ts'], 'tests': ['*.ts', '*.py'], 'packages/protocol': ['package.json', 'README.md', 'LICENSE', 'tsconfig.json', 'src/*.ts', 'scan-settings.schema.json'], 'pipeline': ['*.py', '*.json', 'requirements.txt', 'docker/*requirements.txt', 'tests/*.py'], 'docs': ['*.md', '*.txt'], 'scripts': ['*.py', '*.mjs', '*.ts', '*.ps1'], 'windows': ['*.cs', '*.csproj', '*.iss', '*.txt'], '.github/workflows': ['*.yml'], 'legal': ['*.md', '*.txt', 'manifest.json']}.items():
     for pattern in patterns:
         files.extend((root / folder).glob(pattern))
 version = json.loads((root / 'package.json').read_text())['version']

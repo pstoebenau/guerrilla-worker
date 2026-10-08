@@ -3,8 +3,8 @@
 The owner accepted GPL-3.0-only for the original worker code; the full LICENSE
 text and package metadata now record that decision. This does not grant rights
 to missing-license plugins or restricted model assets.
-The protocol is an independent data contract and may be separately MIT licensed
-if the owner chooses; that separate decision remains pending. Private platform source need not be published merely to
+The protocol is an independent data contract and is MIT licensed with owner
+approval. Private platform source need not be published merely to
 implement this HTTP contract.
 
 ## Verified exact upstream sources

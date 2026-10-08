@@ -1,8 +1,9 @@
 # Reviewed binary notices
 
 The owner accepted GPL-3.0-only for original worker code. Do not create a reviewed
-manifest until the third-party redistribution review and separate protocol license
-decision are complete.
+manifest until the third-party image redistribution review is complete. The
+protocol's separate MIT license is accepted. The Windows installer ships its own
+runtime notices and does not include the image's engines, plugins or weights.
 
 Place exact approved third-party license/copyright documents here as `.txt` or
 `.md` files, retaining required notices. Create `manifest.json` with version 1,

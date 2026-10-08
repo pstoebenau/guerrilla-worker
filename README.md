@@ -10,7 +10,7 @@ bucket credential client, private package, queue access, or inbound server.
 The owner accepted GPL-3.0-only for the original worker code. That code is
 licensed under GNU GPL version 3 only; see [LICENSE](LICENSE). Third-party
 components retain their own terms. The separate `packages/protocol` contract
-is excluded from this grant: its proposed MIT license has not yet been accepted.
+is licensed under MIT; see its LICENSE.
 License acceptance does not clear the redistribution blockers in
 [the dependency review](docs/dependency-review.md).
 
@@ -85,6 +85,8 @@ shared host GPU-lock directory at `/gpu`, pass
 ports, mount Docker sockets, or pass database/S3/provider credentials.
 
 Linux NVIDIA is the initial Docker target. Native Windows uses the same protocol.
+For a portable Windows executable using installed engines, see
+[Windows worker packaging](docs/windows-worker.md).
 Windows Docker/WSL previously exposed CUDA but no NVIDIA Vulkan adapter to
 Spirula. No remote Linux or 3090/4090/5090 acceptance is claimed by this candidate.
 There is no SuperSplat publication integration. SOG/SPZ outputs are locally verified.

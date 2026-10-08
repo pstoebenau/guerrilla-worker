@@ -1,6 +1,7 @@
 {
   "name": "@guerrilla/worker-protocol",
   "version": "1.0.1",
+  "license": "MIT",
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
@@ -9,6 +10,7 @@
   "files": [
     "src",
     "README.md",
+    "LICENSE",
     "scan-settings.schema.json"
   ],
   "scripts": {

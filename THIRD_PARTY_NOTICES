@@ -1,7 +1,7 @@
 Guerrilla Worker local release candidate
 
 Original worker source: GPL-3.0-only, accepted by the owner; see LICENSE.
-The separate packages/protocol contract is excluded pending its license decision.
+The separate packages/protocol contract is MIT licensed; see its LICENSE.
 
 External components are obtained by Dockerfile from their exact pinned sources.
 They are not relicensed by this project. See docs/dependency-review.md for exact

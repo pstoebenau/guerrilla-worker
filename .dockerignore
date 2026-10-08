@@ -8,6 +8,7 @@
 !packages/protocol/
 !packages/protocol/package.json
 !packages/protocol/README.md
+!packages/protocol/LICENSE
 !packages/protocol/tsconfig.json
 !packages/protocol/src/
 !packages/protocol/src/*.ts

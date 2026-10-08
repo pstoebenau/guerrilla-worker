@@ -1,5 +1,7 @@
 # Worker protocol 1
 
+Licensed under MIT; see [LICENSE](LICENSE). The worker application is separately GPL-3.0-only.
+
 Outbound JSON over HTTPS under `/api/worker/`. Only enrollment is unauthenticated;
 all other calls use the revocable worker Bearer credential. Loopback HTTP is for
 local development only. Transfers use short-lived presigned URLs, never storage

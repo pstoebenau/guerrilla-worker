@@ -1,9 +1,29 @@
 # Release preparation and gates
 
+## Windows tray installer
+
+The owner approved automatic Windows installer publication on each push to
+`main` in `pstoebenau/guerrilla-worker`. The protocol is now MIT licensed.
+`.github/workflows/windows-release.yml` builds an unsigned, per-user Windows x64
+installer, runs agent checks and application/install/uninstall smoke tests, and
+publishes a GitHub Release with matching source, build identity and SHA-256 sums.
+Versions use the package major/minor and GitHub run number (`windows-v0.1.N`).
+Reruns preserve an already published release. Each push builds its tip commit;
+a push containing multiple commits produces one release. Failing checks prevent
+publication. No cancellation of older builds is configured.
+
+Only the tray application, worker source, protocol, Node and .NET runtimes are
+included. No Python, engines, plugins, CUDA libraries, weights or scans are
+redistributed. Notices for the exact bundled runtimes are included by the build.
+CI does not claim GPU scan acceptance. Updates are manual; signing is intentionally
+not configured. The desktop application works without Bun, Node or .NET installed.
+
+## Docker image (separate review)
+
 Only fresh public repository history may be used. Do not initialize its remote,
 push tags, or dispatch publication until the owner accepts a license and the
-review below passes. GPL-3.0-only has now been accepted for worker code; protocol
-licensing and third-party redistribution review remain pending. The approved future destinations are
+review below passes. GPL-3.0-only has now been accepted for worker code;
+third-party image redistribution review remains pending. The approved future destinations are
 `pstoebenau/guerrilla-worker` and `ghcr.io/pstoebenau/guerrilla-worker`.
 
 1. Resolve every distribution blocker in dependency-review.md. Add the accepted
