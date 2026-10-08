@@ -4,15 +4,22 @@
   "license": "GPL-3.0-only",
   "private": true,
   "type": "module",
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "start": "bun agent/main.ts",
     "build": "bun build agent/main.ts --target=node --outfile=dist/worker.mjs",
     "check": "tsc --noEmit",
     "test": "bun test tests",
-    "test:pipeline": "python -m unittest discover -s pipeline/tests",
-    "scan": "python pipeline/run_scan.py"
+    "test:pipeline": "cd pipeline && bun ../scripts/python.mjs -m unittest discover -s tests",
+    "scan": "bun scripts/python.mjs pipeline/run_scan.py"
   },
-  "dependencies": {"@guerrilla/worker-protocol": "workspace:*"},
-  "devDependencies": {"@types/bun": "1.3.10", "typescript": "5.9.3"}
+  "dependencies": {
+    "@guerrilla/worker-protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.10",
+    "typescript": "5.9.3"
+  }
 }

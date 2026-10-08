@@ -1,0 +1,339 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Scan settings",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "selection": {
+      "type": "object",
+      "title": "Frame selection",
+      "additionalProperties": false,
+      "properties": {
+        "max_images": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "title": "Maximum frames",
+          "default": null,
+          "description": "Optional hard cap; leave blank to use the percentage budget.",
+          "minimum": 3,
+          "maximum": 10000
+        },
+        "keep_percent": {
+          "type": "number",
+          "title": "Frame budget (%)",
+          "default": 30,
+          "description": "",
+          "minimum": 0.1,
+          "maximum": 100
+        },
+        "sample_fps": {
+          "type": "number",
+          "title": "Sampling FPS",
+          "default": 0,
+          "description": "0 analyzes every frame. Exported frames remain full resolution.",
+          "minimum": 0,
+          "maximum": 120
+        },
+        "start_seconds": {
+          "type": "number",
+          "title": "Start time (seconds)",
+          "default": 0,
+          "description": "",
+          "minimum": 0,
+          "maximum": 86400
+        },
+        "end_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "title": "End time (seconds)",
+          "default": null,
+          "description": "Leave blank to use the end of the video.",
+          "minimum": 0,
+          "maximum": 86400
+        },
+        "blur_ratio": {
+          "type": "number",
+          "title": "Relative sharpness",
+          "default": 0.9,
+          "description": "Higher values reject more blurry frames.",
+          "minimum": 0.01,
+          "maximum": 1
+        },
+        "min_sharpness": {
+          "type": "number",
+          "title": "Minimum sharpness",
+          "default": 8,
+          "description": "",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "max_glare": {
+          "type": "number",
+          "title": "Maximum glare",
+          "default": 0.2,
+          "description": "Lower values reject more glare.",
+          "minimum": 0.01,
+          "maximum": 1
+        },
+        "no_glare_filter": {
+          "type": "boolean",
+          "title": "Disable glare filtering",
+          "default": false,
+          "description": ""
+        },
+        "preserve_coverage": {
+          "type": "boolean",
+          "title": "Preserve coverage",
+          "default": false,
+          "description": "May exceed the percentage budget to bridge gaps. Cannot be combined with a maximum frame count."
+        },
+        "max_gap_seconds": {
+          "type": "number",
+          "title": "Maximum coverage gap (seconds)",
+          "default": 0.5,
+          "description": "",
+          "minimum": 0.01,
+          "maximum": 60
+        },
+        "min_pair_overlap": {
+          "type": "number",
+          "title": "Minimum pair overlap",
+          "default": 0.2,
+          "description": "",
+          "minimum": 0.01,
+          "maximum": 1
+        }
+      }
+    },
+    "reconstruction": {
+      "type": "object",
+      "title": "Camera reconstruction",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "title": "Reconstruction method",
+          "default": "global",
+          "description": "GLOMAP global reconstruction or COLMAP incremental reconstruction.",
+          "enum": [
+            "global",
+            "incremental"
+          ]
+        },
+        "calibrate_intrinsics": {
+          "type": "boolean",
+          "title": "Calibrate camera intrinsics",
+          "default": true,
+          "description": ""
+        },
+        "refine_cameras": {
+          "type": "boolean",
+          "title": "Validate per-frame camera refinement",
+          "default": true,
+          "description": ""
+        },
+        "features": {
+          "type": "integer",
+          "title": "SIFT features per image",
+          "default": 8192,
+          "description": "",
+          "minimum": 1024,
+          "maximum": 65536
+        },
+        "matches": {
+          "type": "integer",
+          "title": "Maximum matches",
+          "default": 16384,
+          "description": "",
+          "minimum": 1024,
+          "maximum": 131072
+        },
+        "ba_iterations": {
+          "type": "integer",
+          "title": "Bundle adjustment iterations",
+          "default": 100,
+          "description": "",
+          "minimum": 1,
+          "maximum": 1000
+        }
+      }
+    },
+    "densification": {
+      "type": "object",
+      "title": "Dense initialization",
+      "additionalProperties": false,
+      "properties": {
+        "roma_setting": {
+          "type": "string",
+          "title": "RoMaV2 quality",
+          "default": "high",
+          "description": "Higher quality requires more processing time.",
+          "enum": [
+            "precise",
+            "high",
+            "base",
+            "fast",
+            "turbo"
+          ]
+        },
+        "num_refs": {
+          "type": "number",
+          "title": "Reference image fraction",
+          "default": 0.8,
+          "description": "",
+          "minimum": 0.01,
+          "maximum": 1
+        },
+        "nns_per_ref": {
+          "type": "integer",
+          "title": "Neighbors per reference",
+          "default": 3,
+          "description": "",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "matches_per_ref": {
+          "type": "integer",
+          "title": "Matches per reference",
+          "default": 10000,
+          "description": "",
+          "minimum": 100,
+          "maximum": 100000
+        },
+        "certainty_thresh": {
+          "type": "number",
+          "title": "Match certainty threshold",
+          "default": 0.2,
+          "description": "",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reproj_thresh": {
+          "type": "number",
+          "title": "Reprojection threshold",
+          "default": 0.8,
+          "description": "",
+          "minimum": 0.01,
+          "maximum": 10
+        },
+        "min_parallax_deg": {
+          "type": "number",
+          "title": "Minimum parallax (degrees)",
+          "default": 0.5,
+          "description": "",
+          "minimum": 0,
+          "maximum": 45
+        },
+        "chunked_batches": {
+          "type": "integer",
+          "title": "Chunked batches",
+          "default": 4,
+          "minimum": 1,
+          "maximum": 64,
+          "description": "Split dense matching into batches to control memory usage."
+        },
+        "seed": {
+          "type": "integer",
+          "title": "Random seed",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 2147483647,
+          "description": "Use the same seed for reproducible dense initialization."
+        }
+      }
+    },
+    "training": {
+      "type": "object",
+      "title": "Gaussian training",
+      "additionalProperties": false,
+      "properties": {
+        "max_cap": {
+          "type": "integer",
+          "title": "Maximum Gaussians",
+          "default": 3000000,
+          "description": "Hard limit applied to initialization, training, and export verification.",
+          "minimum": 1,
+          "maximum": 30000000
+        },
+        "iterations": {
+          "type": "integer",
+          "title": "Training iterations",
+          "default": 30000,
+          "description": "",
+          "minimum": 100,
+          "maximum": 200000
+        },
+        "sh_degree": {
+          "type": "integer",
+          "title": "Spherical harmonics degree",
+          "default": 3,
+          "description": "",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "enable_sparsity": {
+          "type": "boolean",
+          "title": "Sparsity pass",
+          "default": true,
+          "description": ""
+        },
+        "sparsify_steps": {
+          "type": "integer",
+          "title": "Sparsity iterations",
+          "default": 15000,
+          "description": "",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "prune_ratio": {
+          "type": "number",
+          "title": "Sparsity prune ratio",
+          "default": 0.6,
+          "description": "",
+          "minimum": 0.01,
+          "maximum": 0.99
+        },
+        "gut": {
+          "type": "boolean",
+          "title": "Gaussian unscented transform",
+          "default": true,
+          "description": ""
+        },
+        "use_bilateral_grid": {
+          "type": "boolean",
+          "title": "Bilateral grid",
+          "default": true,
+          "description": ""
+        },
+        "mip_filter": {
+          "type": "boolean",
+          "title": "MIP filtering",
+          "default": true,
+          "description": ""
+        },
+        "use_ppisp": {
+          "type": "boolean",
+          "title": "Per-image appearance correction",
+          "default": true,
+          "description": ""
+        },
+        "use_error_map": {
+          "type": "boolean",
+          "title": "Error-guided refinement",
+          "default": true,
+          "description": ""
+        },
+        "use_edge_map": {
+          "type": "boolean",
+          "title": "Edge-guided refinement",
+          "default": true,
+          "description": ""
+        }
+      }
+    }
+  }
+}

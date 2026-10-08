@@ -1,9 +1,22 @@
 {
   "name": "@guerrilla/worker-protocol",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
-  "exports": "./src/index.ts",
-  "files": ["src", "README.md"],
-  "scripts": {"check": "tsc --noEmit", "test": "bun test"},
-  "devDependencies": {"typescript": "^6.0.3"}
+  "exports": {
+    ".": "./src/index.ts",
+    "./settings-schema": "./scan-settings.schema.json"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "scan-settings.schema.json"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "bun test",
+    "prepack": "bun -e \"await Bun.write('scan-settings.schema.json', Bun.file('../../pipeline/scan-settings.schema.json'))\""
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
 }
