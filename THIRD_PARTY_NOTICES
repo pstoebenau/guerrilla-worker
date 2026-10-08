@@ -1,0 +1,23 @@
+Guerrilla Worker local release candidate
+
+Original worker source: GPL-3.0-only, accepted by the owner; see LICENSE.
+The separate packages/protocol contract is excluded pending its license decision.
+
+External components are obtained by Dockerfile from their exact pinned sources.
+They are not relicensed by this project. See docs/dependency-review.md for exact
+versions, source links, obligations and unresolved redistribution blockers.
+
+LichtFeld Studio: GNU GPL version 3 license text at pinned source.
+Spirula Studio: GNU GPL version 3 license text at pinned release.
+LichtFeld densification plugin: GNU GPL version 3 license text at pinned source.
+Vendored RoMaV2: MIT, Copyright (c) 2025 Johan Edstedt.
+DINOv3: Meta DINOv3 License, updated August 19, 2025; separate restricted terms.
+LichtFeld COLMAP plugin: no license found at the pinned revision. Redistribution
+is blocked until rights are established or the component is replaced.
+
+This notice inventory is not the final binary notice bundle. Before any binary
+release, include full applicable licenses and copyright notices, all bundled
+library/model notices, the exact source/build material required by GPL, and a
+matching machine-readable dependency inventory. Model weights require separate
+provenance verification. NVIDIA, Python, Node, Bun, Ubuntu, FFmpeg and package
+terms are not superseded by the worker LICENSE.
