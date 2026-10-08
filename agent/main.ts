@@ -12,6 +12,7 @@ import { checkedPath, removeScratchPath } from './retention-files';
 import { download } from './transfers';
 import { checkpoint, archiveFile } from './archive';
 import { agentLockPath } from './paths';
+import { readEnrollmentToken } from './enrollment';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const pipelineRoot = process.env.PIPELINE_ROOT ?? (process.platform === 'linux' && root === '/opt' ? '/opt/pipeline' : path.join(root,'pipeline'));
@@ -107,14 +108,23 @@ export async function execute(client: Client, assignment: Assignment, shutdown: 
 async function main() {
   const enrollmentToken = process.env.WORKER_ENROLLMENT_TOKEN;
   delete process.env.WORKER_ENROLLMENT_TOKEN;
+  const explicitEnrollment = process.argv.includes('enroll');
+  if (explicitEnrollment) console.error('Checking worker GPU and engine dependencies...');
   const info = registration();
   if (process.argv.includes('--preflight')) { console.log(JSON.stringify(info)); return; }
-  const explicitEnrollment = process.argv.includes('enroll');
   let credentialExists = true;
   try {await readFile(credentialFile);} catch(error) {if((error as NodeJS.ErrnoException).code==='ENOENT')credentialExists=false;else throw error;}
   if (explicitEnrollment || !credentialExists && enrollmentToken) {
-    const origin = process.env.WORKER_CONTROL_URL, token = enrollmentToken ?? (process.argv.includes('--token-stdin') ? (await new Promise<string>((resolve,reject)=> { let data=''; process.stdin.setEncoding('utf8'); process.stdin.on('data',chunk=> {data+=chunk;if(data.length>4096)reject(new Error('Enrollment token too long'));}); process.stdin.on('end',()=>resolve(data.trim())); process.stdin.on('error',reject); })) : undefined);
-    if (!origin || !token) throw new Error('Set WORKER_CONTROL_URL and WORKER_ENROLLMENT_TOKEN');
+    if (credentialExists) throw new Error('This worker already has saved credentials. Start the worker normally; use a different WORKER_CREDENTIAL_FILE to enroll a separate identity.');
+    const origin = process.env.WORKER_CONTROL_URL;
+    if (!origin) throw new Error('Set WORKER_CONTROL_URL to the running Guerrilla server before enrolling.');
+    let token = enrollmentToken;
+    if (!token && process.argv.includes('--token-stdin')) {
+      console.error('Paste the enrollment token from Workers and press Enter:');
+      token = await readEnrollmentToken();
+    }
+    if (!token) throw new Error('Run enroll --token-stdin and paste a token from Workers.');
+    console.error('Enrolling worker with the server...');
     const enrolled = await new Client(origin,'').post<EnrollmentResponse>('enroll',{token,registration:info});
     await mkdir(path.dirname(credentialFile),{recursive:true,mode:0o700});
     await writeFile(credentialFile,JSON.stringify({origin,...enrolled}),{flag:'wx',mode:0o600});
