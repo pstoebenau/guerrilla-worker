@@ -62,7 +62,8 @@ builds use the signed upstream Inno Setup 6.4.3 compiler, installed under the
 user's Guerrilla build-tools cache. No scan engines or model assets are bundled.
 
 Every push to the independent worker repository's `main` runs
-`windows-release.yml`: checks, installer build, install/uninstall smoke test,
+the Windows job in `windows-release.yml` (displayed as **Worker release**):
+checks, installer build, install/uninstall smoke test,
 and a GitHub Release with the installer, matching source and checksums. Each
 successful push receives a distinct `windows-vMAJOR.MINOR.RUN_NUMBER` tag.
 Failed checks produce no release. Updates to the parent monorepo alone do not

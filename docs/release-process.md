@@ -1,5 +1,14 @@
 # Release preparation and gates
 
+## Shared GitHub Actions run
+
+`.github/workflows/windows-release.yml` is displayed as **Worker release** and
+starts once per push to `main` or manual dispatch. Windows and Linux run as
+parallel jobs in that run, with the same commit and run number. Each job checks
+and publishes its own platform independently; a Linux failure does not block a
+successful Windows installer release. The existing Windows workflow path is
+retained to continue its run counter and avoid reusing installer version tags.
+
 ## Windows tray installer
 
 The owner approved automatic Windows installer publication on each push to
@@ -21,12 +30,12 @@ not configured. The desktop application works without Bun, Node or .NET installe
 ## Docker image (separate review)
 
 The owner approved automatic Linux releases on every push to worker `main`.
-`.github/workflows/release.yml` also supports manual runs on `main`; it no longer
+The Linux job in the shared workflow also supports manual runs on `main`; it no longer
 requires `RELEASE_APPROVED`, a pre-existing version tag, or environment approval.
 Each push gets a `linux-vMAJOR.MINOR.RUN_NUMBER` GitHub Release and a
 `ghcr.io/pstoebenau/guerrilla-worker:linux-MAJOR.MINOR.RUN_NUMBER` image tag.
-Windows and Linux run numbers are independent. Linux releases do not replace the
-latest Windows installer release used by the tray app. Completed release reruns
+Windows and Linux now share the workflow run number. Linux releases do not
+replace the latest Windows installer release used by the tray app. Completed release reruns
 preserve their assets; newer pushes do not cancel older builds.
 
 GPL-3.0-only is accepted for worker code and MIT for the protocol. The owner
