@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 ARG CUDA_VERSION=12.8.1
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS lichtfeld-build
+FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS lichtfeld-build
 ARG LICHTFELD_COMMIT=d8c50c6a3e2273cb74130a6e9023de8d068af52d
 ARG VCPKG_COMMIT=58845ed63eb19aff55e896ea1f5d51f2a0df5b66
 ARG BUILD_JOBS=2

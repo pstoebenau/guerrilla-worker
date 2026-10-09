@@ -3,7 +3,7 @@ ARG CUDA_VERSION=12.8.1
 ARG WORKER_RUNTIME_IMAGE=guerrilla-runtime:local
 FROM ${WORKER_RUNTIME_IMAGE} AS engine-runtime
 
-FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04 AS python-runtime
+FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04 AS python-runtime
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility HOME=/tmp/splat-home \
     PATH=/opt/venv/bin:${PATH}

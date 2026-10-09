@@ -66,6 +66,10 @@ and notice access must be maintained for recipients of published images.
 
 ## Reusable Linux engine artifact
 
+All Linux Docker targets pull CUDA 12.8.1 on Ubuntu 24.04 from NVIDIA's
+`nvcr.io/nvidia/cuda` registry. This uses the same CUDA images without depending
+on Docker Hub's CUDA pull quota and requires no additional CI credentials.
+
 The Linux release workflow resolves a checksummed file artifact in a GitHub
 Release tagged `lichtfeld-linux-recipe-<sha256>`. The recipe hashes
 `Dockerfile.engine`, `scripts/build_source_bundle.py`,
