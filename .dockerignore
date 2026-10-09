@@ -1,6 +1,7 @@
 **
 !Dockerfile
 !Dockerfile.engine
+!Dockerfile.runtime
 !package.json
 !bun.lock
 !agent/
@@ -18,6 +19,9 @@
 !pipeline/*.json
 !pipeline/docker/
 !pipeline/docker/*requirements.txt
+!pipeline/docker/converter/
+!pipeline/docker/converter/package.json
+!pipeline/docker/converter/package-lock.json
 !pipeline/tests/
 !pipeline/tests/*.py
 !THIRD_PARTY_NOTICES
@@ -38,6 +42,10 @@
 !scripts/package_notices.py
 !scripts/image_notices.py
 !scripts/build_source_bundle.py
+!scripts/package_engine_artifact.py
 !scripts/check_cpu_baseline.py
 !patches/
 !patches/lichtfeld-cpu-baseline.patch
+**/node_modules
+**/__pycache__
+**/*.pyc

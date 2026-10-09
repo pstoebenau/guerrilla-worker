@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 ARG CUDA_VERSION=12.8.1
-ARG LICHTFELD_IMAGE=guerrilla-lichtfeld:local
-FROM ${LICHTFELD_IMAGE} AS lichtfeld-engine
+ARG WORKER_RUNTIME_IMAGE=guerrilla-runtime:local
+FROM ${WORKER_RUNTIME_IMAGE} AS engine-runtime
 
 FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04 AS python-runtime
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
@@ -17,7 +17,7 @@ COPY pipeline/docker/requirements.txt /opt/pipeline/requirements.txt
 RUN pip install --no-cache-dir -r /opt/pipeline/requirements.txt
 WORKDIR /opt/pipeline
 
-FROM python-runtime AS legal-bundle
+FROM engine-runtime AS legal-bundle
 ARG REQUIRE_RELEASE_LICENSE=0
 COPY . /source/
 RUN if [ "$REQUIRE_RELEASE_LICENSE" = "1" ]; then \
@@ -31,18 +31,9 @@ COPY pipeline/scan-settings.schema.json ./
 COPY pipeline/tests/ tests/
 RUN python -m unittest discover -s tests -v
 
-FROM python-runtime AS engine-runtime
-COPY --from=lichtfeld-engine /opt/lichtfeld /opt/lichtfeld
-ENV LICHTFELD_BIN=/opt/lichtfeld/bin/run_lichtfeld.sh
-# The NVIDIA driver is injected by `docker run --gpus`, not by `docker build`.
-RUN test -x /opt/lichtfeld/bin/run_lichtfeld.sh && test -s /opt/lichtfeld/bin/LichtFeld-Studio \
-    && python -c "import pycolmap; assert pycolmap.__version__ == '4.0.2'; assert pycolmap.has_cuda"
-
+# Legacy standalone pipeline entry point, using the prebuilt runtime too.
 FROM engine-runtime AS runtime
 COPY pipeline/*.py pipeline/scan-settings.schema.json ./
-LABEL org.opencontainers.image.title="Video or photos to SPZ" \
-      org.opencontainers.image.version="lichtfeld-0.5.3-colmap-4.0.2" \
-      org.opencontainers.image.description="Automatic image selection, COLMAP with model retries, LichtFeld default training, SPZ export"
 ENTRYPOINT ["python", "/opt/pipeline/splat_pipeline.py"]
 CMD ["--help"]
 
@@ -54,64 +45,17 @@ RUN bun install --frozen-lockfile
 COPY agent agent
 RUN bun build agent/main.ts --target=node --outfile=/app/worker.mjs
 
-FROM node:22.22.0-bookworm-slim AS node-runtime
+# Only these layers change with worker or pipeline edits.
 FROM engine-runtime AS worker
-ARG SPIRULA_VERSION=2026.9.30
-ARG SPIRULA_SHA256=123d6d0b826388abb64129b6fcf2a8d34fe0662a57ba34e53212a148c891431d
-ARG DENSIFICATION_PLUGIN_COMMIT=ab0b04e35b12bff65ee87bdaacfa3177c21521d6
-ARG ROMAV2_SHA256=3516ccdbbd8eb89d50dfc0bc4562ccdcc2c60b7908e1819d5aae0cbe1bf979bc
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl unzip git ffmpeg vulkan-tools mesa-vulkan-drivers libopengl0 libgfortran5 libgomp1 libglib2.0-0t64 \
-    && rm -rf /var/lib/apt/lists/*
-COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
-RUN mkdir -p /opt/spirula && curl -fL --retry 3 \
-      https://github.com/harry7557558/spirula-studio/releases/download/v${SPIRULA_VERSION}/spirula-${SPIRULA_VERSION}-ubuntu-vulkan-x86_64.zip \
-      -o /tmp/spirula.zip \
-    && echo "${SPIRULA_SHA256}  /tmp/spirula.zip" | sha256sum -c - \
-    && unzip -q /tmp/spirula.zip -d /opt/spirula && rm /tmp/spirula.zip \
-    && executable="$(find /opt/spirula -type f -name spirula | head -1)" \
-    && test -n "$executable" && chmod +x "$executable" \
-    && if [ "$executable" != /opt/spirula/spirula ]; then ln -s "$executable" /opt/spirula/spirula; fi
-RUN mkdir -p /opt/plugins \
-    && git clone https://github.com/shadygm/lichtfeld-densification-plugin.git /opt/plugins/densification \
-    && git -C /opt/plugins/densification checkout --detach ${DENSIFICATION_PLUGIN_COMMIT} \
-    && git -C /opt/plugins/densification submodule update --init --recursive
-COPY pipeline/docker/worker-requirements.txt /opt/pipeline/worker-requirements.txt
-RUN pip install --no-cache-dir -r /opt/pipeline/worker-requirements.txt
-RUN mkdir -p /opt/models/hub/checkpoints \
-    && curl -fL --retry 3 https://github.com/Parskatt/RoMaV2/releases/download/weights/romav2.pt \
-       -o /opt/models/hub/checkpoints/romav2.pt \
-    && echo "${ROMAV2_SHA256}  /opt/models/hub/checkpoints/romav2.pt" | sha256sum -c -
-# RoMa's pinned DINOv3 feature backbone loads repository code through torch.hub.
-# Bake that source too, so a cold worker needs no first-job GitHub download.
-ARG DINOV3_COMMIT=adc254450203739c8149213a7a69d8d905b4fcfa
-ARG DINOV3_SHA256=923e23a8cea28c9255fb3c2674ecea3dafc9dcc23259754ab7b91dd02f14d38a
-RUN curl -fL --retry 3 https://github.com/facebookresearch/dinov3/zipball/${DINOV3_COMMIT} \
-      -o /tmp/dinov3.zip \
-    && echo "${DINOV3_SHA256}  /tmp/dinov3.zip" | sha256sum -c - \
-    && unzip -q /tmp/dinov3.zip -d /tmp/dinov3 \
-    && mv /tmp/dinov3/facebookresearch-dinov3-* /opt/models/hub/facebookresearch_dinov3_${DINOV3_COMMIT} \
-    && touch /opt/models/hub/trusted_list \
-    && rm /tmp/dinov3.zip && rmdir /tmp/dinov3
 COPY pipeline/*.py pipeline/scan-settings.schema.json /opt/pipeline/
 COPY --from=worker-bundle /app/worker.mjs /opt/worker/worker.mjs
 COPY --from=legal-bundle /notices/ /usr/share/doc/guerrilla-worker/
-ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,video \
-    LICHTFELD_DENSIFICATION_PLUGIN=/opt/plugins/densification \
-    SPIRULA_BIN=/opt/spirula/spirula \
-    PYTHONPATH=/opt/lichtfeld/bin:/opt/plugins \
-    LD_LIBRARY_PATH=/opt/lichtfeld/lib \
-    TORCH_HOME=/opt/models \
-    WORKER_AGENT_LOCK_DIRECTORY=/gpu \
-    GPU_LOCK_PATH=/gpu/pipeline.lock
-RUN pip freeze --all > /opt/pipeline/python-environment.txt \
-    && python -c "import hashlib,json; from pathlib import Path; json.dump({'spirulaRelease':'v${SPIRULA_VERSION}','reconstructionEngine':'guerrilla-pycolmap','densificationPlugin':'${DENSIFICATION_PLUGIN_COMMIT}','romaWeightsSha256':'${ROMAV2_SHA256}','dinov3Commit':'${DINOV3_COMMIT}','dinov3SourceSha256':'${DINOV3_SHA256}','pythonEnvironmentSha256':hashlib.sha256(Path('/opt/pipeline/python-environment.txt').read_bytes()).hexdigest()},open('/opt/pipeline/runtime-versions.json','w'))" \
-    && /opt/spirula/spirula train --help >/dev/null \
-    && node --version
+LABEL org.opencontainers.image.title="Guerrilla Worker" \
+    org.opencontainers.image.description="Independent Spirula and LichtFeld workflows with splat-transform exports"
 ENTRYPOINT ["node", "/opt/worker/worker.mjs"]
 CMD []
 
-# Source evidence is paired with the prebuilt engine artifact.
+# Engine source assets are verified and attached directly by the release job.
 FROM worker AS image-notice-evidence
 COPY scripts/image_notices.py /tmp/image_notices.py
 RUN mkdir -p /release-evidence \
@@ -120,7 +64,6 @@ RUN mkdir -p /release-evidence \
     && cp /opt/pipeline/python-environment.txt /opt/pipeline/runtime-versions.json /release-evidence/
 
 FROM scratch AS release-evidence
-COPY --from=lichtfeld-engine /release-evidence/ /
 COPY --from=image-notice-evidence /release-evidence/ /
 
 # Preserve the worker as the default target for ordinary docker builds.

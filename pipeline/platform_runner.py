@@ -455,15 +455,23 @@ def validate_request(request):
 def runtime_versions(backend):
     record = ROOT / 'runtime-versions.json'
     versions = json.loads(record.read_text()) if record.exists() else {}
+    if backend == 'spirula':
+        versions = {key: value for key, value in versions.items() if key.startswith('spirula')}
+    else:
+        versions = {key: value for key, value in versions.items() if not key.startswith('spirula')}
     versions['pipelineSha256'] = common.fingerprint(sorted(ROOT.glob('*.py')) + [scan_settings.SCHEMA_PATH])
     worker_bundle = Path(os.environ.get('WORKER_BUNDLE', '/opt/worker/worker.mjs'))
     if worker_bundle.is_file():
         versions['workerSha256'] = common.file_hash(worker_bundle)
-    studio = common.studio_path()
-    if not studio.is_file():
-        raise RuntimeError('LichtFeld converter is unavailable')
-    versions['lichtfeld'] = subprocess.check_output([str(studio), '--version'], text=True, stderr=subprocess.STDOUT).strip()
-    if os.name == 'nt':
+    versions['splatTransform'] = common.converter_version()
+    versions['splatTransformGpuBackend'] = common.converter_gpu_backend()
+    versions['splatTransformGpu'] = os.environ.get('SPLAT_TRANSFORM_GPU', 'auto')
+    if backend == 'lichtfeld':
+        studio = common.studio_path()
+        if not studio.is_file():
+            raise RuntimeError('LichtFeld executable is unavailable')
+        versions['lichtfeld'] = subprocess.check_output([str(studio), '--version'], text=True, stderr=subprocess.STDOUT).strip()
+    if os.name == 'nt' and backend == 'lichtfeld':
         versions['mode'] = 'native-development'
         for name, plugin in (('densificationPlugin', common.densification_plugin_path()),):
             sources = sorted(path for path in plugin.rglob('*.py') if '.venv' not in path.parts and '__pycache__' not in path.parts)
@@ -970,7 +978,7 @@ class Runner:
             folder.mkdir()
             with contextlib.redirect_stdout(sys.stderr):
                 self.progress_values = dict(substep='Creating SOG export', gaussians=expected)
-                common.export_sog(common.studio_path(), ply, folder / 'result.sog', folder / 'sog.log', self.cap, on_progress=self.report_log)
+                common.export_sog(ply, folder / 'result.sog', folder / 'sog.log', self.cap, on_progress=self.report_log)
             if gaussian_count(folder / 'result.sog', self.cap) != expected:
                 raise ValueError('SOG Gaussian count changed during conversion')
         exports = self.stage('export', export)

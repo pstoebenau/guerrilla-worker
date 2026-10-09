@@ -209,8 +209,8 @@ def run(args):
                 export = attempt("export")
                 export.mkdir()
                 ply = owned_path(output, state['ply'])
-                sog = common.export_sog(args.studio, ply, export / 'result.sog', export / 'export-sog.log', TRAINING['max_cap'])
-                spz = common.export_spz(args.studio, ply, export / "result.spz", export / "export-spz.log")
+                sog = common.export_sog(ply, export / 'result.sog', export / 'export-sog.log', TRAINING['max_cap'])
+                spz = common.export_spz(ply, export / "result.spz", export / "export-spz.log")
                 # Record the completed export before publishing the stable filename;
                 # a crash between these steps is recoverable with --resume.
                 complete("export", export, [sog, spz])

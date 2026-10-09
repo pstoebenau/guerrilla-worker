@@ -6,6 +6,7 @@ import { redactSecrets } from '@guerrilla/worker-protocol';
 // deliberately shipped beside the executable and uses installed engines.
 process.env.PIPELINE_ROOT ??= path.join(path.dirname(process.execPath), 'pipeline');
 process.env.WORKER_MODE = 'native-development';
+process.env.NODE_BIN ??= process.execPath;
 process.env.WORKER_CONTROL_URL ||= 'https://guerrilla.dad';
 const shutdown = new AbortController();
 const stopFile = process.env.WORKER_STOP_FILE;

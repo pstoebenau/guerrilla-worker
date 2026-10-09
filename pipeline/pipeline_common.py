@@ -1,5 +1,5 @@
 """Helpers shared by the desktop and Docker pipelines: runtime paths, hashing,
-selection manifests, logged subprocesses, LichtFeld training and SPZ export."""
+selection manifests, logged subprocesses, LichtFeld training and splat-transform exports."""
 from __future__ import annotations
 
 import hashlib
@@ -207,11 +207,44 @@ def train(studio, dataset, output, config, extra=(), on_tick=None, on_progress=N
     return ply
 
 
-def export_spz(studio, ply, spz, log, on_progress=None):
+def splat_transform_command():
+    """Resolve the standalone converter without involving a training engine."""
+    local = Path(__file__).resolve().parent / 'docker/converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs'
+    executable = os.environ.get('SPLAT_TRANSFORM_BIN')
+    if not executable:
+        executable = str(local) if local.is_file() else shutil.which('splat-transform')
+    if not executable:
+        raise RuntimeError('splat-transform is unavailable; run npm ci in pipeline/docker/converter or set SPLAT_TRANSFORM_BIN')
+    path = Path(executable)
+    # npm's Windows wrapper is a batch file; run its JS entry point directly.
+    if path.suffix.lower() == '.cmd':
+        path = path.parent / 'node_modules/@playcanvas/splat-transform/bin/cli.mjs'
+    if path.suffix.lower() in ('.js', '.mjs', '.cjs'):
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        node = os.environ.get('NODE_BIN') or shutil.which('node')
+        if not node:
+            raise RuntimeError('Node.js 22+ is required for splat-transform')
+        return [node, str(path)]
+    return [executable]
+
+
+def converter_version():
+    return subprocess.check_output([*splat_transform_command(), '--version'], text=True,
+                                   stderr=subprocess.STDOUT, timeout=30).strip()
+
+
+def converter_gpu_backend():
+    return os.environ.get('SPLAT_TRANSFORM_GPU_BACKEND', 'd3d12' if os.name == 'nt' else 'vulkan')
+
+
+def export_spz(ply, spz, log, on_progress=None):
     """Convert `ply` to `spz` (new file) and copy the PPISP sidecar beside it when present."""
     if spz.exists():
         raise FileExistsError(f"Refusing to replace {spz}")
-    run_logged([studio, "convert", ply, spz], log, **({"on_progress": on_progress} if on_progress else {}))
+    # Our validator supports gzip SPZ v1-v3; v4 uses a different container.
+    run_logged([*splat_transform_command(), '--spz-version', '3', ply, spz], log,
+               **({"on_progress": on_progress} if on_progress else {}))
     if not spz.is_file() or spz.stat().st_size < 100:
         raise RuntimeError("SPZ export is missing or empty")
     sidecar = Path(ply).with_suffix(".ppisp")
@@ -220,12 +253,16 @@ def export_spz(studio, ply, spz, log, on_progress=None):
     return spz
 
 
-def export_sog(studio, ply, sog, log, max_cap, on_progress=None):
+def export_sog(ply, sog, log, max_cap, on_progress=None):
     """Export the default SOG and verify its embedded Gaussian count."""
     from scan_transfer import gaussian_count
     expected = gaussian_count(ply, max_cap)
     if not sog.exists():
-        run_logged([studio, 'convert', ply, sog], log, **({'on_progress': on_progress} if on_progress else {}))
+        flags = ['--gpu-backend', converter_gpu_backend()]
+        if gpu := os.environ.get('SPLAT_TRANSFORM_GPU'):
+            flags += ['--gpu', gpu]
+        run_logged([*splat_transform_command(), *flags, ply, sog], log,
+                   **({'on_progress': on_progress} if on_progress else {}))
     count = gaussian_count(sog, max_cap)
     if count != expected:
         raise ValueError(f'SOG export count changed: {expected} -> {count}')

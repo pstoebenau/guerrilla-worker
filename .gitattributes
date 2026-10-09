@@ -1,0 +1,2 @@
+# License manifest hashes must survive Windows checkouts unchanged.
+legal/*.txt text eol=lf

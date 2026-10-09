@@ -57,7 +57,7 @@ class PlatformTests(unittest.TestCase):
                 (folder / 'final/splat.ply').write_bytes(b'large model')
                 (folder / 'training.log').write_text('trained')
             runner.spirula = lambda: runner.stage('training', train) / 'final/splat.ply'
-            def export(_studio, _ply, target, *_args, **_kwargs):
+            def export(_ply, target, *_args, **_kwargs):
                 target.write_bytes(b'compressed model')
             with patch.object(platform.common, 'export_sog', side_effect=export), \
                     patch.object(platform.common, 'export_spz') as spz_export:

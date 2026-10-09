@@ -1,0 +1,8 @@
+{
+  "name": "guerrilla-splat-converter",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@playcanvas/splat-transform": "3.10.1"
+  }
+}

@@ -28,7 +28,8 @@ internal sealed class WorkerProcess(Profile profile, string? entrypoint = null)
         var inherited = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
             "PATH", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA",
             "PROGRAMFILES", "PROGRAMFILES(X86)", "CUDA_PATH", "CUDA_HOME", "VK_ICD_FILENAMES", "TORCH_HOME", "GPU_LOCK_PATH",
-            "WORKER_AGENT_LOCK_DIRECTORY", "PYTHONPATH", "NVIDIA_DRIVER_CAPABILITIES"
+            "WORKER_AGENT_LOCK_DIRECTORY", "PYTHONPATH", "NVIDIA_DRIVER_CAPABILITIES",
+            "SPLAT_TRANSFORM_BIN", "SPLAT_TRANSFORM_GPU", "SPLAT_TRANSFORM_GPU_BACKEND", "NODE_BIN"
         };
         foreach (var key in start.Environment.Keys.ToArray()) if (!inherited.Contains(key)) start.Environment.Remove(key);
         foreach (var (key, value) in profile.Settings) start.Environment[key] = value;

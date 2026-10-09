@@ -164,11 +164,11 @@ def main():
             state["completed"].append("train")
             common.save_json(manifest_path, state)
         if "export" not in state["completed"]:
-            sog = common.export_sog(args.studio, state['ply'], args.output / 'result.sog',
+            sog = common.export_sog(state['ply'], args.output / 'result.sog',
                                     args.output / 'export-sog.log', args.max_cap)
             spz = args.output / 'result.spz'
             if not spz.exists():
-                common.export_spz(args.studio, state["ply"], spz, args.output / "export-spz.log")
+                common.export_spz(state["ply"], spz, args.output / "export-spz.log")
             if not spz.is_file() or spz.stat().st_size < 100:
                 raise ValueError('SPZ export is missing or empty')
             from scan_transfer import gaussian_count

@@ -27,6 +27,15 @@ pipeline; the LichtFeld COLMAP plugin is not required. Set
 `LICHTFELD_BIN`, `LICHTFELD_DENSIFICATION_PLUGIN`, or
 `SPIRULA_BIN` when overriding normal install locations.
 
+Exports use the independent PlayCanvas `splat-transform` CLI, never the training
+engine. Install Node.js 22+ and run `npm ci --prefix pipeline/docker/converter`
+for the locked converter, or install `@playcanvas/splat-transform@3.10.1` globally.
+`SPLAT_TRANSFORM_BIN` can select its executable or `bin/cli.mjs` entry point.
+Spirula scans require Spirula and this converter; LichtFeld is only required for
+the LichtFeld workflow. SOG compression uses Vulkan on Linux and D3D12 on Windows. Set
+`SPLAT_TRANSFORM_GPU=cpu` explicitly for CPU compression or a GPU adapter index;
+`SPLAT_TRANSFORM_GPU_BACKEND` selects another WebGPU backend.
+
 ```sh
 python pipeline/run_scan.py video.mp4 --output output --max-cap 100000
 python pipeline/run_scan.py video.mp4 --output output --max-cap 100000 --resume
@@ -79,11 +88,13 @@ bun test
 bun run build
 python -m unittest discover -s pipeline/tests
 docker build --target test -t guerrilla-worker:test .
-docker build --target worker -t guerrilla-worker:local .
+# Build/download the checksummed engine artifact and runtime first; see below.
+docker build --target worker --build-arg WORKER_RUNTIME_IMAGE=guerrilla-runtime:local -t guerrilla-worker:local .
 ```
 
 Set `PYTHONPATH=pipeline` for Python tests. Docker builds use only this checkout
-and public dependencies. Final image is a local review candidate, not approved
+and public dependencies. See [Linux build separation](docs/release-process.md#reusable-linux-runtime-and-worker-builds)
+for prebuilt artifacts and single-engine targets. Final image is a local review candidate, not approved
 for redistribution; see [dependency review](docs/dependency-review.md).
 After enrollment, mount the credential file read-only, mount scratch and the
 shared host GPU-lock directory at `/gpu`, pass

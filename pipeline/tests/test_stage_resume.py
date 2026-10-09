@@ -93,7 +93,7 @@ class StageResumeTests(unittest.TestCase):
                         (folder / 'final').mkdir(parents=True)
                         (folder / 'final/splat_100.ply').write_bytes(b'model' * 30)
                     runner.train_lichtfeld = train
-                    def export(_studio, _ply, target, *_args, **_kwargs):
+                    def export(_ply, target, *_args, **_kwargs):
                         target.write_bytes(b'export')
                     with patch.object(platform.common, 'densify', side_effect=densify), \
                             patch.object(platform.common, 'export_sog', side_effect=export):

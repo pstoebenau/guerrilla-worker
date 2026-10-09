@@ -40,8 +40,8 @@ def main():
             raise ValueError('Dense initialization settings/content differ; use a fresh dataset')
     ply = common.train(args.studio, dataset, output, dict(TRAINING, max_cap=args.max_cap, mask_mode=args.mask_mode),
                        extra=['--mask-mode', args.mask_mode])
-    sog = common.export_sog(args.studio, ply, output / 'result.sog', output / 'export-sog.log', args.max_cap)
-    common.export_spz(args.studio, ply, output / 'result.spz', output / 'export-spz.log')
+    sog = common.export_sog(ply, output / 'result.sog', output / 'export-sog.log', args.max_cap)
+    common.export_spz(ply, output / 'result.spz', output / 'export-spz.log')
     common.remove_training_plys(output)
     print(sog)
 

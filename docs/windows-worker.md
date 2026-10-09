@@ -10,6 +10,11 @@ PowerShell, Bun, Node or .NET installation is required.
 1. Review detected Python, Spirula, LichtFeld and densification paths. Browse to your
    existing installations if needed. Python must have the pipeline dependencies;
    FFmpeg and `nvidia-smi` must be on PATH. Exactly one NVIDIA GPU must be visible.
+   Exports also require `@playcanvas/splat-transform@3.10.1`: install it with
+   `npm install -g @playcanvas/splat-transform@3.10.1` using Node.js 22+.
+   Alternatively, set `SPLAT_TRANSFORM_BIN` to its `bin/cli.mjs` and `NODE_BIN`
+   to a Node executable before starting the tray app. Spirula does not require
+   LichtFeld for exports.
 2. The server defaults to `https://guerrilla.dad`; change it before enrolling if
    using your own Guerrilla server. Click **Check dependencies**.
 3. Open the server, create an enrollment token on its Workers page, and paste it

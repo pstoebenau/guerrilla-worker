@@ -49,7 +49,7 @@ def main():
     with gzip.GzipFile(fileobj=sys.stdout.buffer, mode='wb', mtime=0) as zipped, \
             tarfile.open(fileobj=zipped, mode='w|') as archive:
         for root in map(Path, ['/usr/share/doc', '/opt/lichtfeld', '/opt/spirula',
-                               '/opt/plugins', '/usr/local/cuda']):
+                               '/opt/plugins', '/opt/converter/node_modules', '/usr/local/cuda']):
             if not root.exists():
                 problems.append({'path': str(root), 'reason': 'Notice root absent'})
                 continue

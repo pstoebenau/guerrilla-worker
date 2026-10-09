@@ -109,6 +109,9 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.12'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.22.0'
       - name: Verify source and CPU pipeline
         run: |
           bun install --frozen-lockfile
@@ -117,6 +120,8 @@ jobs:
           bun run build
           python -m unittest discover -s tests -p 'test_*.py'
           docker build --target test -t worker-cpu-test .
+          npm ci --prefix pipeline/docker/converter
+          PYTHONPATH=pipeline python -m unittest discover -s pipeline/tests -p 'test_converter.py'
       - name: Report disk usage
         if: always()
         run: |
@@ -125,32 +130,28 @@ jobs:
           docker system df
 
   engine:
-    name: Reuse or build LichtFeld engine
+    name: Reuse or build checksummed LichtFeld artifact
     needs: linux-checks
     if: github.repository == 'pstoebenau/guerrilla-worker' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
-      contents: read
-      packages: write
+      contents: write
     outputs:
-      image: ${{ steps.engine.outputs.image }}
+      release_tag: ${{ steps.resolved.outputs.release_tag }}
+      sha256: ${{ steps.resolved.outputs.sha256 }}
+      checksums_sha256: ${{ steps.resolved.outputs.checksums_sha256 }}
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Log in to registry
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-      - name: Identify engine recipe and check published artifact
+      - name: Identify engine recipe and check published archive
         id: recipe
         run: |
-          recipe=$(sha256sum Dockerfile.engine scripts/build_source_bundle.py scripts/check_cpu_baseline.py patches/lichtfeld-cpu-baseline.patch | sha256sum | cut -d ' ' -f 1)
-          tag="ghcr.io/pstoebenau/guerrilla-lichtfeld:recipe-$recipe"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          if docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' > "$RUNNER_TEMP/engine-manifest.json"; then
-            echo 'exists=true' >> "$GITHUB_OUTPUT"
-          fi
+          recipe=$(sha256sum Dockerfile.engine scripts/build_source_bundle.py scripts/package_engine_artifact.py scripts/check_cpu_baseline.py patches/lichtfeld-cpu-baseline.patch | sha256sum | cut -d ' ' -f 1)
+          echo "recipe=$recipe" >> "$GITHUB_OUTPUT"
+          python3 scripts/engine_release.py resolve --recipe "$recipe" --destination "$RUNNER_TEMP/engine-resolved"
       - name: Make room for engine compilation
         if: steps.recipe.outputs.exists != 'true'
         run: |
@@ -160,23 +161,24 @@ jobs:
           sudo apt-get clean
           docker system prune --all --force
           df -h /
-      - name: Build engine and matching dependency source evidence once
+      - name: Export executable archive and matching source evidence
         if: steps.recipe.outputs.exists != 'true'
         env:
-          ENGINE_TAG: ${{ steps.recipe.outputs.tag }}
+          ENGINE_RECIPE: ${{ steps.recipe.outputs.recipe }}
         run: |
           docker buildx create --name engine-builder --driver docker-container --use
           docker buildx build --file Dockerfile.engine --target engine-artifact \
-            --platform linux/amd64 --progress=plain --provenance=mode=max --sbom=true \
-            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
-            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
-            --tag "$ENGINE_TAG" --push .
-          docker buildx imagetools inspect "$ENGINE_TAG" --format '{{json .Manifest}}' > "$RUNNER_TEMP/engine-manifest.json"
-      - name: Pin engine by immutable digest
-        id: engine
-        run: |
-          digest=$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' "$RUNNER_TEMP/engine-manifest.json")
-          echo "image=ghcr.io/pstoebenau/guerrilla-lichtfeld@$digest" >> "$GITHUB_OUTPUT"
+            --build-arg "ENGINE_RECIPE=$ENGINE_RECIPE" --platform linux/amd64 --progress=plain \
+            --output "type=local,dest=$RUNNER_TEMP/engine-artifact" .
+          python3 scripts/package_engine_artifact.py verify "$RUNNER_TEMP/engine-artifact"
+          python3 scripts/engine_release.py publish --recipe "$ENGINE_RECIPE" \
+            --directory "$RUNNER_TEMP/engine-artifact" --commit "$GITHUB_SHA" \
+            --destination "$RUNNER_TEMP/engine-resolved"
+      - name: Resolve published artifact identity
+        id: resolved
+        env:
+          ENGINE_RECIPE: ${{ steps.recipe.outputs.recipe }}
+        run: python3 scripts/engine_release.py resolve --recipe "$ENGINE_RECIPE" --destination "$RUNNER_TEMP/engine-resolved"
       - name: Report engine disk usage
         if: always()
         run: |
@@ -184,22 +186,98 @@ jobs:
           df -i /
           docker system df
           docker buildx du --builder engine-builder || true
+
+  runtime:
+    name: Reuse or assemble Linux engine runtimes
+    needs: [linux-checks, engine]
+    if: github.repository == 'pstoebenau/guerrilla-worker' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.runtime.outputs.image }}
+    env:
+      ENGINE_RELEASE_TAG: ${{ needs.engine.outputs.release_tag }}
+      LICHTFELD_SHA256: ${{ needs.engine.outputs.sha256 }}
+      ENGINE_CHECKSUMS_SHA256: ${{ needs.engine.outputs.checksums_sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Log in to registry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Identify runtime recipe and check published artifact
+        id: recipe
+        run: |
+          recipe=$({ sha256sum Dockerfile.runtime pipeline/docker/requirements.txt pipeline/docker/worker-requirements.txt pipeline/docker/converter/package.json pipeline/docker/converter/package-lock.json; printf '%s\n' "$LICHTFELD_SHA256"; } | sha256sum | cut -d ' ' -f 1)
+          tag="ghcr.io/pstoebenau/guerrilla-worker-runtime:recipe-$recipe"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' > "$RUNNER_TEMP/runtime-manifest.json"; then
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Make room for runtime dependencies
+        if: steps.recipe.outputs.exists != 'true'
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /usr/local/share/boost /usr/local/share/powershell \
+            /usr/share/swift /usr/local/lib/julia /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          docker system prune --all --force
+          df -h /
+      - name: Assemble runtime once with independent engine caches
+        if: steps.recipe.outputs.exists != 'true'
+        env:
+          RUNTIME_TAG: ${{ steps.recipe.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$ENGINE_RELEASE_TAG" --dir "$RUNNER_TEMP/engine-artifact" \
+            --pattern lichtfeld-linux-amd64.tar.gz --pattern SHA256SUMS.txt
+          python3 scripts/package_engine_artifact.py verify "$RUNNER_TEMP/engine-artifact" \
+            --checksums-sha256 "$ENGINE_CHECKSUMS_SHA256" --asset lichtfeld-linux-amd64.tar.gz
+          docker buildx create --name runtime-builder --driver docker-container --use
+          docker buildx build --file Dockerfile.runtime --target combined-runtime \
+            --build-context "lichtfeld-artifact=$RUNNER_TEMP/engine-artifact" \
+            --build-arg "LICHTFELD_SHA256=$LICHTFELD_SHA256" --platform linux/amd64 \
+            --progress=plain --provenance=mode=max --sbom=true \
+            --cache-from type=registry,ref=ghcr.io/pstoebenau/guerrilla-worker-runtime:buildcache \
+            --cache-to type=registry,ref=ghcr.io/pstoebenau/guerrilla-worker-runtime:buildcache,mode=max \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --tag "$RUNTIME_TAG" --push .
+          docker buildx imagetools inspect "$RUNTIME_TAG" --format '{{json .Manifest}}' > "$RUNNER_TEMP/runtime-manifest.json"
+      - name: Pin runtime by immutable digest
+        id: runtime
+        run: |
+          digest=$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' "$RUNNER_TEMP/runtime-manifest.json")
+          echo "image=ghcr.io/pstoebenau/guerrilla-worker-runtime@$digest" >> "$GITHUB_OUTPUT"
+      - name: Report runtime disk usage
+        if: always()
+        run: |
+          df -h /
+          docker system df
+          docker buildx du --builder runtime-builder || true
       - name: Logout registry
         if: always()
         run: docker logout ghcr.io
 
   linux:
     name: Linux image
-    needs: [linux-checks, engine]
+    needs: [linux-checks, engine, runtime]
     env:
-      LICHTFELD_IMAGE: ${{ needs.engine.outputs.image }}
+      ENGINE_RELEASE_TAG: ${{ needs.engine.outputs.release_tag }}
+      LICHTFELD_SHA256: ${{ needs.engine.outputs.sha256 }}
+      ENGINE_CHECKSUMS_SHA256: ${{ needs.engine.outputs.checksums_sha256 }}
+      WORKER_RUNTIME_IMAGE: ${{ needs.runtime.outputs.image }}
     if: github.repository == 'pstoebenau/guerrilla-worker' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
       packages: write
     steps:
-      - name: Make room for CUDA and engine build dependencies
+      - name: Make room for prebuilt runtime layers
         run: |
           df -h / /mnt
           # This disposable hosted runner builds CUDA inside Docker. Keep the
@@ -251,7 +329,29 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           python scripts/release.py "$RUNNER_TEMP/worker-release"
-          printf '%s\n' "$LICHTFELD_IMAGE" > "$RUNNER_TEMP/worker-release/engine-image.txt"
+          printf '%s\n' "$WORKER_RUNTIME_IMAGE" > "$RUNNER_TEMP/worker-release/runtime-image.txt"
+          gh release download "$ENGINE_RELEASE_TAG" --dir "$RUNNER_TEMP/engine-evidence" \
+            --pattern SHA256SUMS.txt --pattern engine-artifact.json \
+            --pattern '*inventory.json' --pattern '*.part*'
+          python - <<'PY'
+          import json, os, pathlib, shutil, sys
+          sys.path.insert(0, 'scripts')
+          from package_engine_artifact import ARCHIVE, CHECKSUMS, verify
+          source = pathlib.Path(os.environ['RUNNER_TEMP']) / 'engine-evidence'
+          records = verify(source, os.environ['ENGINE_CHECKSUMS_SHA256'],
+                           [p.name for p in source.iterdir() if p.name != CHECKSUMS])
+          if set(records) - {ARCHIVE} != {p.name for p in source.iterdir() if p.name != CHECKSUMS}:
+              raise ValueError('Matching engine source evidence is incomplete')
+          destination = pathlib.Path(os.environ['RUNNER_TEMP']) / 'worker-release'
+          for path in source.iterdir():
+              name = 'engine-SHA256SUMS.txt' if path.name == CHECKSUMS else path.name
+              shutil.copyfile(path, destination / name)
+          identity = {'releaseTag': os.environ['ENGINE_RELEASE_TAG'],
+                      'releaseUrl': 'https://github.com/' + os.environ['GITHUB_REPOSITORY'] + '/releases/tag/' + os.environ['ENGINE_RELEASE_TAG'],
+                      'sha256': os.environ['LICHTFELD_SHA256'],
+                      'checksumsSha256': os.environ['ENGINE_CHECKSUMS_SHA256']}
+          (destination / 'engine-artifact-reference.json').write_text(json.dumps(identity, indent=2) + '\n')
+          PY
           python scripts/source_bundle.py "$RUNNER_TEMP/worker-release"
           cd packages/protocol
           bun pm pack --destination "$RUNNER_TEMP/worker-release"
@@ -271,7 +371,7 @@ jobs:
           du -sh "$RUNNER_TEMP/worker-release"
       - name: Build and export release evidence
         if: steps.existing.outputs.published != 'true'
-        run: docker buildx build --progress=plain --target release-evidence --build-arg "LICHTFELD_IMAGE=$LICHTFELD_IMAGE" --build-arg REQUIRE_RELEASE_LICENSE=1 --platform linux/amd64 --output "type=local,dest=$RUNNER_TEMP/worker-release" .
+        run: docker buildx build --progress=plain --target release-evidence --build-arg "WORKER_RUNTIME_IMAGE=$WORKER_RUNTIME_IMAGE" --build-arg REQUIRE_RELEASE_LICENSE=1 --platform linux/amd64 --cache-from type=registry,ref=ghcr.io/pstoebenau/guerrilla-worker:buildcache --output "type=local,dest=$RUNNER_TEMP/worker-release" .
       - name: Report disk usage after evidence build
         if: always() && steps.existing.outputs.published != 'true'
         run: |
@@ -283,7 +383,7 @@ jobs:
       # Reuse the worker layers used to inventory this release.
       - name: Publish reviewed image with SBOM and provenance
         if: steps.existing.outputs.published != 'true'
-        run: docker buildx build --progress=plain --target worker --build-arg "LICHTFELD_IMAGE=$LICHTFELD_IMAGE" --build-arg REQUIRE_RELEASE_LICENSE=1 --platform linux/amd64 --provenance=mode=max --sbom=true --label "org.opencontainers.image.revision=$GITHUB_SHA" --label "org.opencontainers.image.version=$VERSION" --metadata-file "$RUNNER_TEMP/worker-release/build-metadata.json" --tag "ghcr.io/pstoebenau/guerrilla-worker:linux-$VERSION" --push .
+        run: docker buildx build --progress=plain --target worker --build-arg "WORKER_RUNTIME_IMAGE=$WORKER_RUNTIME_IMAGE" --build-arg REQUIRE_RELEASE_LICENSE=1 --platform linux/amd64 --cache-from type=registry,ref=ghcr.io/pstoebenau/guerrilla-worker:buildcache --cache-to type=registry,ref=ghcr.io/pstoebenau/guerrilla-worker:buildcache,mode=max --provenance=mode=max --sbom=true --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" --label "org.opencontainers.image.revision=$GITHUB_SHA" --label "org.opencontainers.image.version=$VERSION" --metadata-file "$RUNNER_TEMP/worker-release/build-metadata.json" --tag "ghcr.io/pstoebenau/guerrilla-worker:$VERSION" --push .
       - name: Publish source and compatibility evidence
         if: steps.existing.outputs.published != 'true'
         env:
@@ -292,7 +392,7 @@ jobs:
           cat > "$RUNNER_TEMP/linux-release-notes.md" <<EOF
           Linux amd64 worker image built from $GITHUB_SHA.
 
-          Image: ghcr.io/pstoebenau/guerrilla-worker:linux-$VERSION
+          Image: ghcr.io/pstoebenau/guerrilla-worker:$VERSION
 
           Source and CPU checks passed. CI does not claim GPU scan acceptance.
           Worker/protocol archives, pinned upstream source snapshots (including

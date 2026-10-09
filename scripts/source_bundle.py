@@ -22,6 +22,7 @@ INPUTS = {
     'vcpkg': ('microsoft/vcpkg', '58845ed63eb19aff55e896ea1f5d51f2a0df5b66', 'VCPKG_COMMIT'),
     'dinov3': ('facebookresearch/dinov3', 'adc254450203739c8149213a7a69d8d905b4fcfa', 'DINOV3_COMMIT'),
     'romav2': ('Parskatt/RoMaV2', 'ac25bcede24b11975013a4c085baf8c79559cf47', None),
+    'splat-transform': ('playcanvas/splat-transform', '45931669547a7c70cbc44d2657749f8a56e5533c', None),
 }
 
 
@@ -111,12 +112,16 @@ def main():
     if destination == ROOT or ROOT in destination.parents:
         raise ValueError('Keep generated upstream archives outside the worker checkout')
     destination.mkdir(parents=True, exist_ok=True)
-    dockerfile = (ROOT / 'Dockerfile').read_text(encoding='utf-8') + '\n' + (ROOT / 'Dockerfile.engine').read_text(encoding='utf-8')
+    dockerfile = '\n'.join((ROOT / name).read_text(encoding='utf-8')
+                           for name in ('Dockerfile', 'Dockerfile.engine', 'Dockerfile.runtime'))
     for _, commit, variable in INPUTS.values():
         if variable and not re.search(r'^ARG ' + variable + '=' + commit + r'$', dockerfile, re.M):
             raise ValueError(f'Update reviewed source pin to match Docker recipes: {variable}')
     if 'ARG SPIRULA_VERSION=2026.9.30\n' not in dockerfile:
         raise ValueError('Update Spirula source pin for the new binary release')
+    converter = json.loads((ROOT / 'pipeline/docker/converter/package.json').read_text())
+    if converter['dependencies']['@playcanvas/splat-transform'] != '3.10.1':
+        raise ValueError('Update splat-transform source pin for the new converter release')
     # Verify tag-to-commit evidence each time; do not silently follow a moved tag.
     for repository, tag, commit in [('harry7557558/spirula-studio', 'v2026.9.30', INPUTS['spirula'][1]),
                                      ('Parskatt/RoMaV2', 'weights', INPUTS['romav2'][1])]:

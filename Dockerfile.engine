@@ -62,7 +62,11 @@ RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_PORTABLE=ON 
     && test -x /opt/lichtfeld/bin/run_lichtfeld.sh \
     && test -s /opt/lichtfeld/bin/LichtFeld-Studio
 
-# Only the installed engine and its matching source evidence leave this runner.
+# Export files directly; this build never publishes a LichtFeld registry image.
+ARG ENGINE_RECIPE
+COPY scripts/package_engine_artifact.py /tmp/package_engine_artifact.py
+RUN python3 /tmp/package_engine_artifact.py package --engine /opt/lichtfeld \
+    --source /src/lichtfeld --destination /release-evidence --recipe ${ENGINE_RECIPE}
+
 FROM scratch AS engine-artifact
-COPY --from=lichtfeld-build /opt/lichtfeld/ /opt/lichtfeld/
-COPY --from=lichtfeld-build /release-evidence/ /release-evidence/
+COPY --from=lichtfeld-build /release-evidence/ /

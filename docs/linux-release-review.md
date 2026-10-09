@@ -27,7 +27,10 @@ vcpkg source downloads, ports/patches, modified triplets, installed package
 metadata, CMake dependency source trees and CMakeCache.txt. Dependency build
 trees are cleaned after each port; the retained downloads and port patches
 provide their source inputs. The engine artifact packages this evidence from
-the same build as its installed binaries; engine-image.txt records its digest. Concatenate the parts
+the same build as its installed binaries. `engine-artifact-reference.json`
+records the release URL and checksums. The artifact also includes the patched
+LichtFeld checkout, with its submodule sources, in `lichtfeld-source.tar.gz.part*`.
+Concatenate each set of parts
 in filename order and extract; build-source-inventory.json records hashes and
 original paths. This preserves the build's selected dependencies instead of
 substituting current upstream main branches.

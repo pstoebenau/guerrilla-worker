@@ -9,6 +9,9 @@ versions, source links, obligations and unresolved redistribution blockers.
 
 LichtFeld Studio: GNU GPL version 3 license text at pinned source.
 Spirula Studio: GNU GPL version 3 license text at pinned release.
+PlayCanvas splat-transform 3.10.1: MIT; see legal/SplatTransform-LICENSE.txt.
+Converter dependencies are pinned by pipeline/docker/converter/package-lock.json;
+their installed notices are included in the Linux binary-notices archive.
 LichtFeld densification plugin: GNU GPL version 3 license text at pinned source.
 Vendored RoMaV2: MIT, Copyright (c) 2025 Johan Edstedt.
 DINOv3: Meta DINOv3 License, updated August 19, 2025; separate restricted terms.

@@ -26,9 +26,11 @@ internal static class SelfTest
             try { profile.Save(values, false, false); throw new Exception("Enrolled server changed"); } catch (InvalidOperationException) { }
             Environment.SetEnvironmentVariable("WORKER_ENROLLMENT_TOKEN", "test-only");
             Environment.SetEnvironmentVariable("AWS_SECRET_ACCESS_KEY", "test-only");
+            Environment.SetEnvironmentVariable("SPLAT_TRANSFORM_BIN", Path.Combine(directory, "converter.mjs"));
             var start = new WorkerProcess(profile).CreateStartInfo("enroll", "--token-stdin");
             if (start.Environment.ContainsKey("WORKER_ENROLLMENT_TOKEN") || start.Environment.ContainsKey("AWS_SECRET_ACCESS_KEY")) throw new Exception("Secret environment leaked");
             if (start.Environment["WORKER_MODE"] != "native-development") throw new Exception("Native worker mode missing");
+            if (start.Environment["SPLAT_TRANSFORM_BIN"] != Path.Combine(directory, "converter.mjs")) throw new Exception("Converter path not inherited");
             if (!start.RedirectStandardInput || !start.CreateNoWindow || !start.ArgumentList.Contains("--token-stdin")) throw new Exception("Unsafe enrollment launch");
             File.Delete(profile.Credentials);
             var stub = Path.Combine(directory, "agent-stub.mjs");
