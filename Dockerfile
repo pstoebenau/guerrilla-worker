@@ -1,45 +1,7 @@
 # syntax=docker/dockerfile:1
 ARG CUDA_VERSION=12.8.1
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS lichtfeld-build
-ARG LICHTFELD_COMMIT=d8c50c6a3e2273cb74130a6e9023de8d068af52d
-ARG VCPKG_COMMIT=58845ed63eb19aff55e896ea1f5d51f2a0df5b66
-ARG BUILD_JOBS=4
-ENV DEBIAN_FRONTEND=noninteractive VCPKG_ROOT=/opt/vcpkg \
-    CC=gcc-14 CXX=g++-14 VCPKG_FORCE_SYSTEM_BINARIES=1 \
-    VCPKG_MAX_CONCURRENCY=${BUILD_JOBS} VCPKG_BINARY_SOURCES=clear
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates git curl unzip zip tar pkg-config python3 python3-dev python3-venv \
-    gcc-14 g++-14 ccache ninja-build nasm autoconf autoconf-archive automake libtool \
-    libxinerama-dev libxcursor-dev xorg-dev libglu1-mesa-dev libwayland-dev \
-    libxkbcommon-dev libegl-dev libdecor-0-dev libibus-1.0-dev libdbus-1-dev \
-    libsystemd-dev libgtk-3-dev bison flex && rm -rf /var/lib/apt/lists/*
-RUN python3 -m venv /opt/build-tools && /opt/build-tools/bin/pip install --no-cache-dir cmake==3.31.6
-ENV PATH=/opt/build-tools/bin:${PATH}
-RUN git init /opt/vcpkg && git -C /opt/vcpkg remote add origin https://github.com/microsoft/vcpkg.git \
-    && git -C /opt/vcpkg fetch origin ${VCPKG_COMMIT} && git -C /opt/vcpkg checkout --detach FETCH_HEAD \
-    && /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics \
-    && printf '\nset(VCPKG_BUILD_TYPE release)\n' >> /opt/vcpkg/triplets/x64-linux.cmake
-RUN git init /src/lichtfeld && git -C /src/lichtfeld remote add origin https://github.com/MrNeRF/LichtFeld-Studio.git \
-    && git -C /src/lichtfeld fetch --depth 1 origin ${LICHTFELD_COMMIT} \
-    && git -C /src/lichtfeld checkout --detach FETCH_HEAD \
-    && git -C /src/lichtfeld submodule update --init --recursive --depth 1
-WORKDIR /src/lichtfeld
-# VideoLAN's archive endpoint can return an error/challenge page. Its GitHub
-# mirror serves identical bytes: keep the pinned port's filename and SHA-512
-# so vcpkg verifies and reuses this download without changing the dependency.
-RUN mkdir -p /opt/vcpkg/downloads \
-    && curl -fL --retry 3 \
-      https://codeload.github.com/mirror/x264/tar.gz/31e19f92f00c7003fa115047ce50978bc98c3a0d \
-      -o /opt/vcpkg/downloads/videolan-x264-31e19f92f00c7003fa115047ce50978bc98c3a0d.tar.gz \
-    && echo "707ff486677a1b5502d6d8faa588e7a03b0dee45491c5cba89341be4be23d3f2e48272c3b11d54cfc7be1b8bf4a3dfc3c3bb6d9643a6b5a2ed77539c85ecf294  /opt/vcpkg/downloads/videolan-x264-31e19f92f00c7003fa115047ce50978bc98c3a0d.tar.gz" | sha512sum -c -
-# BuildKit already caches this layer; avoid a second copy of every vcpkg
-# binary package. Keep downloads and extracted sources for release evidence.
-RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_PORTABLE=ON \
-      -DBUILD_TESTS=OFF -DBUILD_PYTHON_STUBS=OFF -DBUILD_CUDA_MIN_SM=75 \
-      -DCMAKE_MAKE_PROGRAM=/usr/bin/ninja -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
-      -DLFS_DEV_IMPORT_SOURCE_PYTHON=OFF -DLFS_DEV_IMPORT_SOURCE_RESOURCES=OFF \
-    && cmake --build build --parallel ${BUILD_JOBS} \
-    && cmake --install build --prefix /opt/lichtfeld
+ARG LICHTFELD_IMAGE=guerrilla-lichtfeld:local
+FROM ${LICHTFELD_IMAGE} AS lichtfeld-engine
 
 FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04 AS python-runtime
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
@@ -70,7 +32,7 @@ COPY pipeline/tests/ tests/
 RUN python -m unittest discover -s tests -v
 
 FROM python-runtime AS engine-runtime
-COPY --from=lichtfeld-build /opt/lichtfeld /opt/lichtfeld
+COPY --from=lichtfeld-engine /opt/lichtfeld /opt/lichtfeld
 ENV LICHTFELD_BIN=/opt/lichtfeld/bin/run_lichtfeld.sh
 # The NVIDIA driver is injected by `docker run --gpus`, not by `docker build`.
 RUN test -x /opt/lichtfeld/bin/run_lichtfeld.sh && test -s /opt/lichtfeld/bin/LichtFeld-Studio \
@@ -101,8 +63,6 @@ ARG ROMAV2_SHA256=3516ccdbbd8eb89d50dfc0bc4562ccdcc2c60b7908e1819d5aae0cbe1bf979
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl unzip git ffmpeg vulkan-tools mesa-vulkan-drivers libopengl0 libgfortran5 libgomp1 libglib2.0-0t64 \
     && rm -rf /var/lib/apt/lists/*
-# Portable upstream packaging omits this library needed by its Python module.
-COPY --from=lichtfeld-build /src/lichtfeld/build/Build/lib/libOpenMeshTools.so.11.0 /opt/lichtfeld/lib/
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
 RUN mkdir -p /opt/spirula && curl -fL --retry 3 \
       https://github.com/harry7557558/spirula-studio/releases/download/v${SPIRULA_VERSION}/spirula-${SPIRULA_VERSION}-ubuntu-vulkan-x86_64.zip \
@@ -151,16 +111,7 @@ RUN pip freeze --all > /opt/pipeline/python-environment.txt \
 ENTRYPOINT ["node", "/opt/worker/worker.mjs"]
 CMD []
 
-# Export release material from the exact build, before publishing its image.
-FROM lichtfeld-build AS build-source-evidence
-COPY scripts/build_source_bundle.py /tmp/build_source_bundle.py
-# A builder may have restored vcpkg binaries without extracting their source.
-# Resolve the same manifest into a fresh install root in download-only mode.
-RUN /opt/vcpkg/vcpkg install --only-downloads --triplet x64-linux \
-      --x-install-root=/tmp/source-inventory --downloads-root=/opt/vcpkg/downloads \
-      --binarysource=clear \
-    && python3 /tmp/build_source_bundle.py
-
+# Source evidence is paired with the prebuilt engine artifact.
 FROM worker AS image-notice-evidence
 COPY scripts/image_notices.py /tmp/image_notices.py
 RUN mkdir -p /release-evidence \
@@ -169,7 +120,7 @@ RUN mkdir -p /release-evidence \
     && cp /opt/pipeline/python-environment.txt /opt/pipeline/runtime-versions.json /release-evidence/
 
 FROM scratch AS release-evidence
-COPY --from=build-source-evidence /release-evidence/ /
+COPY --from=lichtfeld-engine /release-evidence/ /
 COPY --from=image-notice-evidence /release-evidence/ /
 
 # Preserve the worker as the default target for ordinary docker builds.

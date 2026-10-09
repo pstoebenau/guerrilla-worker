@@ -60,3 +60,40 @@ CI does not claim Linux GPU scan acceptance or blanket legal certification.
 The release gate checks concrete contents rather than requiring a human to
 certify every transitive package. Third-party licenses remain their own; source
 and notice access must be maintained for recipients of published images.
+
+
+## Reusable Linux engine artifact
+
+The Linux release workflow first resolves a LichtFeld engine artifact in
+`ghcr.io/pstoebenau/guerrilla-lichtfeld`. Its recipe tag is the SHA-256 of the
+checksums of `Dockerfile.engine` and `scripts/build_source_bundle.py`. Changes to
+worker code do not invalidate it. Changing either engine input builds a new
+artifact automatically, on a separate hosted runner before worker packaging.
+The tag is a lookup key; the worker receives the resolved `sha256` image digest,
+and records that reference in its release asset `engine-image.txt`.
+
+The artifact contains `/opt/lichtfeld` (including the OpenMesh library required
+by the Python module) and `/release-evidence`. The latter carries the dependency
+source archives, port patches and inventory from the same build. Worker releases
+still attach this evidence and collect pinned upstream source snapshots. Keep
+engine artifacts available in GHCR for repeat builds; deleting one causes its
+recipe to compile again. Concurrent first-time releases can compile the same
+recipe independently; each worker uses the digest resolved by its engine job.
+
+The engine build cleans vcpkg build trees and package staging after each port,
+while retaining downloads for source evidence. After installation it removes
+object files, packages the evidence, then deletes remaining build intermediates
+in the same Docker layer. The compiler and dependency build tree never enter
+the artifact. The first build still requires compilation and must be validated
+on the hosted runner; reuse does not guarantee the first build fits.
+
+For a local source build:
+
+```sh
+docker build -f Dockerfile.engine -t guerrilla-lichtfeld:local .
+docker build --target worker -t guerrilla-worker:local .
+```
+
+To consume a published engine instead, authenticate to GHCR as needed and pass
+`--build-arg LICHTFELD_IMAGE=ghcr.io/pstoebenau/guerrilla-lichtfeld@sha256:<digest>`
+to the worker build. The CPU-only `test` target does not require the engine.

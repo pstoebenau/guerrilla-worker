@@ -1,0 +1,55 @@
+# syntax=docker/dockerfile:1
+ARG CUDA_VERSION=12.8.1
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS lichtfeld-build
+ARG LICHTFELD_COMMIT=d8c50c6a3e2273cb74130a6e9023de8d068af52d
+ARG VCPKG_COMMIT=58845ed63eb19aff55e896ea1f5d51f2a0df5b66
+ARG BUILD_JOBS=2
+ENV DEBIAN_FRONTEND=noninteractive VCPKG_ROOT=/opt/vcpkg \
+    CC=gcc-14 CXX=g++-14 VCPKG_FORCE_SYSTEM_BINARIES=1 \
+    VCPKG_MAX_CONCURRENCY=${BUILD_JOBS} VCPKG_BINARY_SOURCES=clear
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates git curl unzip zip tar pkg-config python3 python3-dev python3-venv \
+    gcc-14 g++-14 ccache ninja-build nasm autoconf autoconf-archive automake libtool \
+    libxinerama-dev libxcursor-dev xorg-dev libglu1-mesa-dev libwayland-dev \
+    libxkbcommon-dev libegl-dev libdecor-0-dev libibus-1.0-dev libdbus-1-dev \
+    libsystemd-dev libgtk-3-dev bison flex && rm -rf /var/lib/apt/lists/*
+RUN python3 -m venv /opt/build-tools && /opt/build-tools/bin/pip install --no-cache-dir cmake==3.31.6
+ENV PATH=/opt/build-tools/bin:${PATH}
+RUN git init /opt/vcpkg && git -C /opt/vcpkg remote add origin https://github.com/microsoft/vcpkg.git \
+    && git -C /opt/vcpkg fetch origin ${VCPKG_COMMIT} && git -C /opt/vcpkg checkout --detach FETCH_HEAD \
+    && /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics \
+    && printf '\nset(VCPKG_BUILD_TYPE release)\n' >> /opt/vcpkg/triplets/x64-linux.cmake
+RUN git init /src/lichtfeld && git -C /src/lichtfeld remote add origin https://github.com/MrNeRF/LichtFeld-Studio.git \
+    && git -C /src/lichtfeld fetch --depth 1 origin ${LICHTFELD_COMMIT} \
+    && git -C /src/lichtfeld checkout --detach FETCH_HEAD \
+    && git -C /src/lichtfeld submodule update --init --recursive --depth 1
+WORKDIR /src/lichtfeld
+# VideoLAN's archive endpoint can return an error/challenge page. Its GitHub
+# mirror serves identical bytes: keep the pinned port's filename and SHA-512
+# so vcpkg verifies and reuses this download without changing the dependency.
+RUN mkdir -p /opt/vcpkg/downloads \
+    && curl -fL --retry 3 \
+      https://codeload.github.com/mirror/x264/tar.gz/31e19f92f00c7003fa115047ce50978bc98c3a0d \
+      -o /opt/vcpkg/downloads/videolan-x264-31e19f92f00c7003fa115047ce50978bc98c3a0d.tar.gz \
+    && echo "707ff486677a1b5502d6d8faa588e7a03b0dee45491c5cba89341be4be23d3f2e48272c3b11d54cfc7be1b8bf4a3dfc3c3bb6d9643a6b5a2ed77539c85ecf294  /opt/vcpkg/downloads/videolan-x264-31e19f92f00c7003fa115047ce50978bc98c3a0d.tar.gz" | sha512sum -c -
+# Remove each dependency build tree after installation, retaining source
+# archives and port patches for the matching release evidence.
+COPY scripts/build_source_bundle.py /tmp/build_source_bundle.py
+RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_PORTABLE=ON \
+      -DVCPKG_INSTALL_OPTIONS="--clean-buildtrees-after-build;--clean-packages-after-build" \
+      -DBUILD_TESTS=OFF -DBUILD_PYTHON_STUBS=OFF -DBUILD_CUDA_MIN_SM=75 \
+      -DCMAKE_MAKE_PROGRAM=/usr/bin/ninja -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+      -DLFS_DEV_IMPORT_SOURCE_PYTHON=OFF -DLFS_DEV_IMPORT_SOURCE_RESOURCES=OFF \
+    && cmake --build build --parallel ${BUILD_JOBS} \
+    && cmake --install build --prefix /opt/lichtfeld \
+    && cp build/Build/lib/libOpenMeshTools.so.11.0 /opt/lichtfeld/lib/ \
+    && find build -type f -name '*.o' -delete \
+    && python3 /tmp/build_source_bundle.py \
+    && rm -rf build /opt/vcpkg/buildtrees /opt/vcpkg/packages /opt/vcpkg/downloads \
+    && test -x /opt/lichtfeld/bin/run_lichtfeld.sh \
+    && test -s /opt/lichtfeld/bin/LichtFeld-Studio
+
+# Only the installed engine and its matching source evidence leave this runner.
+FROM scratch AS engine-artifact
+COPY --from=lichtfeld-build /opt/lichtfeld/ /opt/lichtfeld/
+COPY --from=lichtfeld-build /release-evidence/ /release-evidence/
