@@ -5,6 +5,7 @@ import { redactSecrets } from '@guerrilla/worker-protocol';
 // Compiled modules live in Bun's virtual filesystem. The Python pipeline is
 // deliberately shipped beside the executable and uses installed engines.
 process.env.PIPELINE_ROOT ??= path.join(path.dirname(process.execPath), 'pipeline');
+process.env.WORKER_MODE = 'native-development';
 process.env.WORKER_CONTROL_URL ||= 'https://guerrilla.dad';
 const shutdown = new AbortController();
 const stopFile = process.env.WORKER_STOP_FILE;

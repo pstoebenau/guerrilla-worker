@@ -8,6 +8,9 @@ import subprocess
 import sys
 import time
 
+# Studio's embedded Python omits the script directory from sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import pipeline_common as common
 import scan_settings
 from pipeline_defaults import TRAINING, EXPORT_FORMAT

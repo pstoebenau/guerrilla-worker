@@ -14,6 +14,9 @@ from pathlib import Path
 import sys
 import time
 
+# Studio's embedded Python omits the script directory from sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from pipeline_defaults import MAX_IMAGES, KEEP_PERCENT, SAMPLE_FPS, BLUR_RATIO, MAX_GLARE
 
 try:

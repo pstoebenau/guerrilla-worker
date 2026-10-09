@@ -24,12 +24,15 @@ import tarfile
 import time
 import uuid
 
+# Studio's embedded Python omits the script directory from sys.path.
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
 import pipeline_common as common
 import scan_settings
 from stage_progress import DESCRIPTIONS, parse_progress
 from scan_transfer import gaussian_count
 
-ROOT = Path(__file__).resolve().parent
 SPIRULA_VERSION = 'v2026.9.30'
 PROTOCOL_STREAM = sys.stdout
 

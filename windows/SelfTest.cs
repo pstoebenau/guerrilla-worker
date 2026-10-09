@@ -28,6 +28,7 @@ internal static class SelfTest
             Environment.SetEnvironmentVariable("AWS_SECRET_ACCESS_KEY", "test-only");
             var start = new WorkerProcess(profile).CreateStartInfo("enroll", "--token-stdin");
             if (start.Environment.ContainsKey("WORKER_ENROLLMENT_TOKEN") || start.Environment.ContainsKey("AWS_SECRET_ACCESS_KEY")) throw new Exception("Secret environment leaked");
+            if (start.Environment["WORKER_MODE"] != "native-development") throw new Exception("Native worker mode missing");
             if (!start.RedirectStandardInput || !start.CreateNoWindow || !start.ArgumentList.Contains("--token-stdin")) throw new Exception("Unsafe enrollment launch");
             File.Delete(profile.Credentials);
             var stub = Path.Combine(directory, "agent-stub.mjs");

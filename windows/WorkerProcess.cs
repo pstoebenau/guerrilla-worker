@@ -33,6 +33,7 @@ internal sealed class WorkerProcess(Profile profile, string? entrypoint = null)
         foreach (var key in start.Environment.Keys.ToArray()) if (!inherited.Contains(key)) start.Environment.Remove(key);
         foreach (var (key, value) in profile.Settings) start.Environment[key] = value;
         start.Environment["PIPELINE_ROOT"] = Path.Combine(root, "pipeline");
+        start.Environment["WORKER_MODE"] = "native-development";
         start.Environment["WORKER_CREDENTIAL_FILE"] = profile.Credentials;
         start.Environment["WORKER_SCRATCH"] = Path.Combine(profile.DirectoryPath, "scratch");
         start.Environment["WORKER_STOP_FILE"] = profile.StopFile;
