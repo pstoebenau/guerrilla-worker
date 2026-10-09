@@ -18,12 +18,19 @@ ENV PATH=/opt/build-tools/bin:${PATH}
 RUN git init /opt/vcpkg && git -C /opt/vcpkg remote add origin https://github.com/microsoft/vcpkg.git \
     && git -C /opt/vcpkg fetch origin ${VCPKG_COMMIT} && git -C /opt/vcpkg checkout --detach FETCH_HEAD \
     && /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics \
-    && printf '\nset(VCPKG_BUILD_TYPE release)\n' >> /opt/vcpkg/triplets/x64-linux.cmake
+    && printf '\nset(VCPKG_BUILD_TYPE release)\nset(VCPKG_C_FLAGS "-march=x86-64-v3 -mtune=generic")\nset(VCPKG_CXX_FLAGS "-march=x86-64-v3 -mtune=generic")\n' >> /opt/vcpkg/triplets/x64-linux.cmake
 RUN git init /src/lichtfeld && git -C /src/lichtfeld remote add origin https://github.com/MrNeRF/LichtFeld-Studio.git \
     && git -C /src/lichtfeld fetch --depth 1 origin ${LICHTFELD_COMMIT} \
     && git -C /src/lichtfeld checkout --detach FETCH_HEAD \
     && git -C /src/lichtfeld submodule update --init --recursive --depth 1
 WORKDIR /src/lichtfeld
+# BUILD_PORTABLE bundles libraries/GPU PTX but leaves the upstream CPU's
+# -march=native enabled. AVX-512 build hosts otherwise break other workers
+# while loading liblfs_core, before even --version can run.
+COPY patches/lichtfeld-cpu-baseline.patch /tmp/lichtfeld-cpu-baseline.patch
+RUN git apply --check /tmp/lichtfeld-cpu-baseline.patch \
+    && git apply /tmp/lichtfeld-cpu-baseline.patch \
+    && git diff --binary > /src/lichtfeld/guerrilla-build.patch
 # VideoLAN's archive endpoint can return an error/challenge page. Its GitHub
 # mirror serves identical bytes: keep the pinned port's filename and SHA-512
 # so vcpkg verifies and reuses this download without changing the dependency.
@@ -35,11 +42,17 @@ RUN mkdir -p /opt/vcpkg/downloads \
 # Remove each dependency build tree after installation, retaining source
 # archives and port patches for the matching release evidence.
 COPY scripts/build_source_bundle.py /tmp/build_source_bundle.py
+COPY scripts/check_cpu_baseline.py /tmp/check_cpu_baseline.py
 RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_PORTABLE=ON \
+      -DCMAKE_C_FLAGS="-march=x86-64-v3 -mtune=generic" \
+      -DCMAKE_CXX_FLAGS="-march=x86-64-v3 -mtune=generic" \
+      -DCMAKE_CUDA_FLAGS="-Xcompiler=-march=x86-64-v3,-mtune=generic" \
+      -DCOMPILER_SUPPORTS_AVX2=ON \
       -DVCPKG_INSTALL_OPTIONS="--clean-buildtrees-after-build;--clean-packages-after-build" \
       -DBUILD_TESTS=OFF -DBUILD_PYTHON_STUBS=OFF -DBUILD_CUDA_MIN_SM=75 \
       -DCMAKE_MAKE_PROGRAM=/usr/bin/ninja -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
       -DLFS_DEV_IMPORT_SOURCE_PYTHON=OFF -DLFS_DEV_IMPORT_SOURCE_RESOURCES=OFF \
+    && python3 /tmp/check_cpu_baseline.py build/compile_commands.json \
     && cmake --build build --parallel ${BUILD_JOBS} \
     && cmake --install build --prefix /opt/lichtfeld \
     && cp build/Build/lib/libOpenMeshTools.so.11.0 /opt/lichtfeld/lib/ \

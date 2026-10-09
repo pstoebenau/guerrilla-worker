@@ -38,3 +38,6 @@
 !scripts/package_notices.py
 !scripts/image_notices.py
 !scripts/build_source_bundle.py
+!scripts/check_cpu_baseline.py
+!patches/
+!patches/lichtfeld-cpu-baseline.patch

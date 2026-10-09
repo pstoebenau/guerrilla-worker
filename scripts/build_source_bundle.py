@@ -55,7 +55,9 @@ def main():
     destination.mkdir(exist_ok=True)
     roots = [Path('/opt/vcpkg/ports'), Path('/opt/vcpkg/scripts'),
              Path('/opt/vcpkg/triplets'), Path('/opt/vcpkg/downloads'),
+             Path('/src/lichtfeld/guerrilla-build.patch'),
              Path('/src/lichtfeld/build/CMakeCache.txt'),
+             Path('/src/lichtfeld/build/compile_commands.json'),
              Path('/src/lichtfeld/build/vcpkg_installed/vcpkg/status')]
     roots.extend(Path('/opt/vcpkg/buildtrees').glob('*/src'))
     roots.extend(Path('/src/lichtfeld/build/_deps').glob('*-src'))

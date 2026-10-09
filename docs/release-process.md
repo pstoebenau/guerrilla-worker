@@ -66,9 +66,10 @@ and notice access must be maintained for recipients of published images.
 
 The Linux release workflow first resolves a LichtFeld engine artifact in
 `ghcr.io/pstoebenau/guerrilla-lichtfeld`. Its recipe tag is the SHA-256 of the
-checksums of `Dockerfile.engine` and `scripts/build_source_bundle.py`. Changes to
-worker code do not invalidate it. Changing either engine input builds a new
-artifact automatically, on a separate hosted runner before worker packaging.
+checksums of `Dockerfile.engine`, `scripts/build_source_bundle.py`,
+`scripts/check_cpu_baseline.py` and `patches/lichtfeld-cpu-baseline.patch`.
+Changes to worker code do not invalidate it. Changing any engine input builds
+a new artifact automatically, on a separate hosted runner before worker packaging.
 The tag is a lookup key; the worker receives the resolved `sha256` image digest,
 and records that reference in its release asset `engine-image.txt`.
 
@@ -79,6 +80,23 @@ still attach this evidence and collect pinned upstream source snapshots. Keep
 engine artifacts available in GHCR for repeat builds; deleting one causes its
 recipe to compile again. Concurrent first-time releases can compile the same
 recipe independently; each worker uses the digest resolved by its engine job.
+
+Linux engine C/C++ code, CUDA host code and vcpkg C/C++ builds target the fixed
+`x86-64-v3` CPU baseline, with generic tuning. This enables AVX2/FMA and
+LichtFeld's optimized CPU paths on modern Intel and AMD CPUs, including Ryzen 5
+3600. CPUs must expose all x86-64-v3 features, including when running in a VM.
+The pinned upstream `-march=native` is patched out even when `BUILD_PORTABLE=ON`,
+so AVX-512 build hosts cannot raise the CPU requirements. Configuration rejects
+generated engine commands that require higher instruction sets before compilation.
+GPU architecture settings are unchanged.
+
+This baseline applies to code compiled by the engine recipe; separately bundled
+Spirula, Python wheels, system libraries and NVIDIA drivers retain their own
+runtime requirements. Rebuild both
+the engine artifact and the worker image when changing the baseline; restarting
+or rebuilding only the worker with the old engine artifact keeps the incompatible
+library. The source evidence archive includes `src/lichtfeld/guerrilla-build.patch`
+and the generated compile commands from the actual build.
 
 The engine build cleans vcpkg build trees and package staging after each port,
 while retaining downloads for source evidence. After installation it removes

@@ -145,7 +145,7 @@ jobs:
       - name: Identify engine recipe and check published artifact
         id: recipe
         run: |
-          recipe=$(sha256sum Dockerfile.engine scripts/build_source_bundle.py | sha256sum | cut -d ' ' -f 1)
+          recipe=$(sha256sum Dockerfile.engine scripts/build_source_bundle.py scripts/check_cpu_baseline.py patches/lichtfeld-cpu-baseline.patch | sha256sum | cut -d ' ' -f 1)
           tag="ghcr.io/pstoebenau/guerrilla-lichtfeld:recipe-$recipe"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           if docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' > "$RUNNER_TEMP/engine-manifest.json"; then
