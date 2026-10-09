@@ -111,10 +111,10 @@ def main():
     if destination == ROOT or ROOT in destination.parents:
         raise ValueError('Keep generated upstream archives outside the worker checkout')
     destination.mkdir(parents=True, exist_ok=True)
-    dockerfile = (ROOT / 'Dockerfile').read_text(encoding='utf-8')
+    dockerfile = (ROOT / 'Dockerfile').read_text(encoding='utf-8') + '\n' + (ROOT / 'Dockerfile.engine').read_text(encoding='utf-8')
     for _, commit, variable in INPUTS.values():
         if variable and not re.search(r'^ARG ' + variable + '=' + commit + r'$', dockerfile, re.M):
-            raise ValueError(f'Update reviewed source pin to match Dockerfile: {variable}')
+            raise ValueError(f'Update reviewed source pin to match Docker recipes: {variable}')
     if 'ARG SPIRULA_VERSION=2026.9.30\n' not in dockerfile:
         raise ValueError('Update Spirula source pin for the new binary release')
     # Verify tag-to-commit evidence each time; do not silently follow a moved tag.

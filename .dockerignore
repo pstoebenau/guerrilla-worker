@@ -1,5 +1,6 @@
 **
 !Dockerfile
+!Dockerfile.engine
 !package.json
 !bun.lock
 !agent/
