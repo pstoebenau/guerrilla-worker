@@ -49,7 +49,7 @@ def parse_progress(stage, text):
         elif stage == 'selection':
             for pattern, label, unit in [
                 (r'scanned (\d+)/(\d+) frames', 'Scoring video frames', 'frames'),
-                (r'Exported (\d+)/(\d+) PNGs', 'Exporting selected frames', 'images'),
+                (r'Exported (\d+)/(\d+) (?:PNGs|JPEGs)', 'Exporting selected frames', 'images'),
             ]:
                 match = re.search(pattern, line, re.I)
                 if match:

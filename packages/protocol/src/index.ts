@@ -60,10 +60,11 @@ export interface ArtifactAllocation extends Fence {
   size: number;
   sha256: string;
   checkpointId?: string;
+  reuseVerified?: boolean;
 }
 export interface UploadIntent {
   artifactId: string;
-  method: "put" | "multipart";
+  method: "put" | "multipart" | "reuse" | "verify";
   url?: string;
   partSize?: number;
   parts?: { partNumber: number; url: string }[];

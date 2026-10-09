@@ -7,10 +7,15 @@ import { Client } from './http';
 import { hashFile, upload, transferUrl } from './transfers';
 import { checkedPath, selectedFiles, retentionExclusions } from './retention-files';
 
-export async function archiveFile(client: Client, fence: Fence, file: string, relativePath: string, role: string, checkpointId: string | undefined, signal: AbortSignal) {
+export async function archiveFile(client: Client, fence: Fence, file: string, relativePath: string, role: string, checkpointId: string | undefined, signal: AbortSignal, clientId: string = randomUUID()) {
   const identity = await hashFile(file), before = await stat(file);
-  const allocation = {...fence, action:'allocate', clientId:randomUUID(), relativePath, role, ...identity, checkpointId};
+  const allocation = {...fence, action:'allocate', clientId, relativePath, role, ...identity, checkpointId, reuseVerified:true};
   let intent = await client.post<UploadIntent>('artifacts', allocation, signal);
+  if (intent.method === 'reuse') return intent.artifactId;
+  if (intent.method === 'verify') {
+    await client.post('complete', {...fence,artifactId:intent.artifactId},signal);
+    return intent.artifactId;
+  }
   const parts: {partNumber:number;etag:string}[] = [];
   if (intent.method === 'multipart') {
     if (!intent.partSize) throw new Error('Incomplete multipart intent');
@@ -48,12 +53,15 @@ export async function archiveFile(client: Client, fence: Fence, file: string, re
   await client.post('complete', {...fence,artifactId:intent.artifactId,...(parts.length ? {parts} : {})},signal);
   return intent.artifactId;
 }
-export async function checkpoint(client: Client, fence: Fence, root: string, checkpointId: string, signal: AbortSignal, sequence = 1) {
+export async function checkpoint(client: Client, fence: Fence, root: string, checkpointId: string, signal: AbortSignal, sequence = 1, cache = new Map<string, {clientId:string; artifactId?:string}>()) {
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(checkpointId)) throw new Error('Invalid checkpoint ID');
   const artifactIds: string[] = [];
   for await (const relative of selectedFiles(root,await retentionExclusions(root))) {
     const role = relative === 'platform-state.json' ? 'checkpoint' : /\.(sog|spz)$/.test(relative) ? 'export' : /\.(log|jsonl)$/.test(relative) ? 'log' : 'intermediate';
-    artifactIds.push(await archiveFile(client,fence,await checkedPath(root,relative),relative,role,checkpointId,signal));
+    const entry = cache.get(relative) ?? {clientId:randomUUID()};
+    cache.set(relative, entry);
+    entry.artifactId ??= await archiveFile(client,fence,await checkedPath(root,relative),relative,role,checkpointId,signal,entry.clientId);
+    artifactIds.push(entry.artifactId);
   }
   await client.post('checkpoint',{...fence,checkpointId,artifactIds,sequence},signal);
   const directory = join(root,'.archive-acks'); await mkdir(directory,{recursive:true});

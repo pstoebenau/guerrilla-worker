@@ -25,6 +25,54 @@ def spz(path, count=3):
 
 
 class PlatformTests(unittest.TestCase):
+    def test_background_stage_completes_before_local_snapshot_ack(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(platform, 'runtime_versions', return_value={}):
+            request = self.request(Path(temporary))
+            request.update(archiveAck=True, backgroundArchive=True, archiveTimeoutSeconds=0)
+            runner = platform.Runner(request)
+            events = []
+            def event(kind, **data):
+                events.append((kind, data))
+                if kind == 'checkpoint':
+                    directory = runner.output / '.archive-acks'
+                    directory.mkdir(exist_ok=True)
+                    (directory / (data['checkpointId'] + '.ready')).write_text('ready')
+            def select(folder):
+                folder.mkdir()
+                (folder / 'image.jpg').write_bytes(b'image')
+            with patch.object(platform, 'emit', side_effect=event):
+                runner.stage('selection', select)
+            self.assertEqual(events[-2][1]['status'], 'completed')
+            self.assertEqual(events[-1][0], 'checkpoint')
+            self.assertFalse((runner.output / '.archive-acks' / events[-1][1]['checkpointId']).exists())
+
+    def test_sog_only_final_snapshot_resumes_without_final_ply(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(platform, 'runtime_versions', return_value={}), \
+                patch.object(platform, 'gaussian_count', return_value=3), \
+                patch.object(platform.common, 'studio_path', return_value='studio'):
+            request = self.request(Path(temporary))
+            runner = platform.Runner(request)
+            def train(folder):
+                (folder / 'final').mkdir(parents=True)
+                (folder / 'final/splat.ply').write_bytes(b'large model')
+                (folder / 'training.log').write_text('trained')
+            runner.spirula = lambda: runner.stage('training', train) / 'final/splat.ply'
+            def export(_studio, _ply, target, *_args, **_kwargs):
+                target.write_bytes(b'compressed model')
+            with patch.object(platform.common, 'export_sog', side_effect=export), \
+                    patch.object(platform.common, 'export_spz') as spz_export:
+                runner.run()
+                spz_export.assert_not_called()
+            self.assertNotIn('spz', runner.state['result'])
+            self.assertFalse(any(item['path'].endswith('.ply') for item in runner.state['completed']['training']['files']))
+            for ply in runner.output.glob('training-*/final/*.ply'):
+                ply.unlink()
+            request['resume'] = True
+            resumed = platform.Runner(request)
+            resumed.spirula = Mock(side_effect=AssertionError('Must not repeat training'))
+            resumed.run()
+            resumed.spirula.assert_not_called()
+
     def test_spirula_snapshots_survive_native_checkpoint_overwrites(self):
         with tempfile.TemporaryDirectory() as temporary, \
                 patch.object(platform, 'runtime_versions', return_value={'engine': 'pinned'}), \

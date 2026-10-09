@@ -167,6 +167,18 @@ class SelectorTests(unittest.TestCase):
         finally:
             writer.release()
 
+    def test_quality_95_jpeg_keeps_dimensions_and_reduces_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            frame = self.candidates([0])[0]
+            pixels = self.texture[:, :480].copy()
+            _, png = sf.encode_png(root, frame, pixels, 1)
+            _, jpg = sf.encode_png(root, frame, pixels, 1, 'jpg', 95)
+            decoded = cv2.imdecode(np.frombuffer((root / jpg).read_bytes(), np.uint8), cv2.IMREAD_COLOR)
+            self.assertEqual(decoded.shape, pixels.shape)
+            self.assertGreater(cv2.PSNR(pixels, decoded), 30)
+            self.assertLess((root / jpg).stat().st_size, (root / png).stat().st_size)
+
     def test_mp4_end_to_end_pngs_match_decoded_source(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -231,11 +243,11 @@ class SelectorTests(unittest.TestCase):
         barrier = threading.Barrier(2)
         encode = sf.encode_png
 
-        def concurrent_encode(output, frame, image, compression):
+        def concurrent_encode(output, frame, image, compression, *options):
             # Requires two actual concurrent encoders; holds the first until
             # the decoder has reused its buffer for the second frame.
             barrier.wait(timeout=5)
-            return encode(output, frame, image, compression)
+            return encode(output, frame, image, compression, *options)
 
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)

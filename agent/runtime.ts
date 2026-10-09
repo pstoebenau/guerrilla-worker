@@ -10,7 +10,8 @@ import { Client } from './http';
 import { runPipeline } from './process';
 import { checkedPath, removeScratchPath } from './retention-files';
 import { download } from './transfers';
-import { checkpoint, archiveFile } from './archive';
+import { archiveFile } from './archive';
+import { BackgroundArchive } from './background-archive';
 import { agentLockPath } from './paths';
 import { readEnrollmentToken } from './enrollment';
 
@@ -62,8 +63,21 @@ export async function execute(client: Client, assignment: Assignment, shutdown: 
     finally { beating = false; }
   },5000);
   const job = path.join(scratch,assignment.scanId,assignment.attemptId), output = path.join(job,'run');
+  let events = Promise.resolve();
+  const sendEvent = (kind:string, message:string, progress:Record<string,unknown> = {}, stage?:string, runtimeVersions?:unknown) => {
+    const body = {...fence,eventId:randomUUID(),sequence:++sequence,kind,message,progress,...(stage ? {stage} : {}),...(runtimeVersions ? {runtimeVersions} : {})};
+    const next = events.then(async()=> { await client.post('events',body,signal); });
+    events = next.catch(()=>{});
+    return next;
+  };
+  const archiveAbort = new AbortController();
+  const archives = new BackgroundArchive(client,fence,output,AbortSignal.any([signal,archiveAbort.signal]),async status=> {
+    const message = status === 'retrying' ? 'Upload delayed. Processing continues locally; retrying in the background.' : status === 'saved' ? 'Stage outputs saved.' : 'Saving stage outputs in the background.';
+    await sendEvent('upload',message,{status}).catch(()=>{});
+  });
   try {
     await mkdir(path.join(output,'.worker'),{recursive:true});
+    await sendEvent('stage','Preparing video',{status:'running'},'download');
     const input = path.join(job,'input.mp4');
     if (assignment.input.kind === 'stored') {
       if (!assignment.input.sha256 || assignment.input.size === null) throw new Error('Missing input identity');
@@ -74,29 +88,35 @@ export async function execute(client: Client, assignment: Assignment, shutdown: 
       await dependencies.runPipeline({command:python,args:[runner,'--download',assignment.input.url,'--public-source','--destination',input],cwd:pipelineRoot,logPath:path.join(job,'download.log'),signal,onEvent:async()=>{}});
       await archiveFile(client,fence,input,'input/source.mp4','input',undefined,signal);
     }
+    await sendEvent('stage','Video ready',{status:'completed'},'download');
     for (const artifact of assignment.resume) {
       const target = await checkedPath(output,artifact.relativePath);
       try {await download(artifact.url,target,artifact,signal);}
       catch {signal.throwIfAborted();const refreshed=await client.post<{artifacts:Assignment['resume']}>('refresh',{...fence,artifactIds:[artifact.artifactId]},signal);const fresh=refreshed.artifacts.find(item=>item.artifactId===artifact.artifactId);if(!fresh)throw new Error('Resume URL unavailable');await download(fresh.url,target,artifact,signal);}
     }
     const requestPath = path.join(output,'.worker','request.json');
-    await writeFile(requestPath,JSON.stringify({...assignment.request,scanId:assignment.scanId,attemptId:assignment.attemptId,inputPath:input,outputPath:output,resume:assignment.resume.length>0,archiveAck:true,...(assignment.runtimeVersions ? {runtimeVersions:assignment.runtimeVersions} : {})}),{mode:0o600});
+    await writeFile(requestPath,JSON.stringify({...assignment.request,scanId:assignment.scanId,attemptId:assignment.attemptId,inputPath:input,outputPath:output,resume:assignment.resume.length>0,archiveAck:true,backgroundArchive:true,...(assignment.runtimeVersions ? {runtimeVersions:assignment.runtimeVersions} : {})}),{mode:0o600});
     await dependencies.runPipeline({command:python,args:[runner,'--request',requestPath],cwd:pipelineRoot,logPath:path.join(job,'worker.log'),signal,onEvent:async event=> {
       if (event.type === 'checkpoint') {
         await mkdir(path.join(output,'logs'),{recursive:true});
         await copyFile(path.join(job,'worker.log'),path.join(output,'logs','worker.log'));
-        await checkpoint(client,fence,output,String(event.checkpointId),signal,++checkpointSequence); return;
+        await archives.enqueue(String(event.checkpointId),++checkpointSequence); return;
       }
       if (event.type === 'failed' && typeof event.error === 'string') pipelineFailure = redactSecrets(event.error);
       const {type, runtimeVersions, message, ...progress} = event;
-      await client.post('events',{...fence,eventId:randomUUID(),sequence:++sequence,kind:type,stage:event.stage,message:redactSecrets(String(message ?? event.error ?? type)),...(runtimeVersions ? {runtimeVersions} : {}),progress},signal);
+      if (type === 'completed') return;
+      await sendEvent(type,redactSecrets(String(message ?? event.error ?? type)),progress,event.stage,runtimeVersions);
     }});
+    await sendEvent('stage','Waiting for required uploads',{status:'running'},'finalizing');
+    await archives.drain();
     await client.post('finish',{...fence,state:'completed'},signal);
     // All replacement outputs are canonical and completion is acknowledged.
     // Attempt history remains in the control plane; superseded local copies
     // from this scan no longer supply unique recovery data.
     await removeScratchPath(scratch,assignment.scanId);
   } catch (error) {
+    archiveAbort.abort(error);
+    await archives.drain().catch(()=>{});
     if (!signal.aborted) await archiveFile(client,fence,path.join(job,'worker.log'),'logs/worker.log','log',undefined,signal).catch(()=>{});
     // A fenced worker cannot finalize: server rejects stale identities.
     await client.post('finish',{...fence,state:signal.aborted?'interrupted':'failed',error:pipelineFailure ?? redactSecrets(error instanceof Error?error.message:'Pipeline failed')}).catch(()=>{});

@@ -40,6 +40,20 @@ test('never acknowledges checkpoint before trusted canonical commit',async()=> {
     expect(await Bun.file(join(folder,'.archive-acks','cp')).exists()).toBe(false);
   } finally {server.stop(true);}
 });
+
+test('retries canonical verification without reopening a completed multipart upload',async()=> {
+  const folder=await mkdtemp(join(tmpdir(),'guerrilla-verify-retry-'));
+  await writeFile(join(folder,'state.tar'),'frozen checkpoint');
+  const calls:string[]=[];
+  const server=Bun.serve({port:0,async fetch(request):Promise<Response> {
+    const route=new URL(request.url).pathname.split('/').pop()!;calls.push(route);
+    return Response.json(route==='artifacts'?{artifactId:'saved',method:'verify'}:{});
+  }});
+  try {
+    expect(await archiveFile(new Client(server.url.href,''),{scanId:'s',attemptId:'a',leaseId:'l'},join(folder,'state.tar'),'state.tar','intermediate','cp',new AbortController().signal)).toBe('saved');
+    expect(calls).toEqual(['artifacts','complete']);
+  } finally {server.stop(true);}
+});
 test('aborted supervisor stops active subprocess',async()=> {
   const folder=await mkdtemp(join(tmpdir(),'guerrilla-process-')), abort=new AbortController();
   const running=runPipeline({command:process.execPath,args:['-e','setInterval(()=>{},1000)'],cwd:folder,logPath:join(folder,'log'),signal:abort.signal,onEvent:async()=>{}});

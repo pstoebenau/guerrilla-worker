@@ -1,4 +1,5 @@
 import path from "node:path";
+import { constants } from "node:fs";
 import {
   lstat,
   readdir,
@@ -110,7 +111,7 @@ export async function copySelected(
       throw new Error("Retention can copy only regular files.");
     const to = await checkedPath(destination, relative);
     await mkdir(path.dirname(to), { recursive: true });
-    await copyFile(from, to);
+    await copyFile(from, to, constants.COPYFILE_FICLONE);
   }
 }
 

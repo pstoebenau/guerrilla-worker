@@ -585,7 +585,10 @@ class Runner:
         checkpoint_id = uuid.uuid4().hex
         emit('checkpoint', stage=stage, checkpointId=checkpoint_id,
              manifestPath='platform-state.json', **self.state.get('result', {}))
-        ack = self.output / '.archive-acks' / checkpoint_id
+        # Background mode waits only for a frozen local snapshot. Remote commit
+        # is separately acknowledged, and must still precede destructive pruning.
+        suffix = '.ready' if self.request.get('backgroundArchive') else ''
+        ack = self.output / '.archive-acks' / (checkpoint_id + suffix)
         deadline = time.monotonic() + self.request.get('archiveTimeoutSeconds', 3600)
         while not ack.is_file():
             if time.monotonic() >= deadline:
@@ -713,7 +716,7 @@ class Runner:
                 self.state['retention'] = dict(version=1, excludePaths=plan['excludePaths'])
                 self.save()
                 self.checkpoint('training')
-                if self.request.get('archiveAck'):
+                if self.request.get('archiveAck') and not self.request.get('backgroundArchive'):
                     self.prune_training(plan, open_paths, candidate if process is not None else None)
 
     def prune_training(self, plan, open_paths=(), active_checkpoint=None):
@@ -768,10 +771,10 @@ class Runner:
             raise RuntimeError(f'{name} produced no artifacts')
         self.state['completed'][name] = dict(directory=directory.name, files=files)
         self.save()
-        self.checkpoint(name)
-        if name == 'training' and self.request.get('archiveAck'):
-            self.prune_training(plan)
         emit('stage', stage=name, status='completed', elapsedSeconds=time.monotonic() - started)
+        self.checkpoint(name)
+        if name == 'training' and self.request.get('archiveAck') and not self.request.get('backgroundArchive'):
+            self.prune_training(plan)
         return directory
 
     def lichtfeld(self):
@@ -780,7 +783,7 @@ class Runner:
         options = scan_settings.load(options_file)
         selected = self.stage('selection', lambda folder: self.command(
             [sys.executable, ROOT / 'select_frames.py', self.source, folder,
-             *scan_settings.selection_arguments(options)], self.output / f'{folder.name}.log'))
+             *scan_settings.selection_arguments(options), '--image-format', 'jpg', '--jpeg-quality', '95'], self.output / f'{folder.name}.log'))
 
         def reconstruct(folder):
             self.command([sys.executable, ROOT / 'reconstruct_splat.py', '--images', selected,
@@ -868,23 +871,33 @@ class Runner:
         return candidates[-1]
 
     def run(self):
-        ply = self.lichtfeld() if self.backend == 'lichtfeld' else self.spirula()
-        expected = gaussian_count(ply, self.cap)
+        # A resumed final snapshot no longer needs the uncompressed training PLY.
+        finished = self.state['completed'].get('export')
+        ply = None if finished else (self.lichtfeld() if self.backend == 'lichtfeld' else self.spirula())
+        expected = gaussian_count(self.path(finished['directory']) / 'result.sog' if finished else ply, self.cap)
         def export(folder):
             folder.mkdir()
             with contextlib.redirect_stdout(sys.stderr):
                 self.progress_values = dict(substep='Creating SOG export', gaussians=expected)
                 common.export_sog(common.studio_path(), ply, folder / 'result.sog', folder / 'sog.log', self.cap, on_progress=self.report_log)
-                self.progress_values = dict(substep='Creating SPZ export', gaussians=expected)
-                common.export_spz(common.studio_path(), ply, folder / 'result.spz', folder / 'spz.log', on_progress=self.report_log)
-            if spz_count(folder / 'result.spz', self.cap) != expected:
-                raise ValueError('SPZ Gaussian count changed during conversion')
+            if gaussian_count(folder / 'result.sog', self.cap) != expected:
+                raise ValueError('SOG Gaussian count changed during conversion')
         exports = self.stage('export', export)
         count = gaussian_count(exports / 'result.sog', self.cap)
-        if count != expected or spz_count(exports / 'result.spz', self.cap) != count:
+        if count != expected:
             raise ValueError('Export Gaussian counts disagree')
         self.state['result'] = dict(sog=(exports / 'result.sog').relative_to(self.output).as_posix(),
-                                    spz=(exports / 'result.spz').relative_to(self.output).as_posix(), gaussians=count)
+                                    gaussians=count)
+        # Keep the latest native resume checkpoint and stage products, but not
+        # standalone Gaussian PLY copies once the compressed SOG is verified.
+        exclusions = set(self.state.get('retention', {}).get('excludePaths', []))
+        training = self.state['completed'].get('training')
+        if training:
+            for item in training['files']:
+                if item['path'].endswith('.ply') and '/final/' in item['path']:
+                    exclusions.add(item['path'])
+            training['files'] = [item for item in training['files'] if item['path'] not in exclusions]
+        self.state['retention'] = dict(version=1, excludePaths=sorted(exclusions))
         self.state['status'] = 'completed'
         self.save()
         common.save_json(self.output / 'artifact-manifest.json', dict(version=1, files=[

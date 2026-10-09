@@ -317,9 +317,11 @@ def preserve_coverage(frames, selected, args):
     return result
 
 
-def encode_png(output, frame, image, compression):
-    filename = f"frame_{frame.index:08d}_{frame.seconds:010.3f}s.png"
-    ok, encoded = cv2.imencode(".png", image, [cv2.IMWRITE_PNG_COMPRESSION, compression])
+def encode_png(output, frame, image, compression, image_format='png', jpeg_quality=95):
+    filename = f"frame_{frame.index:08d}_{frame.seconds:010.3f}s.{image_format}"
+    params = [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality,
+              cv2.IMWRITE_JPEG_SAMPLING_FACTOR, cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444] if image_format == 'jpg' else [cv2.IMWRITE_PNG_COMPRESSION, compression]
+    ok, encoded = cv2.imencode('.' + image_format, image, params)
     if not ok:
         raise ValueError(f"PNG encoding failed for frame {frame.index}.")
     # Path.write_bytes handles Unicode Windows paths reliably.
@@ -327,7 +329,7 @@ def encode_png(output, frame, image, compression):
     return frame.index, filename
 
 
-def export_pngs(path, output, frames, workers=4, compression=1):
+def export_pngs(path, output, frames, workers=4, compression=1, image_format='png', jpeg_quality=95):
     if workers < 1 or not 0 <= compression <= 9:
         raise ValueError("PNG workers must be positive and compression must be 0-9")
     if not frames:
@@ -342,7 +344,7 @@ def export_pngs(path, output, frames, workers=4, compression=1):
         frame_index, filename = jobs.popleft().result()
         exported[frame_index] = filename
         if len(exported) % 25 == 0:
-            print(f"Exported {len(exported)}/{len(frames)} PNGs...", flush=True)
+            print(f"Exported {len(exported)}/{len(frames)} {'JPEGs' if image_format == 'jpg' else 'PNGs'}...", flush=True)
 
     try:
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="png") as pool:
@@ -355,7 +357,7 @@ def export_pngs(path, output, frames, workers=4, compression=1):
                             raise ValueError(f"Failed to decode selected frame {index} during export.")
                         frame = pending.pop(index)
                         # Own the pixels even if a decoder reuses its output buffer.
-                        jobs.append(pool.submit(encode_png, output, frame, image.copy(), compression))
+                        jobs.append(pool.submit(encode_png, output, frame, image.copy(), compression, image_format, jpeg_quality))
                         # Bound outstanding full-resolution frames, including active workers.
                         if len(jobs) >= workers:
                             collect_oldest()
@@ -424,7 +426,7 @@ def write_reports(output, source, frames, selected, exported, metadata, args):
               "notes": ["Feature match fractions are heuristics, not geometric overlap percentages.",
                         "No alignment, camera poses, or 3D reconstruction are computed.",
                         "Glare scores are heuristic: haze, pale objects, purple surfaces, or bright sky can trigger them. Subtle or persistent flare may be missed. Source pixels are not edited.",
-                        "PNG is lossless relative to decoded 8-bit BGR frames, not the original compressed/HDR signal."]}
+                        f"Images: {getattr(args, 'image_format', 'png')}; JPEG quality: {getattr(args, 'jpeg_quality', 95)}. PNG preserves decoded pixels; JPEG uses lossy compression."]}
     (output / "selection.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
 
 
@@ -455,6 +457,8 @@ def parser():
                    help="Concurrent PNG encoders/writers; also bounds queued full-resolution frames")
     p.add_argument("--png-compression", type=int, choices=range(10), default=1,
                    help="Lossless PNG compression level: 0 fastest/largest, 9 slowest/smallest")
+    p.add_argument('--image-format', choices=('png', 'jpg'), default='png')
+    p.add_argument('--jpeg-quality', type=int, choices=range(1, 101), default=95)
     return p
 
 
@@ -505,11 +509,12 @@ def main(argv=None):
         selected, eligible_count, distinct_count = select(frames, args)
         metadata.update(eligible_frames=eligible_count, distinct_views=distinct_count,
                         resolved_max_images=budget)
-        print(f"{eligible_count} candidates passed quality checks; {distinct_count} distinct nearby views. Exporting {len(selected)} PNGs...", flush=True)
+        label = 'JPEGs' if args.image_format == 'jpg' else 'PNGs'
+        print(f"{eligible_count} candidates passed quality checks; {distinct_count} distinct nearby views. Exporting {len(selected)} {label}...", flush=True)
         output.mkdir(parents=True, exist_ok=True)
-        exported = export_pngs(source, output, selected, args.png_workers, args.png_compression)
+        exported = export_pngs(source, output, selected, args.png_workers, args.png_compression, args.image_format, args.jpeg_quality)
         write_reports(output, source, frames, selected, exported, metadata, args)
-        print(f"Saved {len(selected)} / {budget} PNGs to {output}")
+        print(f"Saved {len(selected)} / {budget} {label} to {output}")
         for warning in metadata["warnings"]:
             print(f"Warning: {warning}", file=sys.stderr)
         return 0 if selected else 2
