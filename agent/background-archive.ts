@@ -1,10 +1,10 @@
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import type { Fence } from '@guerrilla/worker-protocol';
+import type { ArtifactManifest, Fence } from '@guerrilla/worker-protocol';
 import { Client } from './http';
 import { checkpoint } from './archive';
-import { copySelected, retentionExclusions, removeScratchPath } from './retention-files';
+import { copyStageSnapshot, removeScratchPath } from './retention-files';
 
 type Snapshot = { id: string; sequence: number; root: string; stages:string[] };
 export type UploadStatus = 'queued' | 'uploading' | 'verifying' | 'retrying' | 'saved';
@@ -23,14 +23,15 @@ export class BackgroundArchive {
   constructor(private client: Client, private fence: Fence, private output: string,
     private signal: AbortSignal,
     private report: (status: UploadStatus, progress:UploadProgress) => Promise<void>,
-    private retryMs = 5000) {}
+    private retryMs = 5000,
+    private inherited: ArtifactManifest[] = []) {}
 
   async enqueue(id: string, sequence: number, stage?:string) {
     if (!/^[a-zA-Z0-9_-]{1,100}$/.test(id)) throw new Error('Invalid checkpoint ID');
     this.signal.throwIfAborted();
     const root = join(this.output, '.worker', 'archives', id);
     await mkdir(root, {recursive:true});
-    await copySelected(this.output, root, await retentionExclusions(this.output));
+    await copyStageSnapshot(this.output,root,new Set(this.inherited.map(file=>file.relativePath)));
     this.signal.throwIfAborted();
     const state = JSON.parse(await readFile(join(root,'platform-state.json'),'utf8'));
     const stages = [...new Set([...Object.keys(state.completed ?? {}), ...(stage ? [stage] : [])])]
@@ -62,7 +63,7 @@ export class BackgroundArchive {
           await checkpoint(this.client,this.fence,snapshot.root,snapshot.id,this.signal,snapshot.sequence,cache,async update=> {
             progress.current=update.current;progress.total=update.total;
             await this.report(update.status,progress);
-          });
+          },this.inherited);
           break;
         } catch {
           this.signal.throwIfAborted();

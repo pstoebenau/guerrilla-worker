@@ -46,7 +46,7 @@ class PlatformTests(unittest.TestCase):
             self.assertEqual(events[-1][0], 'checkpoint')
             self.assertFalse((runner.output / '.archive-acks' / events[-1][1]['checkpointId']).exists())
 
-    def test_sog_only_final_snapshot_resumes_without_final_ply(self):
+    def test_saved_export_skips_training_and_preserves_durable_training_outputs(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(platform, 'runtime_versions', return_value={}), \
                 patch.object(platform, 'gaussian_count', return_value=3), \
                 patch.object(platform.common, 'studio_path', return_value='studio'):
@@ -64,9 +64,7 @@ class PlatformTests(unittest.TestCase):
                 runner.run()
                 spz_export.assert_not_called()
             self.assertNotIn('spz', runner.state['result'])
-            self.assertFalse(any(item['path'].endswith('.ply') for item in runner.state['completed']['training']['files']))
-            for ply in runner.output.glob('training-*/final/*.ply'):
-                ply.unlink()
+            self.assertTrue(any(item['path'].endswith('.ply') for item in runner.state['completed']['training']['files']))
             request['resume'] = True
             resumed = platform.Runner(request)
             resumed.spirula = Mock(side_effect=AssertionError('Must not repeat training'))

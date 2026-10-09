@@ -115,12 +115,35 @@ export async function copySelected(
   }
 }
 
+/** Freeze declared stage products only. Never copy live engine scratch as a checkpoint. */
+export async function copyStageSnapshot(source:string, destination:string, inheritedPaths = new Set<string>()) {
+  const state = JSON.parse(await readFile(path.join(source,'platform-state.json'),'utf8'));
+  const names = new Set<string>(['platform-state.json']);
+  if (await lstat(path.join(source,'logs/worker.log')).catch(()=>null)) names.add('logs/worker.log');
+  for (const entry of Object.values({...state.stageCheckpoints,...state.completed}) as {files?:{path:string}[]}[]) {
+    for (const file of entry.files ?? []) names.add(file.path);
+  }
+  // Native checkpoint metadata may name a directory and sidecars, all declared in stageCheckpoints.
+  await mkdir(destination,{recursive:true});
+  for (const relative of names) {
+    const from = await checkedPath(source,relative);
+    const entry = await lstat(from).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
+    if (!entry && inheritedPaths.has(relative)) continue;
+    if (!entry?.isFile() || entry.isSymbolicLink()) throw new Error(`Missing stage output: ${relative}`);
+    const to = await checkedPath(destination,relative);
+    await mkdir(path.dirname(to),{recursive:true});
+    await copyFile(from,to,constants.COPYFILE_FICLONE);
+  }
+}
+
 // Every recursive removal goes through an absolute containment and symlink check.
 // Callers supply only scan/attempt directories established from database UUIDs.
 export async function removeScratchPath(root: string, relative: string) {
   const target = inside(root, relative);
   let cursor = path.resolve(root);
-  if ((await lstat(cursor)).isSymbolicLink())
+  const rootEntry = await lstat(cursor).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
+  if (!rootEntry) return;
+  if (rootEntry.isSymbolicLink())
     throw new Error("Retention cannot remove through a symlink.");
   for (const part of path.relative(cursor, target).split(path.sep)) {
     cursor = path.join(cursor, part);

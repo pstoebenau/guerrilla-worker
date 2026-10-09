@@ -1,6 +1,6 @@
 /** Public wire contract. No database, storage credentials, or execution commands. */
-export const PROTOCOL_VERSION = 1 as const;
-export const PROTOCOL_PACKAGE_VERSION = "1.0.0";
+export const PROTOCOL_VERSION = 2 as const;
+export const PROTOCOL_PACKAGE_VERSION = "2.0.0";
 export type Engine = "spirula" | "lichtfeld";
 export type Destination = "personal" | "cloud";
 export type Settings = Record<string, Record<string, string | number | boolean | null>>;
@@ -13,7 +13,7 @@ export interface ScanRequest {
   maxCap: number;
 }
 export interface Registration {
-  protocolVersion: 1;
+  protocolVersion: 2;
   build: string;
   runtime: string;
   engines: Partial<Record<Engine, string>>;
@@ -31,16 +31,17 @@ export interface ArtifactManifest {
   url: string;
 }
 export interface Assignment extends Fence {
-  protocolVersion: 1;
+  protocolVersion: 2;
   leaseExpiresAt: string;
   settingsHash: string;
   request: ScanRequest;
   input: { kind: "stored" | "source"; filename: string; url: string; sha256: string | null; size: number | null };
   resume: ArtifactManifest[];
+  resumeState?: Record<string, unknown>;
   runtimeVersions?: Record<string, string>;
 }
-export interface PollResponse { assignment: Assignment | null; command: Command; pollAfterMs: number }
-export interface HeartbeatResponse { leaseExpiresAt: string; command: Command }
+export interface PollResponse { assignment: Assignment | null; command: Command; pollAfterMs: number; cleanup?: Fence[] }
+export interface HeartbeatResponse { leaseExpiresAt: string; command: Command; reason?: "cancelled" }
 export interface EnrollmentRequest { token: string; registration: Registration }
 export interface EnrollmentResponse { workerId: string; credential: string }
 export interface WorkerEvent extends Fence {
@@ -71,7 +72,7 @@ export interface UploadIntent {
   expiresAt: string;
 }
 export interface ArtifactCompletion extends Fence { artifactId: string; parts?: { partNumber: number; etag: string }[] }
-export interface CheckpointCommit extends Fence { checkpointId: string; artifactIds: string[]; sequence: number }
+export interface CheckpointCommit extends Fence { checkpointId: string; artifactIds: string[]; sequence: number; inheritedArtifactIds?: string[] }
 export interface FinishRequest extends Fence { state: "completed" | "failed" | "interrupted"; error?: string }
 
 export function isSafeRelativePath(value: unknown): value is string {

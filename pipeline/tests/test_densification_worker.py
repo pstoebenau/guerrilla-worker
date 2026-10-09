@@ -9,6 +9,23 @@ import unittest
 from unittest.mock import patch
 
 import densification_worker as worker
+
+
+class PortableChunkTests(unittest.TestCase):
+    def test_native_chunk_identity_survives_a_new_scratch_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fingerprints = []
+            for attempt in ('first', 'second'):
+                dataset = (root / attempt / 'dataset').resolve()
+                module = SimpleNamespace(_camera_record_fingerprint=lambda record: {
+                    'image_path': str(record.image), 'mask_path': None, 'K': [1, 2, 3]})
+                worker.portable_chunk_fingerprints(module, dataset)
+                fingerprints.append(module._camera_record_fingerprint(SimpleNamespace(image=dataset / 'images/frame.jpg')))
+                with self.assertRaisesRegex(ValueError, 'outside'):
+                    module._camera_record_fingerprint(SimpleNamespace(image=root / 'another-scan/frame.jpg'))
+            self.assertEqual(fingerprints[0], fingerprints[1])
+            self.assertEqual(fingerprints[0]['image_path'], 'images/frame.jpg')
 from pipeline_defaults import DENSIFICATION
 
 

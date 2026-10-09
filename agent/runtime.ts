@@ -6,9 +6,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { PROTOCOL_VERSION, redactSecrets, type Assignment, type EnrollmentResponse, type Registration, type PollResponse, type HeartbeatResponse } from '@guerrilla/worker-protocol';
-import { Client } from './http';
+import { ApiError, Client } from './http';
 import { runPipeline } from './process';
-import { checkedPath, removeScratchPath } from './retention-files';
+import { removeScratchPath } from './retention-files';
+import { restoreArtifacts } from './restore';
 import { download } from './transfers';
 import { archiveFile } from './archive';
 import { BackgroundArchive } from './background-archive';
@@ -39,7 +40,7 @@ function registration(): Registration {
   if (gpuLines.length !== 1 || Number(process.env.WORKER_GPU_INDEX ?? 0) !== 0) throw new Error('Protocol v1 requires one visible GPU; isolate devices before starting the worker');
   const [id,name,memory] = gpuLines[0]!.split(',').map(s=>s.trim());
   if (!id || !name || !Number.isFinite(Number(memory))) throw new Error('GPU inventory failed');
-  return {protocolVersion:PROTOCOL_VERSION,build:'0.1.0',runtime:`${process.platform}-${process.arch}`,engines,gpus:[{id,name,memoryBytes:Number(memory)*1024*1024}],healthy:Object.keys(engines).length>0};
+  return {protocolVersion:PROTOCOL_VERSION,build:'0.2.0',runtime:`${process.platform}-${process.arch}`,engines,gpus:[{id,name,memoryBytes:Number(memory)*1024*1024}],healthy:Object.keys(engines).length>0};
 }
 
 export async function execute(client: Client, assignment: Assignment, shutdown: AbortSignal, dependencies = {runPipeline}) {
@@ -47,7 +48,7 @@ export async function execute(client: Client, assignment: Assignment, shutdown: 
   for (const id of [assignment.scanId,assignment.attemptId,assignment.leaseId]) if (!/^[a-zA-Z0-9_-]{1,100}$/.test(id)) throw new Error('Invalid assignment identity');
   const fence = {scanId:assignment.scanId,attemptId:assignment.attemptId,leaseId:assignment.leaseId};
   const abort = new AbortController(), signal = AbortSignal.any([shutdown,abort.signal]);
-  let deadline = Date.parse(assignment.leaseExpiresAt), sequence = 0, checkpointSequence = 0, drain = false, pipelineFailure: string | undefined;
+  let deadline = Date.parse(assignment.leaseExpiresAt), sequence = 0, checkpointSequence = 0, drain = false, cancelled = false, pipelineFailure: string | undefined;
   if (!Number.isFinite(deadline) || deadline <= Date.now()) throw new Error('Expired assignment');
   const watchdog = setInterval(()=> { if (Date.now() >= deadline) abort.abort(new Error('Lease expired')); },250);
   let beating = false;
@@ -55,7 +56,10 @@ export async function execute(client: Client, assignment: Assignment, shutdown: 
     if (beating || signal.aborted) return; beating = true;
     try {
       const response = await client.post<HeartbeatResponse>('heartbeat',fence,signal);
-      if (response.command === 'stop') abort.abort(new Error('Assignment fenced'));
+      if (response.command === 'stop') {
+        cancelled = response.reason === 'cancelled';
+        abort.abort(new Error(cancelled ? 'Assignment cancelled by owner.' : 'Assignment fenced'));
+      }
       drain ||= response.command === 'drain';
       const renewed = Date.parse(response.leaseExpiresAt);
       if (Number.isFinite(renewed)) deadline = renewed;
@@ -73,18 +77,24 @@ export async function execute(client: Client, assignment: Assignment, shutdown: 
   const archiveAbort = new AbortController();
   const latestUploadSequence = new Map<string,number>();
   const archives = new BackgroundArchive(client,fence,output,AbortSignal.any([signal,archiveAbort.signal]),async (status,detail)=> {
-    const message = status === 'retrying' ? 'Upload delayed. Processing continues locally; retrying in the background.' : status === 'saved' ? 'Stage outputs saved.' : 'Saving stage outputs in the background.';
+    const message = status === 'retrying' ? 'Upload delayed. Local files retained; cleanup pending while uploads retry.' : status === 'saved' ? 'Stage outputs saved.' : 'Saving stage outputs in the background.';
     const {stages,...progress} = detail;
     for (const stage of stages) {
       if ((latestUploadSequence.get(stage) ?? 0) > progress.checkpointSequence) continue;
       latestUploadSequence.set(stage,progress.checkpointSequence);
       await sendEvent('upload',message,{...progress,status,unit:'bytes'},stage).catch(()=>{});
     }
-  });
+  },5000,assignment.resume);
   try {
     await mkdir(path.join(output,'.worker'),{recursive:true});
-    await sendEvent('stage','Preparing video',{status:'running'},'download');
+    const restored = new Set<string>();
+    const restore = (paths:string[]) => restoreArtifacts(client,fence,assignment.resume,output,paths,signal,restored);
+    const resumeState = assignment.resumeState ?? null;
+    if (resumeState) await writeFile(path.join(output,'platform-state.json'),JSON.stringify(resumeState),{mode:0o600});
+    const needsInput = !(resumeState?.completed as Record<string,unknown> | undefined)?.selection;
     const input = path.join(job,'input.mp4');
+    if (needsInput) {
+    await sendEvent('stage','Preparing video',{status:'running'},'download');
     if (assignment.input.kind === 'stored') {
       if (!assignment.input.sha256 || assignment.input.size === null) throw new Error('Missing input identity');
       const expected = {sha256:assignment.input.sha256,size:assignment.input.size};
@@ -95,14 +105,18 @@ export async function execute(client: Client, assignment: Assignment, shutdown: 
       await archiveFile(client,fence,input,'input/source.mp4','input',undefined,signal);
     }
     await sendEvent('stage','Video ready',{status:'completed'},'download');
-    for (const artifact of assignment.resume) {
-      const target = await checkedPath(output,artifact.relativePath);
-      try {await download(artifact.url,target,artifact,signal);}
-      catch {signal.throwIfAborted();const refreshed=await client.post<{artifacts:Assignment['resume']}>('refresh',{...fence,artifactIds:[artifact.artifactId]},signal);const fresh=refreshed.artifacts.find(item=>item.artifactId===artifact.artifactId);if(!fresh)throw new Error('Resume URL unavailable');await download(fresh.url,target,artifact,signal);}
     }
     const requestPath = path.join(output,'.worker','request.json');
-    await writeFile(requestPath,JSON.stringify({...assignment.request,scanId:assignment.scanId,attemptId:assignment.attemptId,inputPath:input,outputPath:output,resume:assignment.resume.length>0,archiveAck:true,backgroundArchive:true,...(assignment.runtimeVersions ? {runtimeVersions:assignment.runtimeVersions} : {})}),{mode:0o600});
+    await writeFile(requestPath,JSON.stringify({...assignment.request,scanId:assignment.scanId,attemptId:assignment.attemptId,inputPath:input,outputPath:output,resume:!!resumeState,selectiveResume:!!resumeState,inputSha256:assignment.input.sha256,archiveAck:true,backgroundArchive:true,...(assignment.runtimeVersions ? {runtimeVersions:assignment.runtimeVersions} : {})}),{mode:0o600});
     await dependencies.runPipeline({command:python,args:[runner,'--request',requestPath],cwd:pipelineRoot,logPath:path.join(job,'worker.log'),signal,onEvent:async event=> {
+      if (event.type === 'restore') {
+        if (typeof event.restoreId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(event.restoreId) || !Array.isArray(event.paths) || event.paths.some(p=>typeof p!=='string')) throw new Error('Invalid stage restore request');
+        await sendEvent('progress','Restoring required stage inputs',{substep:'Downloading saved inputs'},event.stage);
+        await restore(event.paths as string[]);
+        await mkdir(path.join(output,'.worker','restored'),{recursive:true});
+        await writeFile(path.join(output,'.worker','restored',event.restoreId),'verified',{mode:0o600});
+        return;
+      }
       if (event.type === 'checkpoint') {
         await mkdir(path.join(output,'logs'),{recursive:true});
         await copyFile(path.join(job,'worker.log'),path.join(output,'logs','worker.log'));
@@ -121,11 +135,29 @@ export async function execute(client: Client, assignment: Assignment, shutdown: 
     // from this scan no longer supply unique recovery data.
     await removeScratchPath(scratch,assignment.scanId);
   } catch (error) {
+    // Cancellation can fence an event/upload before the next periodic heartbeat.
+    // Confirm the stop command: other 409s (such as invalid artifacts) are failures.
+    if (!signal.aborted && error instanceof ApiError && error.status === 409) {
+      const heartbeat = await client.post<HeartbeatResponse>('heartbeat',fence,signal).catch(()=>null);
+      if (heartbeat?.command === 'stop') {
+        cancelled = heartbeat.reason === 'cancelled';
+        error = new Error(cancelled ? 'Assignment cancelled by owner.' : 'Assignment fenced');
+        abort.abort(error);
+      }
+    }
     archiveAbort.abort(error);
     await archives.drain().catch(()=>{});
+    await events;
+    let cleanupFailure: unknown;
+    if (cancelled) {
+      try {
+        await removeScratchPath(scratch,assignment.scanId);
+        await client.post('cleanup',fence);
+      } catch (failure) { cleanupFailure = failure; }
+    }
     if (!signal.aborted) await archiveFile(client,fence,path.join(job,'worker.log'),'logs/worker.log','log',undefined,signal).catch(()=>{});
     // A fenced worker cannot finalize: server rejects stale identities.
-    await client.post('finish',{...fence,state:signal.aborted?'interrupted':'failed',error:pipelineFailure ?? redactSecrets(error instanceof Error?error.message:'Pipeline failed')}).catch(()=>{});
+    await client.post('finish',{...fence,state:signal.aborted?'interrupted':'failed',error:cleanupFailure?'Cancelled; local cleanup pending.':cancelled?'Cancelled by owner.':pipelineFailure ?? redactSecrets(error instanceof Error?error.message:'Pipeline failed')}).catch(()=>{});
     throw error;
   } finally { clearInterval(watchdog); clearInterval(heartbeats); }
   return drain;
@@ -180,6 +212,15 @@ export async function main(shutdown = new AbortController()) {
   while (!shutdown.signal.aborted) {
     try {
       const response = await client.post<PollResponse>('poll',{registration:info,clean},shutdown.signal);
+      if (response.cleanup?.length) {
+        for (const fence of response.cleanup) {
+          await removeScratchPath(scratch,fence.scanId);
+          await client.post('cleanup',fence,shutdown.signal);
+          await client.post('finish',{...fence,state:'interrupted',error:'Cancelled by owner.'},shutdown.signal).catch(()=>{});
+        }
+        clean=await scratchIsClean();
+        continue;
+      }
       if (response.command !== 'continue') break;
       if (response.assignment) {
         clean=false;
@@ -190,6 +231,7 @@ export async function main(shutdown = new AbortController()) {
       await delay(Math.min(30000,Math.max(1000,response.pollAfterMs)),undefined,{signal:shutdown.signal});
     } catch (error) {
       if (shutdown.signal.aborted) break;
+      clean=await scratchIsClean().catch(()=>false);
       console.error(redactSecrets(error instanceof Error?error.message:'Worker request failed'));
       await delay(5000,undefined,{signal:shutdown.signal}).catch(()=>{});
     }

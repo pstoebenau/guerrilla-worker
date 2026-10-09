@@ -71,7 +71,7 @@ test('slow archival freezes bytes, coalesces pending snapshots, retries, and gat
 
 test('stage upload bytes reach verification before saved is published', async()=> {
   const root = await mkdtemp(join(tmpdir(),'guerrilla-progress-'));
-  await writeFile(join(root,'platform-state.json'),JSON.stringify({completed:{selection:{}}}));
+  await writeFile(join(root,'platform-state.json'),JSON.stringify({completed:{selection:{files:[{path:'frames.bin'}]}}}));
   await writeFile(join(root,'frames.bin'),Buffer.alloc(256*1024));
   let release!:()=>void, entered!:()=>void;
   const held = new Promise<void>(resolve=>{release=resolve;});

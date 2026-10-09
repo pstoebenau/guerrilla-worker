@@ -423,7 +423,8 @@ def validate_request(request):
         if not isinstance(request.get(name), str) or not request[name]:
             raise ValueError(f'{name} is required')
     source, output = Path(request['inputPath']).resolve(), Path(request['outputPath']).resolve()
-    if not source.is_file() or Path(request['inputPath']).is_symlink():
+    selective = request.get('selectiveResume') and request.get('resume') and re.fullmatch(r'[a-f0-9]{64}', request.get('inputSha256') or '')
+    if (not source.is_file() and not selective) or Path(request['inputPath']).is_symlink():
         raise ValueError('Stored input is not a regular file')
     if source == output or source.is_relative_to(output):
         raise ValueError('Output must not contain the stored input')
@@ -540,19 +541,23 @@ class Runner:
         if request.get('runtimeVersions') and request['runtimeVersions'] != versions:
             raise ValueError('The recorded engine runtime is unavailable; resume cannot change versions')
         identity = dict(backend=self.backend, settings=request['settings'], maxCap=self.cap,
-                        inputSha256=common.file_hash(self.source), runtimeVersions=versions)
+                        inputSha256=(request['inputSha256'] if request.get('selectiveResume') else common.file_hash(self.source)), runtimeVersions=versions)
         if self.state_path.exists():
             if not request.get('resume'):
                 raise ValueError('An existing job requires resume')
             self.state = json.loads(self.state_path.read_text())
-            if self.state['identity'] != identity:
+            previous_identity = self.state['identity']
+            portable = request.get('selectiveResume') and not self.state.get('stageCheckpoints')
+            compared = lambda value: {key: item for key, item in value.items() if not (portable and key == 'runtimeVersions')}
+            if compared(previous_identity) != compared(identity):
                 raise ValueError('Resume input, settings, cap or engine versions changed')
-            for stage in self.state['completed'].values():
+            self.state['identity'] = identity
+            for stage in ([] if request.get('selectiveResume') else self.state['completed'].values()):
                 for item in stage['files']:
                     path = self.path(item['path'])
                     if not path.is_file() or common.file_hash(path) != item['sha256']:
                         raise ValueError(f'Completed artifact changed: {item["path"]}')
-            for item in self.state.get('checkpoints', []):
+            for item in ([] if request.get('selectiveResume') else self.state.get('checkpoints', [])):
                 checkpoint = self.path(item['path'])
                 source = checkpoint / 'state.tar' if checkpoint.is_dir() else checkpoint
                 if not source.is_file() or common.file_hash(source) != item['sha256']:
@@ -568,6 +573,7 @@ class Runner:
         self.save()
         self.last_checkpoint_poll = 0
         self.checkpoint_signatures = {}
+        self.dense_checkpoint_signature = None
         emit('runtime', runtimeVersions=versions)
 
     def path(self, relative):
@@ -578,6 +584,31 @@ class Runner:
 
     def save(self):
         common.save_json(self.state_path, self.state)
+
+    def restore(self, *paths):
+        """Fetch only dependencies of the stage about to run, through the worker."""
+        if not self.request.get('selectiveResume'):
+            return
+        names = [p.relative_to(self.output).as_posix() for p in paths]
+        for name in names:
+            self.path(name)
+        restore_id = uuid.uuid4().hex
+        emit('restore', stage=self.state.get('stage'), restoreId=restore_id, paths=names)
+        ack = self.output / '.worker/restored' / restore_id
+        deadline = time.monotonic() + self.request.get('archiveTimeoutSeconds', 3600)
+        while not ack.is_file():
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Stage input restoration was not acknowledged')
+            time.sleep(0.1)
+        for entry in [*self.state['completed'].values(), *self.state.get('stageCheckpoints', {}).values()]:
+            for item in entry['files']:
+                if any(item['path'] == name or item['path'].startswith(name + '/') for name in names):
+                    file = self.path(item['path'])
+                    if not file.is_file() or common.file_hash(file) != item['sha256']:
+                        raise ValueError(f'Restored stage input changed: {item["path"]}')
+
+    def file_manifest(self, paths):
+        return [dict(path=p.relative_to(self.output).as_posix(), size=p.stat().st_size, sha256=common.file_hash(p)) for p in paths]
 
     def checkpoint(self, stage):
         if not self.request.get('archiveAck'):
@@ -646,6 +677,8 @@ class Runner:
              **values)
 
     def poll_checkpoints(self, process):
+        if self.state.get('stage') == 'densification':
+            return self.poll_dense_checkpoint(process)
         if self.state.get('stage') != 'training' or (process is not None and time.monotonic() - self.last_checkpoint_poll < 10):
             return
         self.last_checkpoint_poll = time.monotonic()
@@ -714,10 +747,46 @@ class Runner:
             if changed:
                 plan = training_retention_plan(self.output, self.state)
                 self.state['retention'] = dict(version=1, excludePaths=plan['excludePaths'])
+                self.state.setdefault('stageCheckpoints', {})['training'] = dict(directory=folder.name,
+                    files=self.file_manifest(files_under(snapshot.parent)))
                 self.save()
                 self.checkpoint('training')
                 if self.request.get('archiveAck') and not self.request.get('backgroundArchive'):
                     self.prune_training(plan, open_paths, candidate if process is not None else None)
+
+    def poll_dense_checkpoint(self, process):
+        """Only closed, readable chunk archives are safe native resume points."""
+        if process is None or process.poll() is not None or time.monotonic() - self.last_checkpoint_poll < 10:
+            return
+        self.last_checkpoint_poll = time.monotonic()
+        folder = self.path(self.state['stages']['densification'])
+        with paused_engine(process) as open_paths:
+            import zipfile
+            candidates = [p for p in folder.rglob('*.npz') if p.resolve() not in open_paths and not p.is_symlink()]
+            signature = [(str(p), p.stat().st_size, p.stat().st_mtime_ns) for p in sorted(candidates)]
+            if signature == self.dense_checkpoint_signature:
+                return
+            chunks = []
+            for chunk in candidates:
+                try:
+                    with zipfile.ZipFile(chunk) as archive:
+                        if not {'xyz.npy', 'rgb.npy', 'metadata_json.npy'}.issubset(archive.namelist()) or archive.testzip() is not None:
+                            continue
+                    chunks.append(chunk)
+                except (OSError, zipfile.BadZipFile):
+                    continue
+            if not chunks or not (folder / 'config.json').is_file():
+                return
+            files = [folder / 'config.json', *folder.glob('sparse/0/*.bin'), *chunks]
+            if any(p.resolve() in open_paths for p in files):
+                return
+            manifest = dict(directory=folder.name, files=self.file_manifest(files))
+            if self.state.get('stageCheckpoints', {}).get('densification') == manifest:
+                return
+            self.state.setdefault('stageCheckpoints', {})['densification'] = manifest
+            self.save()
+            self.checkpoint('densification')
+            self.dense_checkpoint_signature = signature
 
     def prune_training(self, plan, open_paths=(), active_checkpoint=None):
         """Called only after the replacement checkpoint's archive is acknowledged."""
@@ -747,6 +816,8 @@ class Runner:
             emit('stage', stage=name, status='completed', resumed=True)
             return self.path(self.state['completed'][name]['directory'])
         previous = self.state['stages'].get(name)
+        if previous and resumable and name in self.state.get('stageCheckpoints', {}):
+            self.restore(self.path(previous))
         directory = self.path(previous) if previous and resumable else self.output / f'{name}-{uuid.uuid4().hex[:12]}'
         self.state['stages'][name] = directory.name
         self.state['stage'] = name
@@ -770,6 +841,9 @@ class Runner:
         if not files:
             raise RuntimeError(f'{name} produced no artifacts')
         self.state['completed'][name] = dict(directory=directory.name, files=files)
+        if name == 'densification':
+            self.state['completed'][name]['files'] += self.file_manifest(files_under(directory.with_name(directory.name + '-dataset')))
+        self.state.setdefault('stageCheckpoints', {}).pop(name, None)
         self.save()
         emit('stage', stage=name, status='completed', elapsedSeconds=time.monotonic() - started)
         self.checkpoint(name)
@@ -786,16 +860,18 @@ class Runner:
              *scan_settings.selection_arguments(options), '--image-format', 'jpg', '--jpeg-quality', '95'], self.output / f'{folder.name}.log'))
 
         def reconstruct(folder):
+            self.restore(selected)
             self.command([sys.executable, ROOT / 'reconstruct_splat.py', '--images', selected,
                           '--output', folder, '--settings', options_file, '--reconstruction-only',
                           '--retain-artifacts', '--max-cap', self.cap], self.output / f'{folder.name}.log')
         reconstructed = self.stage('reconstruction', reconstruct)
         # Dataset paths in the desktop manifest are not used here: scratch is relocatable.
-        result_file = reconstructed / 'colmap-result.json'
-        result = json.loads(result_file.read_text()) if result_file.exists() else {}
-        dataset = retained_path(reconstructed.resolve(), result.get('dataset_relative', 'dataset'))
-
         def densify(folder):
+            result_file = reconstructed / 'colmap-result.json'
+            self.restore(result_file)
+            result = json.loads(result_file.read_text()) if result_file.exists() else {}
+            dataset = retained_path(reconstructed.resolve(), result.get('dataset_relative', 'dataset'))
+            self.restore(dataset / 'images', dataset / 'sparse')
             # Densification publishes into a copy, keeping reconstruction immutable.
             staged_dataset = folder.parent / (folder.name + '-dataset')
             if not staged_dataset.exists():
@@ -803,13 +879,15 @@ class Runner:
             relocate_densification_config(folder, staged_dataset)
             with contextlib.redirect_stdout(sys.stderr):
                 common.densify(common.studio_path(), staged_dataset, folder, self.cap,
-                               settings=scan_settings.densification(options), on_progress=self.report_log)
+                               settings=scan_settings.densification(options), on_progress=self.report_log, on_tick=self.poll_checkpoints,
+                               portable_checkpoints=True)
         dense = self.stage('densification', densify, resumable=True)
         train_dataset = dense.parent / (dense.name + '-dataset')
         training = self.stage('training', lambda folder: self.train_lichtfeld(folder, train_dataset, options), resumable=True)
         return common.find_ply(training / 'final' if (training / 'final').exists() else training)
 
     def train_lichtfeld(self, folder, dataset, options):
+        self.restore(dataset / 'images', dataset / 'sparse')
         self.active_log = folder / 'training.log'
         config = scan_settings.training(options, self.cap)
         checkpoints = [self.path(item['path']) for item in self.state.get('checkpoints', [])
@@ -843,6 +921,7 @@ class Runner:
                 raise RuntimeError('Spirula extraction produced fewer than three images')
         selected = self.stage('selection', extract)
         def reconstruct(folder):
+            self.restore(selected)
             self.command([executable, 'sfm', 'auto', selected, '-o', folder,
                           '--progress-dir', folder / 'progress', '--no-masks'], self.output / f'{folder.name}.log')
             if not list(folder.rglob('cameras.bin')) or not list(folder.rglob('points3D.bin')):
@@ -851,6 +930,7 @@ class Runner:
             shutil.copytree(selected, folder / 'images', dirs_exist_ok=True)
         dataset = self.stage('reconstruction', reconstruct, resumable=True)
         def train(folder):
+            self.restore(dataset / 'images', dataset / 'sparse')
             folder.mkdir(parents=True, exist_ok=True)
             checkpoints = [self.path(item['path']) for item in self.state.get('checkpoints', [])
                            if item['path'].endswith('.ckpt')]
@@ -873,7 +953,18 @@ class Runner:
     def run(self):
         # A resumed final snapshot no longer needs the uncompressed training PLY.
         finished = self.state['completed'].get('export')
-        ply = None if finished else (self.lichtfeld() if self.backend == 'lichtfeld' else self.spirula())
+        trained = self.state['completed'].get('training')
+        if finished:
+            self.restore(self.path(finished['directory']) / 'result.sog')
+            ply = None
+        elif trained:
+            final = self.path(trained['directory']) / 'final'
+            self.restore(final)
+            ply = final / 'splat.ply' if self.backend == 'spirula' else common.find_ply(final)
+            if not ply.is_file():
+                raise ValueError('Saved training output is missing')
+        else:
+            ply = self.lichtfeld() if self.backend == 'lichtfeld' else self.spirula()
         expected = gaussian_count(self.path(finished['directory']) / 'result.sog' if finished else ply, self.cap)
         def export(folder):
             folder.mkdir()
@@ -888,16 +979,7 @@ class Runner:
             raise ValueError('Export Gaussian counts disagree')
         self.state['result'] = dict(sog=(exports / 'result.sog').relative_to(self.output).as_posix(),
                                     gaussians=count)
-        # Keep the latest native resume checkpoint and stage products, but not
-        # standalone Gaussian PLY copies once the compressed SOG is verified.
-        exclusions = set(self.state.get('retention', {}).get('excludePaths', []))
-        training = self.state['completed'].get('training')
-        if training:
-            for item in training['files']:
-                if item['path'].endswith('.ply') and '/final/' in item['path']:
-                    exclusions.add(item['path'])
-            training['files'] = [item for item in training['files'] if item['path'] not in exclusions]
-        self.state['retention'] = dict(version=1, excludePaths=sorted(exclusions))
+        # Completed stage products remain durable for the scan's lifetime.
         self.state['status'] = 'completed'
         self.save()
         common.save_json(self.output / 'artifact-manifest.json', dict(version=1, files=[

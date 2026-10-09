@@ -11,6 +11,31 @@ import { runPipeline } from '../agent/process';
 import { execute, scratchIsClean } from '../agent/main';
 import type { Assignment } from '@guerrilla/worker-protocol';
 
+for (const cancelled of [true, false]) test(`event conflict before heartbeat is ${cancelled ? 'an interruption' : 'still a failure'}`,async()=> {
+  const finishes:{state:string;error:string}[]=[];
+  let heartbeats=0;
+  const server=Bun.serve({port:0,async fetch(request):Promise<Response> {
+    const route=new URL(request.url).pathname.split('/').pop()!;
+    if(route==='input')return new Response('input');
+    const body=await request.json() as {kind?:string;state:string;error:string};
+    if(route==='events' && body.kind==='progress')return new Response(null,{status:409});
+    if(route==='heartbeat') {heartbeats++;return Response.json({command:cancelled?'stop':'continue',...(cancelled?{reason:'cancelled'}:{}),leaseExpiresAt:new Date(Date.now()+30000).toISOString()});}
+    if(route==='finish')finishes.push(body);
+    if(route==='artifacts')return new Response(null,{status:409});
+    return Response.json({});
+  }});
+  const assignment:Assignment={protocolVersion:2,scanId:crypto.randomUUID(),attemptId:crypto.randomUUID(),leaseId:crypto.randomUUID(),leaseExpiresAt:new Date(Date.now()+30000).toISOString(),settingsHash:'0'.repeat(64),request:{version:1,backend:'spirula',inputId:'i',title:'test',maxCap:100000,settings:{}},input:{kind:'stored',filename:'input.mp4',url:new URL('/input',server.url).href,size:5,sha256:createHash('sha256').update('input').digest('hex')},resume:[]};
+  try {
+    await expect(execute(new Client(server.url.href,'secret'),assignment,new AbortController().signal,{runPipeline:async options=> {
+      await options.onEvent({type:'progress',message:'Processing'});
+    }})).rejects.toThrow(cancelled?'Assignment cancelled by owner.':'Worker API rejected request (409)');
+    expect(heartbeats).toBe(1);
+    expect(finishes).toHaveLength(1);
+    expect(finishes[0]!.state).toBe(cancelled?'interrupted':'failed');
+    expect(finishes[0]!.error).toBe(cancelled?'Cancelled by owner.':'Worker API rejected request (409)');
+  } finally {server.stop(true);}
+});
+
 test('rejects portable traversal and Windows device aliases',()=> {
   for (const value of ['../x','C:/x','a\\x','/x','a/../b','a/con.txt','a.','a/b ']) expect(()=>safeRelativePath(value)).toThrow();
   expect(safeRelativePath('training/retained-checkpoints/a/state.tar')).toBeTruthy();
@@ -87,7 +112,7 @@ test('lease expiry aborts computation and cannot report completion',async()=> {
     if(route==='finish')calls.push(body.state!);
     return Response.json({});
   }});
-  const assignment:Assignment={protocolVersion:1,scanId:crypto.randomUUID(),attemptId:crypto.randomUUID(),leaseId:crypto.randomUUID(),leaseExpiresAt:new Date(Date.now()+400).toISOString(),settingsHash:'0'.repeat(64),request:{version:1,backend:'spirula',inputId:'i',title:'test',maxCap:100000,settings:{}},input:{kind:'stored',filename:'input.mp4',url:new URL('/input',server.url).href,size:5,sha256:createHash('sha256').update('input').digest('hex')},resume:[]};
+  const assignment:Assignment={protocolVersion:2,scanId:crypto.randomUUID(),attemptId:crypto.randomUUID(),leaseId:crypto.randomUUID(),leaseExpiresAt:new Date(Date.now()+400).toISOString(),settingsHash:'0'.repeat(64),request:{version:1,backend:'spirula',inputId:'i',title:'test',maxCap:100000,settings:{}},input:{kind:'stored',filename:'input.mp4',url:new URL('/input',server.url).href,size:5,sha256:createHash('sha256').update('input').digest('hex')},resume:[]};
   let aborted=false;
   try {
     await expect(execute(new Client(server.url.href,'secret'),assignment,new AbortController().signal,{runPipeline:async options=> {
@@ -165,7 +190,7 @@ test('server stop heartbeat aborts execution before reporting completion',async(
     if(route==='finish')states.push((await request.json() as {state:string}).state);
     return Response.json({});
   }});
-  const assignment:Assignment={protocolVersion:1,scanId:crypto.randomUUID(),attemptId:crypto.randomUUID(),leaseId:crypto.randomUUID(),leaseExpiresAt:new Date(Date.now()+30000).toISOString(),settingsHash:'0'.repeat(64),request:{version:1,backend:'spirula',inputId:'i',title:'test',maxCap:100000,settings:{}},input:{kind:'stored',filename:'input.mp4',url:new URL('/input',server.url).href,size:5,sha256:createHash('sha256').update('input').digest('hex')},resume:[]};
+  const assignment:Assignment={protocolVersion:2,scanId:crypto.randomUUID(),attemptId:crypto.randomUUID(),leaseId:crypto.randomUUID(),leaseExpiresAt:new Date(Date.now()+30000).toISOString(),settingsHash:'0'.repeat(64),request:{version:1,backend:'spirula',inputId:'i',title:'test',maxCap:100000,settings:{}},input:{kind:'stored',filename:'input.mp4',url:new URL('/input',server.url).href,size:5,sha256:createHash('sha256').update('input').digest('hex')},resume:[]};
   try {
     await expect(execute(new Client(server.url.href,'secret'),assignment,new AbortController().signal,{runPipeline:async options=> {
       await new Promise<void>((_resolve,reject)=>options.signal.addEventListener('abort',()=>reject(new Error('fenced')),{once:true}));
@@ -185,7 +210,7 @@ test('durable completion removes predecessor attempt scratch only for its scan',
     }
     return Response.json({});
   }});
-  const assignment:Assignment={protocolVersion:1,scanId:crypto.randomUUID(),attemptId:crypto.randomUUID(),leaseId:crypto.randomUUID(),leaseExpiresAt:new Date(Date.now()+30000).toISOString(),settingsHash:'0'.repeat(64),request:{version:1,backend:'spirula',inputId:'i',title:'test',maxCap:100000,settings:{}},input:{kind:'stored',filename:'input.mp4',url:new URL('/input',server.url).href,size:5,sha256:createHash('sha256').update('input').digest('hex')},resume:[]};
+  const assignment:Assignment={protocolVersion:2,scanId:crypto.randomUUID(),attemptId:crypto.randomUUID(),leaseId:crypto.randomUUID(),leaseExpiresAt:new Date(Date.now()+30000).toISOString(),settingsHash:'0'.repeat(64),request:{version:1,backend:'spirula',inputId:'i',title:'test',maxCap:100000,settings:{}},input:{kind:'stored',filename:'input.mp4',url:new URL('/input',server.url).href,size:5,sha256:createHash('sha256').update('input').digest('hex')},resume:[]};
   try {
     await execute(new Client(server.url.href,'secret'),assignment,new AbortController().signal,{runPipeline:async options=> {
       const request = JSON.parse(await readFile(options.args[options.args.indexOf('--request')+1]!, 'utf8'));

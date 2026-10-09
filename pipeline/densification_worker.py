@@ -15,6 +15,23 @@ import pipeline_common as common
 from pipeline_defaults import DENSIFICATION
 
 
+def portable_chunk_fingerprints(module, dataset):
+    """Enrolled scans relocate scratch on every attempt; native chunk identity must not."""
+    original = getattr(module, '_camera_record_fingerprint', None)
+    if not callable(original):
+        raise RuntimeError('Densification plugin does not support portable chunk checkpoints')
+    def fingerprint(record):
+        result = original(record)
+        for key in ('image_path', 'mask_path'):
+            if result.get(key) is not None:
+                file = Path(result[key]).resolve()
+                if not file.is_relative_to(dataset):
+                    raise ValueError('Densification checkpoint input is outside its dataset')
+                result[key] = file.relative_to(dataset).as_posix()
+        return result
+    module._camera_record_fingerprint = fingerprint
+
+
 def publish(report, source, target):
     """Keep the plugin's original sparse PLY, then atomically install dense points."""
     if target.exists() and common.file_hash(target) != report['sha256']:
@@ -40,6 +57,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--max-cap', type=int, required=True)
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--portable-checkpoints', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--settings-json', help=argparse.SUPPRESS)
     args = parser.parse_args()
     settings = json.loads(args.settings_json) if args.settings_json else DENSIFICATION
@@ -53,6 +71,8 @@ def main():
     site.addsitedir(str(plugin / '.venv/Lib/site-packages'))
     sys.path.insert(0, str(plugin.parent))
     module = importlib.import_module(plugin.name + '.densify')
+    if args.portable_checkpoints:
+        portable_chunk_fingerprints(module, dataset)
     sparse = dataset / 'sparse'
     if not (sparse / 'cameras.bin').is_file():
         sparse = sparse / '0'

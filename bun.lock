@@ -14,7 +14,7 @@
     },
     "packages/protocol": {
       "name": "@guerrilla/worker-protocol",
-      "version": "1.0.1",
+      "version": "2.0.0",
       "devDependencies": {
         "typescript": "^6.0.3",
       },

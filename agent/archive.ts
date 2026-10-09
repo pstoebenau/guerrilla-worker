@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import { stat, mkdir, writeFile } from 'node:fs/promises';
+import { stat, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { Fence, UploadIntent } from '@guerrilla/worker-protocol';
+import type { ArtifactManifest, Fence, UploadIntent } from '@guerrilla/worker-protocol';
 import { Client } from './http';
 import { hashFile, upload, transferUrl, uploadBody, type TransferProgress } from './transfers';
-import { checkedPath, selectedFiles, retentionExclusions } from './retention-files';
+import { checkedPath, selectedFiles, retentionExclusions, excluded } from './retention-files';
 
 export async function archiveFile(client: Client, fence: Fence, file: string, relativePath: string, role: string, checkpointId: string | undefined, signal: AbortSignal, clientId: string = randomUUID(), onProgress?: TransferProgress) {
-  const identity = await hashFile(file), before = await stat(file);
+  const identity = await hashFile(file,signal), before = await stat(file);
   const allocation = {...fence, action:'allocate', clientId, relativePath, role, ...identity, checkpointId, reuseVerified:true};
   let intent = await client.post<UploadIntent>('artifacts', allocation, signal);
   if (intent.method === 'reuse') return intent.artifactId;
@@ -48,14 +48,20 @@ export async function archiveFile(client: Client, fence: Fence, file: string, re
     }
   }
   const after = await stat(file);
-  if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || (await hashFile(file)).sha256 !== identity.sha256) throw new Error('Artifact changed during upload');
+  if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || (await hashFile(file,signal)).sha256 !== identity.sha256) throw new Error('Artifact changed during upload');
   await client.post('complete', {...fence,artifactId:intent.artifactId,...(parts.length ? {parts} : {})},signal);
   return intent.artifactId;
 }
 export type CheckpointProgress = {current:number; total:number; status:'uploading' | 'verifying'};
-export async function checkpoint(client: Client, fence: Fence, root: string, checkpointId: string, signal: AbortSignal, sequence = 1, cache = new Map<string, {clientId:string; artifactId?:string}>(), onProgress?: (progress:CheckpointProgress)=>Promise<void>) {
+export async function checkpoint(client: Client, fence: Fence, root: string, checkpointId: string, signal: AbortSignal, sequence = 1, cache = new Map<string, {clientId:string; artifactId?:string}>(), onProgress?: (progress:CheckpointProgress)=>Promise<void>, inherited: ArtifactManifest[] = []) {
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(checkpointId)) throw new Error('Invalid checkpoint ID');
   const artifactIds: string[] = [];
+  const exclusions = await retentionExclusions(root);
+  const state = JSON.parse(await readFile(join(root,'platform-state.json'),'utf8'));
+  const required = new Set<string>();
+  for (const stage of Object.values({...state.stageCheckpoints,...state.completed}) as {files?:{path:string}[]}[])
+    for (const file of stage.files ?? []) required.add(file.path);
+  const retained = new Map(inherited.filter(file => required.has(file.relativePath) && !excluded(file.relativePath,exclusions)).map(file => [file.relativePath,file]));
   const files: {relative:string; file:string; size:number}[] = [];
   for await (const relative of selectedFiles(root,await retentionExclusions(root))) {
     const file = await checkedPath(root,relative);
@@ -70,6 +76,12 @@ export async function checkpoint(client: Client, fence: Fence, root: string, che
     await onProgress?.({current:Math.min(total,current+bytes),total,status:'uploading'});
   };
   for (const {relative,file,size} of files) {
+    const previous = retained.get(relative);
+    if (previous && previous.size === size && (await hashFile(file,signal)).sha256 === previous.sha256) {
+      current += size;
+      continue;
+    }
+    retained.delete(relative);
     const role = relative === 'platform-state.json' ? 'checkpoint' : /\.(sog|spz)$/.test(relative) ? 'export' : /\.(log|jsonl)$/.test(relative) ? 'log' : 'intermediate';
     const entry = cache.get(relative) ?? {clientId:randomUUID()};
     cache.set(relative, entry);
@@ -79,7 +91,8 @@ export async function checkpoint(client: Client, fence: Fence, root: string, che
     await report(0);
   }
   await onProgress?.({current:total,total,status:'verifying'});
-  await client.post('checkpoint',{...fence,checkpointId,artifactIds,sequence},signal);
+  const inheritedArtifactIds = [...retained.values()].map(file => file.artifactId);
+  await client.post('checkpoint',{...fence,checkpointId,artifactIds,sequence,...(inheritedArtifactIds.length ? {inheritedArtifactIds} : {})},signal);
   const directory = join(root,'.archive-acks'); await mkdir(directory,{recursive:true});
   await writeFile(join(directory,checkpointId),'committed',{mode:0o600});
 }

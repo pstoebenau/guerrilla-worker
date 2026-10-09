@@ -33,7 +33,7 @@ def densification_plugin_path():
                                str(Path.home() / ".lichtfeld/plugins/densification")))
 
 
-def densify(studio, dataset, output, max_cap, settings=None, on_progress=None):
+def densify(studio, dataset, output, max_cap, settings=None, on_progress=None, on_tick=None, portable_checkpoints=False):
     """Run installed RoMaV2 High in a fresh attempt; publish only validated points."""
     import sys
     plugin = densification_plugin_path().resolve()
@@ -53,7 +53,9 @@ def densify(studio, dataset, output, max_cap, settings=None, on_progress=None):
         command += ['--settings-json', json.dumps(settings)]
     if output.exists():
         command.append('--resume')
-    run_logged(command, log, **({'on_progress': on_progress} if on_progress else {}))
+    if portable_checkpoints:
+        command.append('--portable-checkpoints')
+    run_logged(command, log, **({'on_progress': on_progress} if on_progress else {}), **({'on_tick': on_tick} if on_tick else {}))
     return json.loads((Path(output) / 'result.json').read_text(encoding='utf-8'))
 
 

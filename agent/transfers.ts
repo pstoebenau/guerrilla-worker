@@ -5,9 +5,9 @@ import { dirname } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
-export async function hashFile(file: string) {
+export async function hashFile(file: string, signal?:AbortSignal) {
   const hash = createHash('sha256'); let size = 0;
-  for await (const chunk of createReadStream(file)) { hash.update(chunk); size += chunk.length; }
+  for await (const chunk of createReadStream(file,{signal})) { hash.update(chunk); size += chunk.length; }
   return {size, sha256: hash.digest('hex')};
 }
 export function transferUrl(value: string) {
