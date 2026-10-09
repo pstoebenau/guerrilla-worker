@@ -71,9 +71,15 @@ export async function execute(client: Client, assignment: Assignment, shutdown: 
     return next;
   };
   const archiveAbort = new AbortController();
-  const archives = new BackgroundArchive(client,fence,output,AbortSignal.any([signal,archiveAbort.signal]),async status=> {
+  const latestUploadSequence = new Map<string,number>();
+  const archives = new BackgroundArchive(client,fence,output,AbortSignal.any([signal,archiveAbort.signal]),async (status,detail)=> {
     const message = status === 'retrying' ? 'Upload delayed. Processing continues locally; retrying in the background.' : status === 'saved' ? 'Stage outputs saved.' : 'Saving stage outputs in the background.';
-    await sendEvent('upload',message,{status}).catch(()=>{});
+    const {stages,...progress} = detail;
+    for (const stage of stages) {
+      if ((latestUploadSequence.get(stage) ?? 0) > progress.checkpointSequence) continue;
+      latestUploadSequence.set(stage,progress.checkpointSequence);
+      await sendEvent('upload',message,{...progress,status,unit:'bytes'},stage).catch(()=>{});
+    }
   });
   try {
     await mkdir(path.join(output,'.worker'),{recursive:true});
@@ -100,7 +106,7 @@ export async function execute(client: Client, assignment: Assignment, shutdown: 
       if (event.type === 'checkpoint') {
         await mkdir(path.join(output,'logs'),{recursive:true});
         await copyFile(path.join(job,'worker.log'),path.join(output,'logs','worker.log'));
-        await archives.enqueue(String(event.checkpointId),++checkpointSequence); return;
+        await archives.enqueue(String(event.checkpointId),++checkpointSequence,event.stage); return;
       }
       if (event.type === 'failed' && typeof event.error === 'string') pipelineFailure = redactSecrets(event.error);
       const {type, runtimeVersions, message, ...progress} = event;

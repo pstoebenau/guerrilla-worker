@@ -32,8 +32,21 @@ export async function download(url: string, destination: string, expected: {size
     await rename(temporary, destination);
   } finally { await unlink(temporary).catch(() => {}); }
 }
-export async function upload(url: string, file: string, signal: AbortSignal) {
+export type TransferProgress = (bytes: number) => Promise<void>;
+
+export function uploadBody(file: string, onProgress?: TransferProgress, range?: {start:number;end:number}) {
+  return Readable.from((async function* () {
+    let bytes = 0;
+    for await (const chunk of createReadStream(file, range)) {
+      bytes += chunk.length;
+      await onProgress?.(bytes);
+      yield chunk;
+    }
+  })());
+}
+
+export async function upload(url: string, file: string, signal: AbortSignal, onProgress?: TransferProgress) {
   transferUrl(url);
-  const response = await fetch(url, {method:'PUT', headers:{'content-length':String((await stat(file)).size)}, body:createReadStream(file) as never, duplex:'half', signal, redirect:'error'} as RequestInit);
+  const response = await fetch(url, {method:'PUT', headers:{'content-length':String((await stat(file)).size)}, body:uploadBody(file,onProgress) as never, duplex:'half', signal, redirect:'error'} as RequestInit);
   if (!response.ok) throw new Error(`Upload failed (${response.status})`);
 }

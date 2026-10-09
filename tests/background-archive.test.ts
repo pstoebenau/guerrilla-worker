@@ -2,7 +2,7 @@ import {test, expect} from 'bun:test';
 import {mkdtemp, writeFile, readFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {BackgroundArchive} from '../agent/background-archive';
+import {BackgroundArchive, type UploadStatus, type UploadProgress} from '../agent/background-archive';
 import {Client} from '../agent/http';
 import {removeScratchPath} from '../agent/retention-files';
 
@@ -63,6 +63,42 @@ test('slow archival freezes bytes, coalesces pending snapshots, retries, and gat
     expect(statuses).toContain('retrying');
     expect(statuses.at(-1)).toBe('saved');
     expect(done).toBe(true);
+  } finally {
+    release();abort.abort();await queue.drain().catch(()=>{});server.stop(true);
+    await removeScratchPath(tmpdir(),root.slice(tmpdir().length+1));
+  }
+});
+
+test('stage upload bytes reach verification before saved is published', async()=> {
+  const root = await mkdtemp(join(tmpdir(),'guerrilla-progress-'));
+  await writeFile(join(root,'platform-state.json'),JSON.stringify({completed:{selection:{}}}));
+  await writeFile(join(root,'frames.bin'),Buffer.alloc(256*1024));
+  let release!:()=>void, entered!:()=>void;
+  const held = new Promise<void>(resolve=>{release=resolve;});
+  const verifying = new Promise<void>(resolve=>{entered=resolve;});
+  const updates: (UploadProgress & {status:UploadStatus})[] = [];
+  const server = Bun.serve({port:0,async fetch(request):Promise<Response> {
+    const route = new URL(request.url).pathname;
+    if (route === '/api/worker/artifacts') return Response.json({artifactId:'artifact',method:'put',url:new URL('/upload',server.url).href});
+    if (route === '/upload') {await request.arrayBuffer();return new Response('');}
+    if (route === '/api/worker/checkpoint') {entered();await held;}
+    return Response.json({});
+  }});
+  const abort = new AbortController();
+  const queue = new BackgroundArchive(new Client(server.url.href,''),{scanId:'s',attemptId:'a',leaseId:'l'},root,abort.signal,
+    async (status,progress)=>{updates.push({...progress,stages:[...progress.stages],status});},1);
+  try {
+    await queue.enqueue('selection-snapshot',1,'selection');
+    await verifying;
+    expect(updates[0]?.status).toBe('queued');
+    expect(updates.every(update=>update.stages.includes('selection'))).toBe(true);
+    expect(updates.some(update=>update.status==='uploading' && update.current>0 && update.current<update.total)).toBe(true);
+    expect(updates.at(-1)?.status).toBe('verifying');
+    expect(updates.at(-1)?.current).toBe(updates.at(-1)?.total);
+    expect(updates.some(update=>update.status==='saved')).toBe(false);
+    release();await queue.drain();
+    expect(updates.at(-1)?.status).toBe('saved');
+    expect(updates.at(-1)?.checkpointId).toBe('selection-snapshot');
   } finally {
     release();abort.abort();await queue.drain().catch(()=>{});server.stop(true);
     await removeScratchPath(tmpdir(),root.slice(tmpdir().length+1));
