@@ -13,6 +13,7 @@ export type PipelineEvent = {
 export async function runPipeline(options: {
   command: string;
   args: string[];
+  parentGuard?: string;
   cwd: string;
   logPath: string;
   signal: AbortSignal;
@@ -20,7 +21,10 @@ export async function runPipeline(options: {
 }): Promise<void> {
   options.signal.throwIfAborted();
   const log = createWriteStream(options.logPath, { flags: "a", mode: 0o600 });
-  const child = spawn(options.command, options.args, {
+  const args = process.platform === 'darwin' && options.parentGuard
+    ? [options.parentGuard, String(process.pid), options.command, ...options.args]
+    : options.args;
+  const child = spawn(options.command, args, {
     cwd: options.cwd,
     env: { ...process.env, WORKER_PARENT_PID: String(process.pid) },
     stdio: ["ignore", "pipe", "pipe"],

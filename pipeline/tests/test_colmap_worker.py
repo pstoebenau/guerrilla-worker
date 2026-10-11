@@ -54,7 +54,7 @@ class ColmapWorkerTests(unittest.TestCase):
         self.assertNotEqual(first_attempt, self.pc.global_mapping.call_args.kwargs['output_path'])
         self.assertTrue(first_attempt.is_dir())
         self.assertEqual(result['unregistered_images'], ['3.png'])
-        self.assertEqual(self.output / result['dataset_relative'], Path(result['dataset_dir']))
+        self.assertEqual((self.output / result['dataset_relative']).resolve(), Path(result['dataset_dir']).resolve())
 
     def test_changed_input_rejects_resume_before_gpu_work(self):
         self.run_reconstruction()

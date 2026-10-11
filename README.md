@@ -5,6 +5,46 @@ local release candidate; publication remains pending redistribution review.
 It includes complete Spirula and LichtFeld workflows. It has no database driver,
 bucket credential client, private package, queue access, or inbound server.
 
+## Native worker setup
+
+The same worker and commands run on Windows x64, Linux x64, and Apple Silicon
+macOS. Spirula uses the host's hardware Vulkan GPU (MoltenVK on macOS).
+LichtFeld additionally requires NVIDIA CUDA and its engine/plugins; it is optional
+and is advertised only when its own preflight passes.
+
+Install Bun, Node.js 22.22.0+, FFmpeg, and Python 3.12+ or `uv`, then run:
+
+```sh
+bun run setup
+bun start --preflight
+```
+
+Setup installs the checksum-verified Spirula release, an isolated Python
+environment, and the locked converter, then builds and preflights the worker.
+Engines live in `~/.local/share/guerrilla-worker/runtimes/` outside the checkout.
+`SPIRULA_BIN` and `PYTHON` can select an existing installation instead. Linux
+also needs its GPU driver and the system libraries required by Spirula's Ubuntu
+binary. Setup does not install NVIDIA/CUDA dependencies for Spirula-only workers.
+
+Set `WORKER_CONTROL_URL` to your Guerrilla server, create a token in **My workers**,
+and enroll once:
+
+```sh
+bun start enroll --token-stdin
+bun start
+```
+
+Credentials stay outside the checkout. In Guerrilla, choose **Spirula** and
+**My workers** for an Apple Silicon, AMD, or Intel GPU worker. For local Guerrilla
+development, use `bun run worker:setup`, `bun run worker enroll --token-stdin`,
+and `bun dev --worker` from the Guerrilla repository instead.
+
+GPU discovery comes from Spirula itself, rather than an OS-specific hardware
+inventory. Checkpoint freezing and process containment live in `process_runtime.py`;
+the shared pipeline keeps engine commands and artifacts independent of the host.
+Windows uses Job Objects, Linux uses parent-death signals, and macOS uses a process
+group watchdog. These host primitives preserve GPU exclusion after supervisor exit.
+
 ## License
 
 The owner accepted GPL-3.0-only for the original worker code. That code is
@@ -19,8 +59,8 @@ License acceptance does not clear the redistribution blockers in
 ## Standalone scans
 
 Install Python 3.12+, FFmpeg, the required engine and its documented plugins.
-Create a virtual environment and install `pipeline/requirements.txt` plus
-CUDA-enabled pycolmap 4.0.2 in that environment (see
+Create a virtual environment and install `pipeline/requirements.txt`. LichtFeld
+also needs CUDA-enabled pycolmap 4.0.2 in that environment (see
 [Windows instructions](docs/windows-worker.md#reconstruction-dependency); Linux
 uses `pycolmap-cuda12==4.0.2`). Reconstruction uses our own direct pycolmap
 pipeline; the LichtFeld COLMAP plugin is not required. Set
@@ -32,7 +72,8 @@ engine. Install Node.js 22+ and run `npm ci --prefix pipeline/docker/converter`
 for the locked converter, or install `@playcanvas/splat-transform@3.10.1` globally.
 `SPLAT_TRANSFORM_BIN` can select its executable or `bin/cli.mjs` entry point.
 Spirula scans require Spirula and this converter; LichtFeld is only required for
-the LichtFeld workflow. SOG compression uses Vulkan on Linux and D3D12 on Windows. Set
+the LichtFeld workflow. SOG compression uses Metal on macOS, Vulkan on Linux,
+and D3D12 on Windows. Set
 `SPLAT_TRANSFORM_GPU=cpu` explicitly for CPU compression or a GPU adapter index;
 `SPLAT_TRANSFORM_GPU_BACKEND` selects another WebGPU backend.
 
@@ -54,7 +95,7 @@ Install Bun 1.4.2 and Node 22.22.0+. Run `bun install --frozen-lockfile`, then
 `bun run build`. `PYTHON` selects the Python environment; `PIPELINE_ROOT` may
 select an installed pipeline directory. `node dist/worker.mjs --preflight`
 reports the actual engine/GPU availability. One agent executes one scan at a time.
-Version 1 requires exactly one visible GPU; isolate Docker devices with
+The worker requires exactly one visible hardware GPU; isolate Docker devices with
 `--gpus device=GPU_UUID`. Multiple visible GPUs or a nonzero worker index are rejected.
 All local agents sharing a GPU must share `GPU_LOCK_PATH` and
 `WORKER_AGENT_LOCK_DIRECTORY`. The latter is an absolute directory holding
@@ -101,7 +142,7 @@ shared host GPU-lock directory at `/gpu`, pass
 `WORKER_CREDENTIAL_FILE`, `WORKER_SCRATCH=/scratch` and `--gpus all`. Do not expose
 ports, mount Docker sockets, or pass database/S3/provider credentials.
 
-Linux NVIDIA is the initial Docker target. Native Windows uses the same protocol.
+Linux NVIDIA is the Docker target. Native Windows, Linux and macOS use the same protocol.
 For a portable Windows executable using installed engines, see
 [Windows worker packaging](docs/windows-worker.md).
 Windows Docker/WSL previously exposed CUDA but no NVIDIA Vulkan adapter to

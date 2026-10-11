@@ -9,6 +9,7 @@
   ],
   "scripts": {
     "start": "bun agent/main.ts",
+    "setup": "bun scripts/setup.ts",
     "build": "bun build agent/main.ts --target=node --outfile=dist/worker.mjs",
     "build:windows": "bun scripts/build-windows.ts",
     "build:installer": "bun scripts/build-windows.ts -Installer",

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import errno
 import gzip
 import hashlib
 import json
@@ -62,117 +61,12 @@ def relocate_densification_config(folder, dataset):
         common.save_json(native_config, config)
 
 
-@contextlib.contextmanager
-def paused_engine(process):
-    if os.name == 'nt':
-        import psutil
-        root = psutil.Process(process.pid)
-        stopped = []
-        try:
-            root.suspend()
-            stopped.append(root)
-            for child in root.children(recursive=True):
-                child.suspend()
-                stopped.append(child)
-            yield {Path(item.path).resolve() for child in stopped for item in child.open_files()}
-        finally:
-            for child in reversed(stopped):
-                try:
-                    child.resume()
-                except psutil.NoSuchProcess:
-                    pass
-        return
-    os.killpg(process.pid, signal.SIGSTOP)
-    try:
-        os.waitpid(process.pid, os.WUNTRACED)
-        paths = set()
-        for descriptor in Path(f'/proc/{process.pid}/fd').iterdir():
-            try:
-                paths.add(descriptor.resolve())
-            except OSError:
-                continue
-        yield paths
-    finally:
-        try:
-            os.killpg(process.pid, signal.SIGCONT)
-        except ProcessLookupError:
-            pass
+from process_runtime import paused_engine
+from process_runtime import gpu_lock as _gpu_lock
 
 
-@contextlib.contextmanager
 def gpu_lock():
-    """The lock survives a killed supervisor while its engine descendants live."""
-    wait = os.environ.get('GPU_LOCK_WAIT') == '1'
-    announced = False
-
-    def wait_for_owner():
-        nonlocal announced
-        if not announced:
-            emit('progress', message='Waiting for another worktree to release the GPU')
-            announced = True
-        if os.name == 'nt' and os.environ.get('WORKER_PARENT_PID'):
-            import psutil
-            if not psutil.pid_exists(int(os.environ['WORKER_PARENT_PID'])):
-                raise InterruptedError('Native worker exited while waiting for the GPU')
-        time.sleep(0.25)
-
-    if os.name == 'nt':
-        if os.environ.get('WORKER_MODE') != 'native-development':
-            raise RuntimeError('Native GPU execution requires WORKER_MODE=native-development')
-        import msvcrt
-        from windows_job import WindowsJob
-        path = Path(os.environ.get('GPU_LOCK_PATH', str(Path(os.environ.get('WORKER_SCRATCH', Path(os.environ['LOCALAPPDATA']) / 'Guerrilla/scratch')) / '.gpu.lock')))
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open('a+b') as stream:
-            stream.write(b'0'); stream.flush(); stream.seek(0)
-            while True:
-                try:
-                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
-                    break
-                except OSError as exc:
-                    if not wait or exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
-                        raise RuntimeError('GPU is still owned by another native runner') from exc
-                    wait_for_owner()
-            containment = WindowsJob(path)
-            try:
-                yield
-            finally:
-                containment.close()
-                stream.seek(0)
-                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-        return
-    import fcntl
-    worker_parent = os.environ.get('WORKER_PARENT_PID')
-    if worker_parent:
-        import ctypes
-        libc = ctypes.CDLL(None, use_errno=True)
-        # Node can die without delivering its graceful shutdown signal. The
-        # runner then unwinds run_logged, terminating and reaping engine groups.
-        if libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0:
-            raise OSError(ctypes.get_errno(), 'Cannot bind runner lifetime to worker')
-        if os.getppid() != int(worker_parent):
-            raise RuntimeError('Worker parent no longer owns this runner')
-    path = Path(os.environ.get('GPU_LOCK_PATH', '/scratch/.gpu.lock'))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open('a+b') as stream:
-        while True:
-            try:
-                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError as exc:
-                if not wait:
-                    raise RuntimeError('GPU still owned by another runner or surviving engine process') from exc
-                wait_for_owner()
-        old = os.environ.get('PIPELINE_GPU_LOCK_FD')
-        os.environ['PIPELINE_GPU_LOCK_FD'] = str(stream.fileno())
-        try:
-            yield
-        finally:
-            if old is None:
-                os.environ.pop('PIPELINE_GPU_LOCK_FD', None)
-            else:
-                os.environ['PIPELINE_GPU_LOCK_FD'] = old
-            # Do not LOCK_UN: shared inherited descriptors must retain ownership.
+    return _gpu_lock(lambda: emit('progress', message='Waiting for another worktree to release the GPU'))
 
 
 def spz_count(path, cap):
@@ -478,7 +372,7 @@ def runtime_versions(backend):
             if sources:
                 versions[name] = common.fingerprint(sources)
     if backend == 'spirula':
-        executable = Path(os.environ.get('SPIRULA_BIN', '/opt/spirula/spirula'))
+        executable = common.spirula_path()
         if not executable.is_file():
             raise RuntimeError('Spirula executable is unavailable')
         versions['spirula'] = SPIRULA_VERSION
@@ -491,6 +385,8 @@ def preflight():
     result = {'runtimeVersions': {}, 'backends': {}}
     for backend in ('lichtfeld', 'spirula'):
         try:
+            if sys.platform == 'darwin' and backend == 'lichtfeld':
+                raise RuntimeError('LichtFeld requires NVIDIA CUDA; this Mac worker supports Spirula only')
             result['runtimeVersions'].update(runtime_versions(backend))
             if backend == 'lichtfeld':
                 from colmap_worker import probe as probe_colmap
@@ -516,24 +412,18 @@ def preflight():
                 sys.path.insert(0, str(common.densification_plugin_path().parent))
                 importlib.import_module(common.densification_plugin_path().name + '.densify')
             else:
-                if os.name == 'nt':
-                    executable = os.environ.get('SPIRULA_BIN', '')
-                    absent = Path(os.environ.get('TEMP', '.')) / ('guerrilla-preflight-' + uuid.uuid4().hex)
-                    proc = subprocess.run([executable, 'train', '--device', 'NVIDIA', '--data', str(absent),
-                                           '--cap-max', '1', '--num-iterations', '1', '--disable-viewer', '1', '--keep-viewer-alive', '0'],
-                                          text=True, capture_output=True, timeout=30)
-                    report = proc.stdout + proc.stderr
-                    if 'NVIDIA' not in report or 'dataset path does not exist' not in report:
-                        raise RuntimeError('Native Spirula NVIDIA Vulkan preflight failed: ' + report[-1200:])
-                    result['backends'][backend] = {'available': True, 'workflowVerified': False}
-                    continue
-                proc = subprocess.run(['vulkaninfo', '--summary'], text=True, capture_output=True, timeout=30)
-                report = proc.stdout + proc.stderr
-                if proc.returncode or not re.search(r'deviceType\s*=\s*PHYSICAL_DEVICE_TYPE_(DISCRETE|INTEGRATED)_GPU', report):
-                    raise RuntimeError('No hardware Vulkan GPU is available inside Docker; CPU renderers are rejected')
+                from gpu_runtime import probe_spirula
+                result['gpus'] = probe_spirula(common.spirula_path())
             result['backends'][backend] = {'available': True, 'workflowVerified': False}
         except Exception as exc:
             result['backends'][backend] = {'available': False, 'workflowVerified': False, 'error': str(exc)[:2000]}
+    if result['backends']['lichtfeld']['available'] or any('NVIDIA' in gpu['name'].upper() for gpu in result.get('gpus', [])):
+        from gpu_runtime import nvidia_devices
+        try:
+            result['gpus'] = nvidia_devices()
+        except Exception as exc:
+            if result['backends']['lichtfeld']['available']:
+                result['backends']['lichtfeld'].update(available=False, error=str(exc)[:2000])
     return result
 
 
@@ -956,7 +846,7 @@ class Runner:
             raise RuntimeError('Resumed LichtFeld did not finish the configured training duration')
 
     def spirula(self):
-        executable = Path(os.environ.get('SPIRULA_BIN', '/opt/spirula/spirula'))
+        executable = common.spirula_path()
         extraction = {'skip': 10, 'keep': 5, 'max_frames': 300, 'quality': 95, 'scale': 1,
                       **self.request['settings'].get('extraction', {})}
         flags = [part for key, value in extraction.items() for part in ('--' + key.replace('_', '-'), str(value))]

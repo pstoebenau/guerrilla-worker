@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile, chmod, readdir, copyFile, lstat } from 'nod
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -15,11 +16,13 @@ import { archiveFile } from './archive';
 import { BackgroundArchive } from './background-archive';
 import { agentLockPath } from './paths';
 import { readEnrollmentToken } from './enrollment';
+import { gpuInventory } from './gpu';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const pipelineRoot = process.env.PIPELINE_ROOT ?? (process.platform === 'linux' && root === '/opt' ? '/opt/pipeline' : path.join(root,'pipeline'));
 const runner = path.join(pipelineRoot,'platform_runner.py');
-const python = process.env.PYTHON ?? 'python';
+const localPython = path.join(root, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+const python = process.env.PYTHON ?? (existsSync(localPython) ? localPython : process.platform === 'win32' ? 'python' : 'python3');
 const credentialFile = process.env.WORKER_CREDENTIAL_FILE ?? path.join(homedir(),'.config','guerrilla-worker','credentials.json');
 const scratch = path.resolve(process.env.WORKER_SCRATCH ?? path.join(homedir(),'.cache','guerrilla-worker'));
 
@@ -36,11 +39,8 @@ function registration(): Registration {
   const report = JSON.parse(execFileSync(python,[runner,'--preflight'],{encoding:'utf8',windowsHide:true,maxBuffer:4*1024*1024}));
   const engines: Registration['engines'] = {};
   for (const engine of ['spirula','lichtfeld'] as const) if (report.backends?.[engine]?.available) engines[engine] = createHash('sha256').update(JSON.stringify(report.runtimeVersions)).digest('hex');
-  const gpuLines = execFileSync('nvidia-smi',['--query-gpu=uuid,name,memory.total','--format=csv,noheader,nounits'],{encoding:'utf8',windowsHide:true}).trim().split('\n');
-  if (gpuLines.length !== 1 || Number(process.env.WORKER_GPU_INDEX ?? 0) !== 0) throw new Error('Protocol v1 requires one visible GPU; isolate devices before starting the worker');
-  const [id,name,memory] = gpuLines[0]!.split(',').map(s=>s.trim());
-  if (!id || !name || !Number.isFinite(Number(memory))) throw new Error('GPU inventory failed');
-  return {protocolVersion:PROTOCOL_VERSION,build:'0.2.0',runtime:`${process.platform}-${process.arch}`,engines,gpus:[{id,name,memoryBytes:Number(memory)*1024*1024}],healthy:Object.keys(engines).length>0};
+  const gpus = gpuInventory(report);
+  return {protocolVersion:PROTOCOL_VERSION,build:'0.2.0',runtime:`${process.platform}-${process.arch}`,engines,gpus,healthy:Object.keys(engines).length>0};
 }
 
 export async function execute(client: Client, assignment: Assignment, shutdown: AbortSignal, dependencies = {runPipeline}) {
@@ -101,14 +101,14 @@ export async function execute(client: Client, assignment: Assignment, shutdown: 
       try { await download(assignment.input.url,input,expected,signal); }
       catch {signal.throwIfAborted();const refreshed=await client.post<{input:Assignment['input']}>('refresh',{...fence,input:true,artifactIds:[]},signal);await download(refreshed.input.url,input,expected,signal);}
     } else {
-      await dependencies.runPipeline({command:python,args:[runner,'--download',assignment.input.url,'--public-source','--destination',input],cwd:pipelineRoot,logPath:path.join(job,'download.log'),signal,onEvent:async()=>{}});
+      await dependencies.runPipeline({command:python,args:[runner,'--download',assignment.input.url,'--public-source','--destination',input],parentGuard:path.join(pipelineRoot,'parent_guard.py'),cwd:pipelineRoot,logPath:path.join(job,'download.log'),signal,onEvent:async()=>{}});
       await archiveFile(client,fence,input,'input/source.mp4','input',undefined,signal);
     }
     await sendEvent('stage','Video ready',{status:'completed'},'download');
     }
     const requestPath = path.join(output,'.worker','request.json');
     await writeFile(requestPath,JSON.stringify({...assignment.request,scanId:assignment.scanId,attemptId:assignment.attemptId,inputPath:input,outputPath:output,resume:!!resumeState,selectiveResume:!!resumeState,inputSha256:assignment.input.sha256,archiveAck:true,backgroundArchive:true,...(assignment.runtimeVersions ? {runtimeVersions:assignment.runtimeVersions} : {})}),{mode:0o600});
-    await dependencies.runPipeline({command:python,args:[runner,'--request',requestPath],cwd:pipelineRoot,logPath:path.join(job,'worker.log'),signal,onEvent:async event=> {
+    await dependencies.runPipeline({command:python,args:[runner,'--request',requestPath],parentGuard:path.join(pipelineRoot,'parent_guard.py'),cwd:pipelineRoot,logPath:path.join(job,'worker.log'),signal,onEvent:async event=> {
       if (event.type === 'restore') {
         if (typeof event.restoreId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(event.restoreId) || !Array.isArray(event.paths) || event.paths.some(p=>typeof p!=='string')) throw new Error('Invalid stage restore request');
         await sendEvent('progress','Restoring required stage inputs',{substep:'Downloading saved inputs'},event.stage);

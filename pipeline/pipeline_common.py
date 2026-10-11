@@ -3,7 +3,6 @@ selection manifests, logged subprocesses, LichtFeld training and splat-transform
 from __future__ import annotations
 
 import hashlib
-import ctypes
 import json
 import os
 from pathlib import Path
@@ -11,10 +10,20 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
 import uuid
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
+
+
+def spirula_path():
+    if override := os.environ.get('SPIRULA_BIN'):
+        return Path(override)
+    installed = Path.home() / '.local/share/guerrilla-worker/runtimes/spirula-2026.9.30' / ('spirula.exe' if os.name == 'nt' else 'spirula')
+    if installed.is_file():
+        return installed
+    return Path('/opt/spirula/spirula')
 
 
 def studio_path():
@@ -119,22 +128,9 @@ def run_logged(command, log, on_tick=None, on_progress=None):
     print("Running: " + subprocess.list2cmdline(command), flush=True)
     if log.exists():
         log.replace(log.with_name(log.stem + '-previous-' + uuid.uuid4().hex[:12] + log.suffix))
-    child_options = {}
-    if os.name != 'nt' and os.environ.get('PIPELINE_GPU_LOCK_FD'):
-        child_options['pass_fds'] = (int(os.environ['PIPELINE_GPU_LOCK_FD']),)
-        # Each supervised generation dies with its parent, including SIGKILL.
-        # Resolve libc before fork; the child callback only calls libc/syscalls.
-        libc = ctypes.CDLL(None, use_errno=True)
-        parent_pid = os.getpid()
-        def parent_death_signal():
-            if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0 or os.getppid() != parent_pid:
-                os._exit(1)
-        child_options['preexec_fn'] = parent_death_signal
+    from process_runtime import launch, terminate
     with log.open("w", encoding="utf-8") as stream:
-        process = subprocess.Popen(command, stdout=stream, stderr=subprocess.STDOUT,
-                                   start_new_session=os.name != "nt",
-                                   **child_options,
-                                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        process = launch(command, stdout=stream, stderr=subprocess.STDOUT)
         previous = {}
 
         def interrupted(signum, _frame):
@@ -151,19 +147,11 @@ def run_logged(command, log, on_tick=None, on_progress=None):
                 time.sleep(0.25)
         except BaseException:
             if process.poll() is None:
-                if os.name == "nt":
-                    subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                   creationflags=subprocess.CREATE_NO_WINDOW)
-                else:
-                    os.killpg(process.pid, signal.SIGTERM)
+                terminate(process)
                 try:
                     process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
-                    if os.name == "nt":
-                        process.kill()
-                    else:
-                        os.killpg(process.pid, signal.SIGKILL)
+                    terminate(process, force=True)
                     process.wait()
             raise
         finally:
@@ -235,7 +223,7 @@ def converter_version():
 
 
 def converter_gpu_backend():
-    return os.environ.get('SPLAT_TRANSFORM_GPU_BACKEND', 'd3d12' if os.name == 'nt' else 'vulkan')
+    return os.environ.get('SPLAT_TRANSFORM_GPU_BACKEND', 'metal' if sys.platform == 'darwin' else 'd3d12' if os.name == 'nt' else 'vulkan')
 
 
 def export_spz(ply, spz, log, on_progress=None):

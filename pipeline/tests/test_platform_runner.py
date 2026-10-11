@@ -551,7 +551,7 @@ class PlatformTests(unittest.TestCase):
                         process.kill(); process.wait(timeout=5)
                 runner.stdout.close(); runner.stderr.close()
 
-    @unittest.skipIf(os.name == 'nt', 'Linux parent-death signal')
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux parent-death signal')
     def test_linux_worker_death_kills_runner(self):
         with tempfile.TemporaryDirectory() as temporary:
             env = dict(os.environ, GPU_LOCK_PATH=str(Path(temporary) / 'gpu.lock'))
@@ -583,7 +583,7 @@ class PlatformTests(unittest.TestCase):
                     worker.kill(); worker.wait(timeout=5)
                 worker.stdout.close()
 
-    @unittest.skipIf(os.name == 'nt', 'Linux parent-death signal')
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux parent-death signal')
     def test_linux_supervisor_death_kills_engine_process(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

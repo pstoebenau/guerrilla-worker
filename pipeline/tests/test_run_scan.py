@@ -125,7 +125,7 @@ class RunScanTest(unittest.TestCase):
             self.assertEqual(run.call_count, 1)
             command = run.call_args.args[0]
             self.assertEqual(command[command.index('--reconstruction-mode') + 1], 'incremental')
-            self.assertEqual(command[command.index('--images') + 1], str(selection))
+            self.assertEqual(Path(command[command.index('--images') + 1]).resolve(), selection.resolve())
             self.assertEqual(main(args + ['--resume']), 0)
             self.assertEqual(run.call_count, 1)
         with patch('pipeline_common.run_logged') as run:
