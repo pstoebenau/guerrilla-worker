@@ -684,6 +684,42 @@ class Runner:
         emit('progress', stage=self.state['stage'], elapsedSeconds=now - self.stage_started,
              **values)
 
+    def training_preview(self, snapshot, identity):
+        """Publish a compact, immutable viewer copy separately from resume state."""
+        folder = self.path(self.state['stages']['training'])
+        step = checkpoint_order(snapshot / 'state.tar' if snapshot.is_dir() else snapshot)[0]
+        preview = folder / 'previews' / f'step-{max(0, step):09d}-{identity[:12]}.sog'
+        if preview.is_file():
+            gaussian_count(preview, self.cap)
+            return
+        source = snapshot / 'splat.ply' if snapshot.is_dir() else snapshot
+        if not source.is_file():
+            emit('log', stage='training', message='This checkpoint has no renderable scene for a SOG preview.')
+            return
+        # A failed converter must never expose a partial preview or invalidate
+        # the native recovery checkpoint. Conversion reads only frozen bytes.
+        temporary = folder / '.worker' / ('preview-' + uuid.uuid4().hex)
+        temporary.mkdir(parents=True)
+        candidate = temporary / 'scene.sog'
+        preview.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with contextlib.redirect_stdout(sys.stderr):
+                log = folder / 'previews' / (preview.stem + '.log')
+                if self.backend == 'lichtfeld':
+                    ply = temporary / 'checkpoint.ply'
+                    common.run_logged([common.studio_path(), 'convert', source, ply], log)
+                    source = ply
+                common.export_sog(source, candidate, log, self.cap)
+            gaussian_count(candidate, self.cap)
+            candidate.replace(preview)
+            sidecar = candidate.with_suffix('.ppisp')
+            if sidecar.is_file():
+                sidecar.replace(preview.with_suffix('.ppisp'))
+        except Exception as error:
+            emit('log', stage='training', message=f'SOG checkpoint preview could not be saved: {error}')
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
+
     def poll_checkpoints(self, process):
         if self.state.get('stage') == 'densification':
             return self.poll_dense_checkpoint(process)
@@ -747,6 +783,7 @@ class Runner:
                 recorded = {'path': snapshot.relative_to(self.output).as_posix(), 'sha256': identity}
                 if self.backend == 'spirula':
                     recorded['configSha256'] = common.file_hash(snapshot.parent / 'config.json')
+                self.training_preview(snapshot, identity)
                 self.state['checkpoints'] = [recorded]
                 hashes.add(identity)
                 self.checkpoint_signatures[str(candidate)] = (candidate.stat().st_size, candidate.stat().st_mtime_ns)
@@ -756,7 +793,7 @@ class Runner:
                 plan = training_retention_plan(self.output, self.state)
                 self.state['retention'] = dict(version=1, excludePaths=plan['excludePaths'])
                 self.state.setdefault('stageCheckpoints', {})['training'] = dict(directory=folder.name,
-                    files=self.file_manifest(files_under(snapshot.parent)))
+                    files=self.file_manifest([*files_under(snapshot.parent), *files_under(folder / 'previews')]))
                 self.save()
                 self.checkpoint('training')
                 if self.request.get('archiveAck') and not self.request.get('backgroundArchive'):
