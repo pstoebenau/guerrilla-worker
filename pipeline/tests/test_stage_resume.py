@@ -88,14 +88,14 @@ class StageResumeTests(unittest.TestCase):
                         self.assertTrue((dataset / 'images/frame.jpg').exists())
                         folder.mkdir()
                         (folder / 'result.json').write_text('{}')
-                    def train(folder, dataset, _options):
+                    def train(_runner, folder, dataset, _options):
                         runner.restore(dataset / 'images', dataset / 'sparse')
                         (folder / 'final').mkdir(parents=True)
                         (folder / 'final/splat_100.ply').write_bytes(b'model' * 30)
-                    runner.train_lichtfeld = train
                     def export(_ply, target, *_args, **_kwargs):
                         target.write_bytes(b'export')
-                    with patch.object(platform.common, 'densify', side_effect=densify), \
+                    with patch.object(runner.engine, 'train', side_effect=train), \
+                            patch.object(platform.common, 'densify', side_effect=densify), \
                             patch.object(platform.common, 'export_sog', side_effect=export):
                         runner.run()
                 expected = {

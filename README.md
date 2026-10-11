@@ -45,6 +45,36 @@ the shared pipeline keeps engine commands and artifacts independent of the host.
 Windows uses Job Objects, Linux uses parent-death signals, and macOS uses a process
 group watchdog. These host primitives preserve GPU exclusion after supervisor exit.
 
+## Engine architecture
+
+`agent/` owns enrollment, leases, transfers and supervision. It runs the Python
+pipeline through JSONL events; it does not build engine commands. Each engine's
+registration hash includes its own runtime versions, shared pipeline/converter
+identity and the worker bundle hash when available. Job startup preflights only
+the requested engine.
+
+`pipeline/platform_runner.py` owns stage manifests, selective restoration,
+checkpoint freezing/archival, retention and verified SOG exports. It receives an
+engine object: `Runner(request, engine=adapter)`. Normal CLI execution selects the
+adapter from the explicit registry in `pipeline/engines.py`. This is dependency
+injection through a constructor; there is no DI framework or plugin loader.
+
+`pipeline/engine.py` defines the structural `Engine` contract and artifact
+descriptors. `engine_lichtfeld.py` and `engine_spirula.py` implement their settings,
+runtime identity, prerequisites, stage commands, checkpoint layouts and preview
+conversion. Adapters use the runner's stage/restore/command methods so they share
+the durability and cancellation guarantees. Native GPU imports stay in preflight.
+
+To add an engine such as Brush, implement an adapter and register it in
+`pipeline/engines.py`. Return a final PLY and describe its native checkpoints;
+reuse existing reconstruction helpers where appropriate. Keep engine-specific
+formats and commands inside the adapter. Add its ID to the protocol's `ENGINES`
+list, then update server settings validation, UI selection and engine setup/release
+packaging. An adapter alone does not enable an engine across the product. Validate
+its complete workflow, Gaussian cap and checkpoint resume on the actual GPU.
+`pipeline/tests/test_engines.py` exercises a third test adapter through execution,
+retention, compaction and resume without changing shared orchestration.
+
 ## License
 
 The owner accepted GPL-3.0-only for the original worker code. That code is

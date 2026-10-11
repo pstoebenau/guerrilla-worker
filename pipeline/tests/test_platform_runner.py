@@ -16,6 +16,7 @@ from unittest.mock import Mock, patch
 import zipfile
 
 import platform_runner as platform
+from engine_lichtfeld import relocate_densification_config
 
 
 def spz(path, count=3):
@@ -56,10 +57,10 @@ class PlatformTests(unittest.TestCase):
                 (folder / 'final').mkdir(parents=True)
                 (folder / 'final/splat.ply').write_bytes(b'large model')
                 (folder / 'training.log').write_text('trained')
-            runner.spirula = lambda: runner.stage('training', train) / 'final/splat.ply'
             def export(_ply, target, *_args, **_kwargs):
                 target.write_bytes(b'compressed model')
-            with patch.object(platform.common, 'export_sog', side_effect=export), \
+            with patch.object(runner.engine, 'run', side_effect=lambda worker: worker.stage('training', train) / 'final/splat.ply'), \
+                    patch.object(platform.common, 'export_sog', side_effect=export), \
                     patch.object(platform.common, 'export_spz') as spz_export:
                 runner.run()
                 spz_export.assert_not_called()
@@ -67,9 +68,9 @@ class PlatformTests(unittest.TestCase):
             self.assertTrue(any(item['path'].endswith('.ply') for item in runner.state['completed']['training']['files']))
             request['resume'] = True
             resumed = platform.Runner(request)
-            resumed.spirula = Mock(side_effect=AssertionError('Must not repeat training'))
-            resumed.run()
-            resumed.spirula.assert_not_called()
+            with patch.object(resumed.engine, 'run', side_effect=AssertionError('Must not repeat training')) as run_engine:
+                resumed.run()
+                run_engine.assert_not_called()
 
     def test_spirula_snapshots_survive_native_checkpoint_overwrites(self):
         with tempfile.TemporaryDirectory() as temporary, \
@@ -284,19 +285,19 @@ class PlatformTests(unittest.TestCase):
             # remain independently recognizable by their immutable stage identity.
             native = folder / 'config.json'
             native.write_text(json.dumps(original))
-            platform.relocate_densification_config(folder, dataset)
+            relocate_densification_config(folder, dataset)
             config = json.loads(native.read_text())
             self.assertEqual(config['scene_root'], str(folder))
             self.assertEqual(config['images_subdir'], str(dataset / 'images'))
             self.assertEqual(config['cap'], 3)
             backups = list(folder.glob('config-before-relocation-*.json'))
             self.assertEqual(json.loads(backups[0].read_text()), original)
-            platform.relocate_densification_config(folder, dataset)
+            relocate_densification_config(folder, dataset)
             self.assertEqual(len(list(folder.glob('config-before-relocation-*.json'))), 1)
             config['images_subdir'] = '/another/stage/images'
             native.write_text(json.dumps(config))
             with self.assertRaisesRegex(ValueError, 'unexpected images_subdir'):
-                platform.relocate_densification_config(folder, dataset)
+                relocate_densification_config(folder, dataset)
 
     def test_protocol_events_bypass_engine_log_redirection(self):
         protocol, logs = io.StringIO(), io.StringIO()
@@ -324,7 +325,7 @@ class PlatformTests(unittest.TestCase):
                     archive.writestr(field + '.webp', b'texture')
                 archive.writestr('meta.json', json.dumps(meta))
             spz(exports / 'result.spz')
-            with patch.object(runner, 'spirula', return_value=ply), \
+            with patch.object(runner.engine, 'run', return_value=ply), \
                     patch.object(runner, 'stage', return_value=exports), \
                     patch('urllib.request.urlopen') as network:
                 runner.run()
@@ -432,7 +433,7 @@ class PlatformTests(unittest.TestCase):
                     (output / 'splat.ply').write_bytes(b'ply')
                     (output / 'state.tar').write_bytes(b'optimizer')
             runner.command = execute
-            self.assertTrue(runner.spirula().is_file())
+            self.assertTrue(runner.engine.run(runner).is_file())
             train = commands[-1]
             for name, value in [('cap-max', '3'), ('save-full-checkpoint', '1'),
                                 ('save-only-latest-checkpoint', '0'), ('disable-viewer', '1'),

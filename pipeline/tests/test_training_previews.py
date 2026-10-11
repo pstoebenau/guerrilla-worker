@@ -24,6 +24,7 @@ class PreviewTests(unittest.TestCase):
         runner.output = root
         runner.cap = 10
         runner.backend = backend
+        runner.engine = platform.get_engine(backend)
         runner.state = {'stages': {'training': 'training-test'}}
         return runner
 

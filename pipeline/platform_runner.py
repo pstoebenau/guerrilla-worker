@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import gzip
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,9 +16,7 @@ import shutil
 import signal
 import re
 import struct
-import subprocess
 import sys
-import tarfile
 import time
 import uuid
 
@@ -31,38 +28,16 @@ import pipeline_common as common
 import scan_settings
 from stage_progress import DESCRIPTIONS, parse_progress
 from scan_transfer import gaussian_count
+from engine import Engine
+from engines import ENGINES, get_engine
+from process_runtime import paused_engine
+from process_runtime import gpu_lock as _gpu_lock
 
-SPIRULA_VERSION = 'v2026.9.30'
 PROTOCOL_STREAM = sys.stdout
 
 
 def emit(kind, **values):
     print(json.dumps(dict(type=kind, timestamp=time.time(), **values), allow_nan=False), file=PROTOCOL_STREAM, flush=True)
-
-
-def relocate_densification_config(folder, dataset):
-    """Rebind only known native paths, even after an interrupted prior relocation."""
-    native_config = folder / 'config.json'
-    if not native_config.is_file():
-        return
-    config = json.loads(native_config.read_text())
-    expected = {'scene_root': (folder, folder.name),
-                'images_subdir': (dataset / 'images', dataset.name + '/images')}
-    changed = False
-    for key, (destination, suffix) in expected.items():
-        value = config.get(key)
-        if not isinstance(value, str) or not value.replace('\\', '/').rstrip('/').endswith('/' + suffix):
-            raise ValueError(f'Densification resume has an unexpected {key}')
-        if value != str(destination):
-            config[key] = str(destination)
-            changed = True
-    if changed:
-        shutil.copy2(native_config, folder / ('config-before-relocation-' + uuid.uuid4().hex + '.json'))
-        common.save_json(native_config, config)
-
-
-from process_runtime import paused_engine
-from process_runtime import gpu_lock as _gpu_lock
 
 
 def gpu_lock():
@@ -107,12 +82,6 @@ def artifact_manifest(root):
              'sha256': common.file_hash(p)} for p in files_under(root)]
 
 
-def checkpoint_order(path):
-    name = path.parent.name if path.name == 'state.tar' else path.stem
-    numbers = re.findall(r'\d+', name)
-    return (int(numbers[-1]) if numbers else -1, path.stat().st_mtime_ns if path.exists() else 0)
-
-
 def retained_path(root, relative):
     if Path(relative).is_absolute() or '..' in Path(relative).parts:
         raise ValueError('Retention paths must be relative to output')
@@ -129,64 +98,40 @@ def excluded_path(relative, excluded):
     return any(relative == prefix or relative.startswith(prefix + '/') for prefix in excluded)
 
 
-def resumable_spirula_checkpoint(candidate, cap):
-    try:
-        with candidate.open('rb') as stream:
-            if candidate.stat().st_size < 1024 or candidate.stat().st_size % 512:
-                return False
-            stream.seek(-1024, 2)
-            if stream.read() != bytes(1024):
-                return False
-        with tarfile.open(candidate) as archive:
-            members = archive.getmembers()
-            metadata = json.load(archive.extractfile('state.json'))
-            if not metadata.get('full_resume') or not any(member.name in ('world.means.npy', 'world.opacities.npy') for member in members):
-                return False
-            if metadata.get('cur_num_splats', cap + 1) > cap:
-                raise RuntimeError('Spirula exceeded the requested Gaussian cap')
-            return not any(member.offset_data + member.size > candidate.stat().st_size for member in members)
-    except (OSError, KeyError, ValueError, tarfile.TarError):
-        return False
-
-
-def training_retention_plan(root, state):
+def training_retention_plan(root, state, *, engine=None):
     """Read-only plan; callers archive retained bytes before deleting exclusions."""
     root = root.resolve()
     training = state.get('stages', {}).get('training')
     if not training:
         return dict(version=1, excludePaths=[], latestCheckpoint=None, finalPly=None)
+    engine = engine if engine is not None else get_engine(state['identity']['backend'])
     folder = retained_path(root, training)
     checkpoints = state.get('checkpoints', [])
-    latest = max(checkpoints, key=lambda item: checkpoint_order(
-        retained_path(root, item['path']) / 'state.tar' if item['path'].endswith('.ckpt')
-        else retained_path(root, item['path']))) if checkpoints else None
+    latest = max(checkpoints, key=lambda item: engine.checkpoint(retained_path(root, item['path'])).order) if checkpoints else None
     if 'training' in state.get('completed', {}):
-        backend = state['identity']['backend']
-        native = (folder / 'run').glob('step-*.ckpt/state.tar') if backend == 'spirula' else folder.rglob('*.resume')
-        for source in sorted(native, key=checkpoint_order, reverse=True):
-            if 'retained-checkpoints' in source.relative_to(folder).parts:
+        native = engine.checkpoint_candidates(folder)
+        for candidate in sorted(native, key=lambda item: item.order, reverse=True):
+            if 'retained-checkpoints' in candidate.path.relative_to(folder).parts:
                 continue
             if latest:
-                old = retained_path(root, latest['path'])
-                if checkpoint_order(source)[0] <= checkpoint_order(old / 'state.tar' if old.is_dir() or old.suffix == '.ckpt' else old)[0]:
+                old = engine.checkpoint(retained_path(root, latest['path']))
+                if candidate.step <= old.step:
                     break
-            candidate = source.parent if backend == 'spirula' else source
-            if backend == 'spirula':
-                if not resumable_spirula_checkpoint(source, state['identity']['maxCap']) or not (candidate.parent / 'config.json').is_file():
-                    continue
-            elif not source.stat().st_size:
+            if not engine.valid_checkpoint(candidate, state['identity']['maxCap']):
                 continue
-            latest = dict(path=candidate.relative_to(root).as_posix(), sha256=common.file_hash(source))
-            if backend == 'spirula':
-                latest['configSha256'] = common.file_hash(candidate.parent / 'config.json')
+            if candidate.config is not None and not candidate.config.is_file():
+                continue
+            latest = dict(path=candidate.path.relative_to(root).as_posix(), sha256=common.file_hash(candidate.source))
+            if candidate.config is not None:
+                latest['configSha256'] = common.file_hash(candidate.config)
             break
     keep = retained_path(root, latest['path']) if latest else None
     if latest:
-        source = keep / 'state.tar' if keep.is_dir() else keep
-        if not source.is_file() or common.file_hash(source) != latest['sha256']:
+        checkpoint = engine.checkpoint(keep)
+        if not checkpoint.source.is_file() or common.file_hash(checkpoint.source) != latest['sha256']:
             raise ValueError('Latest checkpoint changed before retention')
-        if keep.is_dir():
-            config = keep.parent / 'config.json'
+        if checkpoint.config is not None:
+            config = checkpoint.config
             if not config.is_file() or (latest.get('configSha256') and common.file_hash(config) != latest['configSha256']):
                 raise ValueError('Latest checkpoint configuration changed before retention')
     excluded = set()
@@ -201,12 +146,12 @@ def training_retention_plan(root, state):
             previous = retained_path(root, item['path'])
             if previous != keep and 'retained-checkpoints' in previous.relative_to(root).parts:
                 excluded.add(previous.parent.relative_to(root).as_posix())
-        native = list(folder.rglob('*.ckpt')) + list(folder.rglob('*.resume'))
+        native = list(folder.rglob('*' + engine.checkpoint_suffix))
         # Completed manifests also identify obsolete paths omitted from a clone.
         for item in state.get('completed', {}).get('training', {}).get('files', []):
             relative = Path(item['path'])
             for index, part in enumerate(relative.parts):
-                if part.endswith(('.ckpt', '.resume')):
+                if part.endswith(engine.checkpoint_suffix):
                     native.append(retained_path(root, Path(*relative.parts[:index + 1])))
                     break
         for previous in native:
@@ -215,15 +160,10 @@ def training_retention_plan(root, state):
     final_ply = None
     candidates = [p for p in (folder / 'final').glob('*.ply') if p.is_file()]
     if not candidates and 'training' in state.get('completed', {}):
-        if state['identity']['backend'] == 'spirula':
-            source_plys = list((folder / 'run').glob('step-*.ckpt/splat.ply'))
-            if source_plys:
-                candidates = [max(source_plys, key=lambda p: checkpoint_order(p.parent / 'state.tar'))]
-        else:
-            try:
-                candidates = [common.find_ply(folder)]
-            except RuntimeError:
-                pass
+        try:
+            candidates = [engine.training_output(folder).ply]
+        except RuntimeError:
+            pass
     if candidates:
         final_ply = candidates[0].relative_to(root).as_posix()
         previous_plys = list(folder.rglob('*.ply')) + [retained_path(root, item['path'])
@@ -243,6 +183,7 @@ def compact_state(root):
     root = root.resolve()
     state_path = root / 'platform-state.json'
     state = json.loads(state_path.read_text())
+    engine = get_engine(state['identity']['backend'])
     plan = training_retention_plan(root, state)
     # A filtered clone may omit superseded bytes; verify everything retained.
     for stage in state.get('completed', {}).values():
@@ -264,9 +205,11 @@ def compact_state(root):
             snapshot.parent.mkdir(parents=True)
             if source.is_dir():
                 shutil.copytree(source, snapshot)
-                shutil.copy2(source.parent / 'config.json', snapshot.parent / 'config.json')
             else:
                 shutil.copy2(source, snapshot)
+            native_config = engine.checkpoint(source).config
+            if native_config is not None:
+                shutil.copy2(native_config, engine.checkpoint(snapshot).config)
             latest = dict(latest, path=snapshot.relative_to(root).as_posix())
         state['checkpoints'] = [latest]
     plan = training_retention_plan(root, state)
@@ -285,31 +228,25 @@ def compact_state(root):
     return plan
 
 
-def preserve_final_ply(folder, backend):
+def preserve_final_ply(folder, backend, *, engine=None):
     if list((folder / 'final').glob('*.ply')):
         return
-    if backend == 'spirula':
-        candidates = list((folder / 'run').glob('step-*.ckpt/splat.ply'))
-        if not candidates:
-            return
-        source = max(candidates, key=lambda p: checkpoint_order(p.parent / 'state.tar'))
-        config = source.parent.parent / 'config.json'
-    else:
-        try:
-            source = common.find_ply(folder)
-        except RuntimeError:
-            return
-        config = folder / 'config.json'
+    engine = engine if engine is not None else get_engine(backend)
+    try:
+        result = engine.training_output(folder)
+    except RuntimeError:
+        return
     final = folder / 'final'
     final.mkdir(exist_ok=True)
-    shutil.copy2(source, final / source.name)
-    if config.is_file():
-        shutil.copy2(config, final / 'config.json')
+    shutil.copy2(result.ply, final / result.ply.name)
+    if result.config is not None and result.config.is_file():
+        shutil.copy2(result.config, final / 'config.json')
 
 
-def validate_request(request):
-    if request.get('backend') not in ('lichtfeld', 'spirula'):
-        raise ValueError('Unknown scan backend')
+def validate_request(request, *, engine=None):
+    engine = engine if engine is not None else get_engine(request.get('backend'))
+    if engine.name != request.get('backend'):
+        raise ValueError('Engine does not match the requested backend')
     cap = request.get('maxCap')
     if type(cap) is not int or cap < 1:
         raise ValueError('maxCap must be a positive integer')
@@ -323,36 +260,16 @@ def validate_request(request):
     if source == output or source.is_relative_to(output):
         raise ValueError('Output must not contain the stored input')
     settings = request.get('settings', {})
-    if request['backend'] == 'lichtfeld':
-        from jsonschema import Draft7Validator
-        Draft7Validator(json.loads(scan_settings.SCHEMA_PATH.read_text())).validate(settings)
-        if settings.get('training', {}).get('max_cap', cap) != cap:
-            raise ValueError('Training max_cap must equal the requested maximum')
-    else:
-        if set(settings) - {'extraction', 'reconstruction', 'training'}:
-            raise ValueError('Unknown Spirula settings section')
-        extraction = settings.get('extraction', {})
-        bounds = {'skip': (1, 100000), 'keep': (1, 100000), 'max_frames': (1, 100000),
-                  'quality': (0, 100), 'scale': (0.01, 1)}
-        if set(extraction) - set(bounds) or settings.get('reconstruction', {}):
-            raise ValueError('Unsupported Spirula extraction/reconstruction settings')
-        for key, value in extraction.items():
-            low, high = bounds[key]
-            if type(value) not in ((int, float) if key == 'scale' else (int,)) or not low <= value <= high:
-                raise ValueError(f'Invalid Spirula {key}')
-        training = settings.get('training', {})
-        if set(training) - {'iterations'} or type(training.get('iterations', 30000)) is not int or not 1 <= training.get('iterations', 30000) <= 1000000:
-            raise ValueError('Invalid Spirula training settings')
+    if not isinstance(settings, dict) or any(not isinstance(section, dict) for section in settings.values()):
+        raise ValueError('Settings must contain objects for each section')
+    engine.validate_settings(settings, cap)
     return source, output
 
 
-def runtime_versions(backend):
+def runtime_versions(backend, *, engine=None):
+    engine = engine if engine is not None else get_engine(backend)
     record = ROOT / 'runtime-versions.json'
-    versions = json.loads(record.read_text()) if record.exists() else {}
-    if backend == 'spirula':
-        versions = {key: value for key, value in versions.items() if key.startswith('spirula')}
-    else:
-        versions = {key: value for key, value in versions.items() if not key.startswith('spirula')}
+    versions = engine.runtime_versions(json.loads(record.read_text()) if record.exists() else {})
     versions['pipelineSha256'] = common.fingerprint(sorted(ROOT.glob('*.py')) + [scan_settings.SCHEMA_PATH])
     worker_bundle = Path(os.environ.get('WORKER_BUNDLE', '/opt/worker/worker.mjs'))
     if worker_bundle.is_file():
@@ -360,82 +277,44 @@ def runtime_versions(backend):
     versions['splatTransform'] = common.converter_version()
     versions['splatTransformGpuBackend'] = common.converter_gpu_backend()
     versions['splatTransformGpu'] = os.environ.get('SPLAT_TRANSFORM_GPU', 'auto')
-    if backend == 'lichtfeld':
-        studio = common.studio_path()
-        if not studio.is_file():
-            raise RuntimeError('LichtFeld executable is unavailable')
-        versions['lichtfeld'] = subprocess.check_output([str(studio), '--version'], text=True, stderr=subprocess.STDOUT).strip()
-    if os.name == 'nt' and backend == 'lichtfeld':
-        versions['mode'] = 'native-development'
-        for name, plugin in (('densificationPlugin', common.densification_plugin_path()),):
-            sources = sorted(path for path in plugin.rglob('*.py') if '.venv' not in path.parts and '__pycache__' not in path.parts)
-            if sources:
-                versions[name] = common.fingerprint(sources)
-    if backend == 'spirula':
-        executable = common.spirula_path()
-        if not executable.is_file():
-            raise RuntimeError('Spirula executable is unavailable')
-        versions['spirula'] = SPIRULA_VERSION
-        versions['spirulaBinarySha256'] = common.file_hash(executable)
     return versions
 
 
-def preflight():
+def preflight(engines=None):
     """Report prerequisites honestly; only real scene validation proves a workflow."""
+    engines = tuple(ENGINES.values() if engines is None else engines)
     result = {'runtimeVersions': {}, 'backends': {}}
-    for backend in ('lichtfeld', 'spirula'):
+    for engine in engines:
         try:
-            if sys.platform == 'darwin' and backend == 'lichtfeld':
-                raise RuntimeError('LichtFeld requires NVIDIA CUDA; this Mac worker supports Spirula only')
-            result['runtimeVersions'].update(runtime_versions(backend))
-            if backend == 'lichtfeld':
-                from colmap_worker import probe as probe_colmap
-                probe_colmap(scan_settings.defaults()['reconstruction'])
-                if os.name == 'nt':
-                    studio_python = common.studio_path().parent / 'python.exe'
-                    probe = ('import sys,site; from pathlib import Path; '
-                             'p=Path(sys.argv[1]); site.addsitedir(str(p/".venv/Lib/site-packages")); '
-                             'import torch,lichtfeld; assert torch.cuda.is_available()')
-                    subprocess.run([str(studio_python), '-c', probe, str(common.densification_plugin_path())],
-                                   capture_output=True, text=True, check=True, timeout=60)
-                    result['backends'][backend] = {'available': True, 'workflowVerified': False}
-                    continue
-                import pycolmap
-                import torch
-                if not pycolmap.has_cuda or not torch.cuda.is_available():
-                    raise RuntimeError('CUDA reconstruction/training is unavailable')
-                for plugin, filename in ((common.densification_plugin_path(), 'densify.py'),):
-                    if not (plugin / filename).is_file():
-                        raise RuntimeError(f'Missing Linux plugin: {plugin.name}')
-                import lichtfeld  # noqa: F401 — native plugin dependency must load
-                import importlib
-                sys.path.insert(0, str(common.densification_plugin_path().parent))
-                importlib.import_module(common.densification_plugin_path().name + '.densify')
-            else:
-                from gpu_runtime import probe_spirula
-                result['gpus'] = probe_spirula(common.spirula_path())
-            result['backends'][backend] = {'available': True, 'workflowVerified': False}
+            versions = runtime_versions(engine.name, engine=engine)
+            result['runtimeVersions'].update(versions)
+            gpus = engine.preflight()
+            if gpus is not None:
+                result['gpus'] = gpus
+            result['backends'][engine.name] = {'available': True, 'workflowVerified': False, 'runtimeVersions': versions}
         except Exception as exc:
-            result['backends'][backend] = {'available': False, 'workflowVerified': False, 'error': str(exc)[:2000]}
-    if result['backends']['lichtfeld']['available'] or any('NVIDIA' in gpu['name'].upper() for gpu in result.get('gpus', [])):
+            result['backends'][engine.name] = {'available': False, 'workflowVerified': False, 'error': str(exc)[:2000]}
+    cuda = [engine.name for engine in engines if engine.requires_cuda and result['backends'][engine.name]['available']]
+    if cuda or any('NVIDIA' in gpu['name'].upper() for gpu in result.get('gpus', [])):
         from gpu_runtime import nvidia_devices
         try:
             result['gpus'] = nvidia_devices()
         except Exception as exc:
-            if result['backends']['lichtfeld']['available']:
-                result['backends']['lichtfeld'].update(available=False, error=str(exc)[:2000])
+            for name in cuda:
+                result['backends'][name].update(available=False, error=str(exc)[:2000])
     return result
 
 
 class Runner:
-    def __init__(self, request):
+    def __init__(self, request, *, engine: Engine | None = None):
         self.request = request
-        self.source, self.output = validate_request(request)
+        self.engine = engine if engine is not None else get_engine(request.get('backend'))
+        self.source, self.output = validate_request(request, engine=self.engine)
         self.cap = request['maxCap']
         self.backend = request['backend']
         self.output.mkdir(parents=True, exist_ok=True)
         self.state_path = self.output / 'platform-state.json'
-        versions = runtime_versions(self.backend)
+        versions = runtime_versions(self.backend, engine=self.engine)
         if request.get('runtimeVersions') and request['runtimeVersions'] != versions:
             raise ValueError('The recorded engine runtime is unavailable; resume cannot change versions')
         identity = dict(backend=self.backend, settings=request['settings'], maxCap=self.cap,
@@ -457,12 +336,12 @@ class Runner:
                         raise ValueError(f'Completed artifact changed: {item["path"]}')
             for item in ([] if request.get('selectiveResume') else self.state.get('checkpoints', [])):
                 checkpoint = self.path(item['path'])
-                source = checkpoint / 'state.tar' if checkpoint.is_dir() else checkpoint
+                source = self.engine.checkpoint(checkpoint).source
                 if not source.is_file() or common.file_hash(source) != item['sha256']:
                     raise ValueError('Archived native checkpoint changed')
                 if 'configSha256' in item:
-                    config = checkpoint.parent / 'config.json'
-                    if not config.is_file() or common.file_hash(config) != item['configSha256']:
+                    config = self.engine.checkpoint(checkpoint).config
+                    if config is None or not config.is_file() or common.file_hash(config) != item['configSha256']:
                         raise ValueError('Archived native checkpoint configuration changed')
         else:
             self.state = dict(version=1, identity=identity, completed={}, stages={})
@@ -474,11 +353,10 @@ class Runner:
         self.dense_checkpoint_signature = None
         emit('runtime', runtimeVersions=versions)
 
-    def path(self, relative):
-        path = (self.output / relative).resolve()
-        if not path.is_relative_to(self.output) or path == self.output:
+    def path(self, relative, *, root=None):
+        if Path(relative).is_absolute() or '..' in Path(relative).parts:
             raise ValueError('Artifact path escapes the job')
-        return path
+        return retained_path((root if root is not None else self.output).resolve(), relative)
 
     def save(self):
         common.save_json(self.state_path, self.state)
@@ -577,12 +455,13 @@ class Runner:
     def training_preview(self, snapshot, identity):
         """Publish a compact, immutable viewer copy separately from resume state."""
         folder = self.path(self.state['stages']['training'])
-        step = checkpoint_order(snapshot / 'state.tar' if snapshot.is_dir() else snapshot)[0]
+        checkpoint = self.engine.checkpoint(snapshot)
+        step = checkpoint.step
         preview = folder / 'previews' / f'step-{max(0, step):09d}-{identity[:12]}.sog'
         if preview.is_file():
             gaussian_count(preview, self.cap)
             return
-        source = snapshot / 'splat.ply' if snapshot.is_dir() else snapshot
+        source = checkpoint.preview
         if not source.is_file():
             emit('log', stage='training', message='This checkpoint has no renderable scene for a SOG preview.')
             return
@@ -595,10 +474,7 @@ class Runner:
         try:
             with contextlib.redirect_stdout(sys.stderr):
                 log = folder / 'previews' / (preview.stem + '.log')
-                if self.backend == 'lichtfeld':
-                    ply = temporary / 'checkpoint.ply'
-                    common.run_logged([common.studio_path(), 'convert', source, ply], log)
-                    source = ply
+                source = self.engine.preview_ply(source, temporary, log)
                 common.export_sog(source, candidate, log, self.cap)
             gaussian_count(candidate, self.cap)
             candidate.replace(preview)
@@ -617,10 +493,10 @@ class Runner:
             return
         self.last_checkpoint_poll = time.monotonic()
         folder = self.path(self.state['stages']['training'])
-        candidates = list(folder.rglob('state.tar')) if self.backend == 'spirula' else list(folder.rglob('*.resume'))
-        candidates = [p for p in candidates if 'retained-checkpoints' not in p.parts]
-        candidates = [p for p in candidates if self.checkpoint_signatures.get(str(p)) != (p.stat().st_size, p.stat().st_mtime_ns)]
-        candidates.sort(key=checkpoint_order, reverse=True)
+        candidates = [item for item in self.engine.checkpoint_candidates(folder)
+                      if 'retained-checkpoints' not in item.path.parts
+                      and self.checkpoint_signatures.get(str(item.source)) != (item.source.stat().st_size, item.source.stat().st_mtime_ns)]
+        candidates.sort(key=lambda item: item.order, reverse=True)
         if not candidates or (process is not None and process.poll() is not None):
             return
         # Freeze every engine thread before snapshotting. Open native checkpoint
@@ -629,50 +505,45 @@ class Runner:
             changed = False
             snapshots = self.state.setdefault('checkpoints', [])
             hashes = {item['sha256'] for item in snapshots}
-            for candidate in candidates:
+            for native in candidates:
+                candidate = native.source
                 if snapshots:
                     previous = self.path(snapshots[-1]['path'])
-                    previous_source = previous / 'state.tar' if previous.is_dir() else previous
-                    if checkpoint_order(candidate)[0] < checkpoint_order(previous_source)[0]:
+                    if native.step < self.engine.checkpoint(previous).step:
                         continue
+                if candidate.is_symlink() or native.path.is_symlink():
+                    raise ValueError('Native checkpoint contains a symlink')
                 if candidate.resolve() in open_paths or candidate.stat().st_size == 0:
                     continue
                 identity = common.file_hash(candidate)
                 if identity in hashes:
                     self.checkpoint_signatures[str(candidate)] = (candidate.stat().st_size, candidate.stat().st_mtime_ns)
                     continue
-                if self.backend == 'spirula':
-                    # Spirula may rewrite a checkpoint at the same step after
-                    # resume. Keep every member in a runner-owned snapshot, and
-                    # defer copying while any native member remains open.
-                    native_directory = candidate.parent.resolve()
-                    native_config = candidate.parent.parent / 'config.json'
-                    if native_config.is_symlink():
+                if native.config is not None:
+                    if native.config.is_symlink():
                         raise ValueError('Native checkpoint configuration is a symlink')
-                    if not native_config.is_file():
+                    if not native.config.is_file() or native.config.resolve() in open_paths:
                         continue
-                    if native_config.resolve() in open_paths or any(path == native_directory or path.is_relative_to(native_directory)
-                           for path in open_paths):
+                if native.path.is_dir():
+                    # Snapshot the complete directory only while all members are closed.
+                    native_directory = native.path.resolve()
+                    if any(path == native_directory or path.is_relative_to(native_directory) for path in open_paths):
                         continue
-                    if any(path.is_symlink() for path in candidate.parent.rglob('*')):
+                    if any(path.is_symlink() for path in native.path.rglob('*')):
                         raise ValueError('Native checkpoint contains a symlink')
-                    # state.tar is written last. Validate its member bounds and
-                    # resumable metadata before recording a recovery checkpoint.
-                    if not resumable_spirula_checkpoint(candidate, self.cap):
-                        continue
-                    snapshot = folder / 'retained-checkpoints' / uuid.uuid4().hex / candidate.parent.name
-                    snapshot.parent.mkdir(parents=True)
-                    shutil.copytree(candidate.parent, snapshot)
-                    # Spirula resolves the run configuration from the checkpoint's
-                    # parent, so retain it beside the copied directory verbatim.
-                    shutil.copy2(native_config, snapshot.parent / 'config.json')
+                if not self.engine.valid_checkpoint(native, self.cap):
+                    continue
+                snapshot = folder / 'retained-checkpoints' / uuid.uuid4().hex / native.path.name
+                snapshot.parent.mkdir(parents=True)
+                if native.path.is_dir():
+                    shutil.copytree(native.path, snapshot)
                 else:
-                    snapshot = folder / 'retained-checkpoints' / uuid.uuid4().hex / candidate.name
-                    snapshot.parent.mkdir(parents=True)
-                    shutil.copy2(candidate, snapshot)
+                    shutil.copy2(native.path, snapshot)
                 recorded = {'path': snapshot.relative_to(self.output).as_posix(), 'sha256': identity}
-                if self.backend == 'spirula':
-                    recorded['configSha256'] = common.file_hash(snapshot.parent / 'config.json')
+                if native.config is not None:
+                    config = self.engine.checkpoint(snapshot).config
+                    shutil.copy2(native.config, config)
+                    recorded['configSha256'] = common.file_hash(config)
                 self.training_preview(snapshot, identity)
                 self.state['checkpoints'] = [recorded]
                 hashes.add(identity)
@@ -680,7 +551,7 @@ class Runner:
                 changed = True
                 break
             if changed:
-                plan = training_retention_plan(self.output, self.state)
+                plan = training_retention_plan(self.output, self.state, engine=self.engine)
                 self.state['retention'] = dict(version=1, excludePaths=plan['excludePaths'])
                 self.state.setdefault('stageCheckpoints', {})['training'] = dict(directory=folder.name,
                     files=self.file_manifest([*files_under(snapshot.parent), *files_under(folder / 'previews')]))
@@ -726,7 +597,7 @@ class Runner:
     def prune_training(self, plan, open_paths=(), active_checkpoint=None):
         """Called only after the replacement checkpoint's archive is acknowledged."""
         latest = self.path(plan['latestCheckpoint']['path']) if plan.get('latestCheckpoint') else None
-        latest_source = latest / 'state.tar' if latest and latest.is_dir() else latest
+        latest_checkpoint = self.engine.checkpoint(latest) if latest else None
         for relative in plan['excludePaths']:
             path = retained_path(self.output, relative)
             if not path.exists():
@@ -737,9 +608,9 @@ class Runner:
                 if active_checkpoint == path or active_checkpoint.is_relative_to(path):
                     continue
                 # An unfinished newer native checkpoint is not superseded yet.
-                source = path / 'state.tar' if path.suffix == '.ckpt' else path
-                if path.suffix in ('.ckpt', '.resume') and 'retained-checkpoints' not in path.parts:
-                    if not source.is_file() or checkpoint_order(source)[0] > checkpoint_order(latest_source)[0]:
+                if path.suffix == self.engine.checkpoint_suffix and 'retained-checkpoints' not in path.parts:
+                    checkpoint = self.engine.checkpoint(path)
+                    if not checkpoint.source.is_file() or checkpoint.step > latest_checkpoint.step:
                         continue
             if path.is_dir():
                 shutil.rmtree(path)
@@ -766,9 +637,9 @@ class Runner:
         emit('stage', stage=name, status='running', elapsedSeconds=0, **self.progress_values)
         function(directory)
         if name == 'training':
-            preserve_final_ply(directory, self.backend)
+            preserve_final_ply(directory, self.backend, engine=self.engine)
             self.poll_checkpoints(None)
-            plan = training_retention_plan(self.output, self.state)
+            plan = training_retention_plan(self.output, self.state, engine=self.engine)
             self.state['retention'] = dict(version=1, excludePaths=plan['excludePaths'])
         files = [{'path': p.relative_to(self.output).as_posix(), 'sha256': common.file_hash(p),
                   'size': p.stat().st_size} for p in files_under(directory)
@@ -786,105 +657,6 @@ class Runner:
             self.prune_training(plan)
         return directory
 
-    def lichtfeld(self):
-        options_file = self.output / 'settings.json'
-        common.save_json(options_file, self.request['settings'])
-        options = scan_settings.load(options_file)
-        selected = self.stage('selection', lambda folder: self.command(
-            [sys.executable, ROOT / 'select_frames.py', self.source, folder,
-             *scan_settings.selection_arguments(options), '--image-format', 'jpg', '--jpeg-quality', '95'], self.output / f'{folder.name}.log'))
-
-        def reconstruct(folder):
-            self.restore(selected)
-            self.command([sys.executable, ROOT / 'reconstruct_splat.py', '--images', selected,
-                          '--output', folder, '--settings', options_file, '--reconstruction-only',
-                          '--retain-artifacts', '--max-cap', self.cap], self.output / f'{folder.name}.log')
-        reconstructed = self.stage('reconstruction', reconstruct)
-        # Dataset paths in the desktop manifest are not used here: scratch is relocatable.
-        def densify(folder):
-            result_file = reconstructed / 'colmap-result.json'
-            self.restore(result_file)
-            result = json.loads(result_file.read_text()) if result_file.exists() else {}
-            dataset = retained_path(reconstructed.resolve(), result.get('dataset_relative', 'dataset'))
-            self.restore(dataset / 'images', dataset / 'sparse')
-            # Densification publishes into a copy, keeping reconstruction immutable.
-            staged_dataset = folder.parent / (folder.name + '-dataset')
-            if not staged_dataset.exists():
-                shutil.copytree(dataset, staged_dataset)
-            relocate_densification_config(folder, staged_dataset)
-            with contextlib.redirect_stdout(sys.stderr):
-                common.densify(common.studio_path(), staged_dataset, folder, self.cap,
-                               settings=scan_settings.densification(options), on_progress=self.report_log, on_tick=self.poll_checkpoints,
-                               portable_checkpoints=True)
-        dense = self.stage('densification', densify, resumable=True)
-        train_dataset = dense.parent / (dense.name + '-dataset')
-        training = self.stage('training', lambda folder: self.train_lichtfeld(folder, train_dataset, options), resumable=True)
-        return common.find_ply(training / 'final' if (training / 'final').exists() else training)
-
-    def train_lichtfeld(self, folder, dataset, options):
-        self.restore(dataset / 'images', dataset / 'sparse')
-        self.active_log = folder / 'training.log'
-        config = scan_settings.training(options, self.cap)
-        checkpoints = [self.path(item['path']) for item in self.state.get('checkpoints', [])
-                       if item['path'].endswith('.resume')]
-        if not folder.exists():
-            with contextlib.redirect_stdout(sys.stderr):
-                common.train(common.studio_path(), dataset, folder, config, on_tick=self.poll_checkpoints, on_progress=self.report_log)
-            return
-        if not checkpoints:
-            # Preserve failed work; a new directory is a distinct training attempt.
-            archived = folder.with_name(folder.name + '-failed-' + uuid.uuid4().hex[:8])
-            folder.rename(archived)
-            with contextlib.redirect_stdout(sys.stderr):
-                common.train(common.studio_path(), dataset, folder, config, on_tick=self.poll_checkpoints, on_progress=self.report_log)
-            return
-        self.command([common.studio_path(), '--headless', '--train', '--resume', checkpoints[-1],
-                      '-d', dataset, '-o', folder, '--max-cap', self.cap], folder / 'resume.log')
-        ply = common.find_ply(folder)
-        expected = config['iterations'] + (config['sparsify_steps'] if config['enable_sparsity'] else 0)
-        if ply.name != f'splat_{expected}.ply':
-            raise RuntimeError('Resumed LichtFeld did not finish the configured training duration')
-
-    def spirula(self):
-        executable = common.spirula_path()
-        extraction = {'skip': 10, 'keep': 5, 'max_frames': 300, 'quality': 95, 'scale': 1,
-                      **self.request['settings'].get('extraction', {})}
-        flags = [part for key, value in extraction.items() for part in ('--' + key.replace('_', '-'), str(value))]
-        def extract(folder):
-            self.command([executable, 'sam', 'extract', self.source, '--out', folder, *flags], self.output / f'{folder.name}.log')
-            if len([p for p in folder.rglob('*') if p.suffix.lower() in common.IMAGE_SUFFIXES]) < 3:
-                raise RuntimeError('Spirula extraction produced fewer than three images')
-        selected = self.stage('selection', extract)
-        def reconstruct(folder):
-            self.restore(selected)
-            self.command([executable, 'sfm', 'auto', selected, '-o', folder,
-                          '--progress-dir', folder / 'progress', '--no-masks'], self.output / f'{folder.name}.log')
-            if not list(folder.rglob('cameras.bin')) or not list(folder.rglob('points3D.bin')):
-                raise RuntimeError('Spirula did not produce a COLMAP reconstruction')
-            # sfm auto writes sparse/features/matches, not a copy of its images.
-            shutil.copytree(selected, folder / 'images', dirs_exist_ok=True)
-        dataset = self.stage('reconstruction', reconstruct, resumable=True)
-        def train(folder):
-            self.restore(dataset / 'images', dataset / 'sparse')
-            folder.mkdir(parents=True, exist_ok=True)
-            checkpoints = [self.path(item['path']) for item in self.state.get('checkpoints', [])
-                           if item['path'].endswith('.ckpt')]
-            if not checkpoints and (folder / 'run').exists():
-                (folder / 'run').rename(folder / ('failed-run-' + uuid.uuid4().hex[:12]))
-            command = [executable, 'train', '--data', dataset, '--data-format', 'colmap',
-                       '--output-dir-prefix', folder, '--output-dir-name', 'run',
-                       '--cap-max', self.cap, '--num-iterations', self.request['settings'].get('training', {}).get('iterations', 30000),
-                       '--save-full-checkpoint', '1', '--save-only-latest-checkpoint', '0',
-                       '--disable-viewer', '1', '--keep-viewer-alive', '0']
-            if checkpoints:
-                command += ['--resume', checkpoints[-1]]
-            self.command(command, self.output / f'{folder.name}.log')
-        training = self.stage('training', train, resumable=True)
-        candidates = list((training / 'final').glob('*.ply')) or sorted((training / 'run').glob('step-*.ckpt/splat.ply'), key=lambda p: checkpoint_order(p.parent / 'state.tar'))
-        if not candidates:
-            raise RuntimeError('Spirula training produced no splat.ply')
-        return candidates[-1]
-
     def run(self):
         # A resumed final snapshot no longer needs the uncompressed training PLY.
         finished = self.state['completed'].get('export')
@@ -895,11 +667,11 @@ class Runner:
         elif trained:
             final = self.path(trained['directory']) / 'final'
             self.restore(final)
-            ply = final / 'splat.ply' if self.backend == 'spirula' else common.find_ply(final)
+            ply = self.engine.training_output(self.path(trained['directory'])).ply
             if not ply.is_file():
                 raise ValueError('Saved training output is missing')
         else:
-            ply = self.lichtfeld() if self.backend == 'lichtfeld' else self.spirula()
+            ply = self.engine.run(self)
         expected = gaussian_count(self.path(finished['directory']) / 'result.sog' if finished else ply, self.cap)
         def export(folder):
             folder.mkdir()
@@ -933,7 +705,7 @@ def main(argv=None):
     parser.add_argument('--destination', type=Path)
     parser.add_argument('--retention-plan', type=Path, help='Print a read-only checkpoint retention plan')
     parser.add_argument('--compact-state', type=Path, help='Normalize manifests in an offline cloned attempt; does not delete files')
-    parser.add_argument('--runtime-versions', choices=('spirula', 'lichtfeld'))
+    parser.add_argument('--runtime-versions', choices=tuple(ENGINES))
     args = parser.parse_args(argv)
     if args.runtime_versions:
         with contextlib.redirect_stdout(sys.stderr):
@@ -972,7 +744,7 @@ def main(argv=None):
     try:
         with gpu_lock():
             with contextlib.redirect_stdout(sys.stderr):
-                report = preflight()
+                report = preflight((get_engine(request.get('backend')),))
             capability = report['backends'].get(request.get('backend'), {})
             if not capability.get('available'):
                 raise RuntimeError(capability.get('error', 'Unknown backend'))

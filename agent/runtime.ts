@@ -3,10 +3,10 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { PROTOCOL_VERSION, redactSecrets, type Assignment, type EnrollmentResponse, type Registration, type PollResponse, type HeartbeatResponse } from '@guerrilla/worker-protocol';
+import { ENGINES, PROTOCOL_VERSION, redactSecrets, type Assignment, type EnrollmentResponse, type Registration, type PollResponse, type HeartbeatResponse } from '@guerrilla/worker-protocol';
 import { ApiError, Client } from './http';
 import { runPipeline } from './process';
 import { removeScratchPath } from './retention-files';
@@ -16,7 +16,7 @@ import { archiveFile } from './archive';
 import { BackgroundArchive } from './background-archive';
 import { agentLockPath } from './paths';
 import { readEnrollmentToken } from './enrollment';
-import { gpuInventory } from './gpu';
+import { registrationFromReport } from './registration';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const pipelineRoot = process.env.PIPELINE_ROOT ?? (process.platform === 'linux' && root === '/opt' ? '/opt/pipeline' : path.join(root,'pipeline'));
@@ -37,14 +37,11 @@ export async function scratchIsClean(directory = scratch) {
 
 function registration(): Registration {
   const report = JSON.parse(execFileSync(python,[runner,'--preflight'],{encoding:'utf8',windowsHide:true,maxBuffer:4*1024*1024}));
-  const engines: Registration['engines'] = {};
-  for (const engine of ['spirula','lichtfeld'] as const) if (report.backends?.[engine]?.available) engines[engine] = createHash('sha256').update(JSON.stringify(report.runtimeVersions)).digest('hex');
-  const gpus = gpuInventory(report);
-  return {protocolVersion:PROTOCOL_VERSION,build:'0.2.0',runtime:`${process.platform}-${process.arch}`,engines,gpus,healthy:Object.keys(engines).length>0};
+  return registrationFromReport(report);
 }
 
 export async function execute(client: Client, assignment: Assignment, shutdown: AbortSignal, dependencies = {runPipeline}) {
-  if (assignment.protocolVersion !== PROTOCOL_VERSION || !['spirula','lichtfeld'].includes(assignment.request.backend) || !Number.isSafeInteger(assignment.request.maxCap) || assignment.request.maxCap < 1) throw new Error('Incompatible assignment');
+  if (assignment.protocolVersion !== PROTOCOL_VERSION || !ENGINES.includes(assignment.request.backend) || !Number.isSafeInteger(assignment.request.maxCap) || assignment.request.maxCap < 1) throw new Error('Incompatible assignment');
   for (const id of [assignment.scanId,assignment.attemptId,assignment.leaseId]) if (!/^[a-zA-Z0-9_-]{1,100}$/.test(id)) throw new Error('Invalid assignment identity');
   const fence = {scanId:assignment.scanId,attemptId:assignment.attemptId,leaseId:assignment.leaseId};
   const abort = new AbortController(), signal = AbortSignal.any([shutdown,abort.signal]);

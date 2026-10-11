@@ -1,7 +1,8 @@
 /** Public wire contract. No database, storage credentials, or execution commands. */
 export const PROTOCOL_VERSION = 2 as const;
 export const PROTOCOL_PACKAGE_VERSION = "2.0.0";
-export type Engine = "spirula" | "lichtfeld";
+export const ENGINES = ["spirula", "lichtfeld"] as const;
+export type Engine = (typeof ENGINES)[number];
 export type Destination = "personal" | "cloud";
 export type Settings = Record<string, Record<string, string | number | boolean | null>>;
 export interface ScanRequest {
