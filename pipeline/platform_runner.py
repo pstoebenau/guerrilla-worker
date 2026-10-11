@@ -8,14 +8,12 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import gzip
 import json
 import os
 from pathlib import Path
 import shutil
 import signal
 import re
-import struct
 import sys
 import time
 import uuid
@@ -42,29 +40,6 @@ def emit(kind, **values):
 
 def gpu_lock():
     return _gpu_lock(lambda: emit('progress', message='Waiting for another worktree to release the GPU'))
-
-
-def spz_count(path, cap):
-    """Validate the pinned converter's gzip SPZ v1-v3, including CRC and lengths."""
-    with gzip.open(path, 'rb') as stream:
-        header = stream.read(16)
-        if len(header) != 16:
-            raise ValueError('SPZ header is truncated')
-        magic, version, count, degree, fractional, flags, reserved = struct.unpack('<III4B', header)
-        if magic != 0x5053474e or version not in (1, 2, 3) or degree > 3 or reserved or flags & ~1:
-            raise ValueError('Unsupported or invalid SPZ header')
-        if not 0 < count <= cap or fractional > 24:
-            raise ValueError(f'SPZ Gaussian count {count} is outside 1..{cap}')
-        stride = (6 if version == 1 else 9) + 3 + (4 if version == 3 else 3) + 1 + 3
-        stride += ((degree + 1) ** 2 - 1) * 3
-        expected, actual = count * stride, 0
-        while block := stream.read(1024 * 1024):
-            actual += len(block)
-            if actual > expected:
-                raise ValueError('SPZ has unexpected trailing attribute data')
-        if actual != expected:
-            raise ValueError('SPZ attributes are truncated')
-    return count
 
 
 def files_under(root):
@@ -184,7 +159,7 @@ def compact_state(root):
     state_path = root / 'platform-state.json'
     state = json.loads(state_path.read_text())
     engine = get_engine(state['identity']['backend'])
-    plan = training_retention_plan(root, state)
+    plan = training_retention_plan(root, state, engine=engine)
     # A filtered clone may omit superseded bytes; verify everything retained.
     for stage in state.get('completed', {}).values():
         for item in stage['files']:
@@ -195,7 +170,7 @@ def compact_state(root):
                 raise ValueError('Completed artifact changed before compaction')
     if 'training' in state.get('completed', {}):
         folder = retained_path(root, state['completed']['training']['directory'])
-        preserve_final_ply(folder, state['identity']['backend'])
+        preserve_final_ply(folder, engine)
     if plan['latestCheckpoint']:
         latest = plan['latestCheckpoint']
         source = retained_path(root, latest['path'])
@@ -212,7 +187,7 @@ def compact_state(root):
                 shutil.copy2(native_config, engine.checkpoint(snapshot).config)
             latest = dict(latest, path=snapshot.relative_to(root).as_posix())
         state['checkpoints'] = [latest]
-    plan = training_retention_plan(root, state)
+    plan = training_retention_plan(root, state, engine=engine)
     state['checkpoints'] = [plan['latestCheckpoint']] if plan['latestCheckpoint'] else []
     state['retention'] = dict(version=1, excludePaths=plan['excludePaths'])
     if 'training' in state.get('completed', {}):
@@ -228,10 +203,9 @@ def compact_state(root):
     return plan
 
 
-def preserve_final_ply(folder, backend, *, engine=None):
+def preserve_final_ply(folder, engine):
     if list((folder / 'final').glob('*.ply')):
         return
-    engine = engine if engine is not None else get_engine(backend)
     try:
         result = engine.training_output(folder)
     except RuntimeError:
@@ -266,8 +240,7 @@ def validate_request(request, *, engine=None):
     return source, output
 
 
-def runtime_versions(backend, *, engine=None):
-    engine = engine if engine is not None else get_engine(backend)
+def runtime_versions(engine):
     record = ROOT / 'runtime-versions.json'
     versions = engine.runtime_versions(json.loads(record.read_text()) if record.exists() else {})
     versions['pipelineSha256'] = common.fingerprint(sorted(ROOT.glob('*.py')) + [scan_settings.SCHEMA_PATH])
@@ -283,11 +256,10 @@ def runtime_versions(backend, *, engine=None):
 def preflight(engines=None):
     """Report prerequisites honestly; only real scene validation proves a workflow."""
     engines = tuple(ENGINES.values() if engines is None else engines)
-    result = {'runtimeVersions': {}, 'backends': {}}
+    result = {'backends': {}}
     for engine in engines:
         try:
-            versions = runtime_versions(engine.name, engine=engine)
-            result['runtimeVersions'].update(versions)
+            versions = runtime_versions(engine)
             gpus = engine.preflight()
             if gpus is not None:
                 result['gpus'] = gpus
@@ -311,13 +283,12 @@ class Runner:
         self.engine = engine if engine is not None else get_engine(request.get('backend'))
         self.source, self.output = validate_request(request, engine=self.engine)
         self.cap = request['maxCap']
-        self.backend = request['backend']
         self.output.mkdir(parents=True, exist_ok=True)
         self.state_path = self.output / 'platform-state.json'
-        versions = runtime_versions(self.backend, engine=self.engine)
+        versions = runtime_versions(self.engine)
         if request.get('runtimeVersions') and request['runtimeVersions'] != versions:
             raise ValueError('The recorded engine runtime is unavailable; resume cannot change versions')
-        identity = dict(backend=self.backend, settings=request['settings'], maxCap=self.cap,
+        identity = dict(backend=self.engine.name, settings=request['settings'], maxCap=self.cap,
                         inputSha256=(request['inputSha256'] if request.get('selectiveResume') else common.file_hash(self.source)), runtimeVersions=versions)
         if self.state_path.exists():
             if not request.get('resume'):
@@ -345,8 +316,6 @@ class Runner:
                         raise ValueError('Archived native checkpoint configuration changed')
         else:
             self.state = dict(version=1, identity=identity, completed={}, stages={})
-        self.previous_output = self.state.get('scratchPath', str(self.output))
-        self.state['scratchPath'] = str(self.output)
         self.save()
         self.last_checkpoint_poll = 0
         self.checkpoint_signatures = {}
@@ -354,8 +323,6 @@ class Runner:
         emit('runtime', runtimeVersions=versions)
 
     def path(self, relative, *, root=None):
-        if Path(relative).is_absolute() or '..' in Path(relative).parts:
-            raise ValueError('Artifact path escapes the job')
         return retained_path((root if root is not None else self.output).resolve(), relative)
 
     def save(self):
@@ -404,7 +371,6 @@ class Runner:
 
     def command(self, args, log):
         # Keep common helper's diagnostics out of the JSONL protocol.
-        self.active_log = log
         with contextlib.redirect_stdout(sys.stderr):
             common.run_logged(args, log, on_tick=self.poll_checkpoints, on_progress=self.report_log)
 
@@ -546,7 +512,6 @@ class Runner:
                     recorded['configSha256'] = common.file_hash(config)
                 self.training_preview(snapshot, identity)
                 self.state['checkpoints'] = [recorded]
-                hashes.add(identity)
                 self.checkpoint_signatures[str(candidate)] = (candidate.stat().st_size, candidate.stat().st_mtime_ns)
                 changed = True
                 break
@@ -637,7 +602,7 @@ class Runner:
         emit('stage', stage=name, status='running', elapsedSeconds=0, **self.progress_values)
         function(directory)
         if name == 'training':
-            preserve_final_ply(directory, self.backend, engine=self.engine)
+            preserve_final_ply(directory, self.engine)
             self.poll_checkpoints(None)
             plan = training_retention_plan(self.output, self.state, engine=self.engine)
             self.state['retention'] = dict(version=1, excludePaths=plan['excludePaths'])
@@ -678,8 +643,6 @@ class Runner:
             with contextlib.redirect_stdout(sys.stderr):
                 self.progress_values = dict(substep='Creating SOG export', gaussians=expected)
                 common.export_sog(ply, folder / 'result.sog', folder / 'sog.log', self.cap, on_progress=self.report_log)
-            if gaussian_count(folder / 'result.sog', self.cap) != expected:
-                raise ValueError('SOG Gaussian count changed during conversion')
         exports = self.stage('export', export)
         count = gaussian_count(exports / 'result.sog', self.cap)
         if count != expected:
@@ -709,7 +672,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.runtime_versions:
         with contextlib.redirect_stdout(sys.stderr):
-            versions = runtime_versions(args.runtime_versions)
+            versions = runtime_versions(get_engine(args.runtime_versions))
         print(json.dumps(versions), flush=True)
         return 0
     if args.retention_plan or args.compact_state:

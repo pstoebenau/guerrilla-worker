@@ -12,8 +12,6 @@ import { safeRelativePath } from "./paths";
 
 export function inside(root: string, relative: string) {
   safeRelativePath(relative);
-  if (path.isAbsolute(relative) || /^[A-Za-z]:/.test(relative))
-    throw new Error("Retention requires a relative path.");
   const base = path.resolve(root);
   const target = path.resolve(base, relative);
   if (base === path.parse(base).root || !target.startsWith(base + path.sep))
@@ -92,26 +90,6 @@ export async function* selectedFiles(
       throw new Error("Retention cannot traverse symlinks.");
     if (entry.isDirectory()) yield* selectedFiles(root, exclusions, name);
     else if (entry.isFile()) yield name;
-  }
-}
-
-export async function copySelected(
-  source: string,
-  destination: string,
-  exclusions: string[],
-  extra: string[] = [],
-) {
-  await mkdir(destination, { recursive: true });
-  const names = new Set(extra);
-  for await (const relative of selectedFiles(source, exclusions))
-    names.add(relative);
-  for (const relative of names) {
-    const from = await checkedPath(source, relative);
-    if (!(await lstat(from)).isFile() || (await lstat(from)).isSymbolicLink())
-      throw new Error("Retention can copy only regular files.");
-    const to = await checkedPath(destination, relative);
-    await mkdir(path.dirname(to), { recursive: true });
-    await copyFile(from, to, constants.COPYFILE_FICLONE);
   }
 }
 

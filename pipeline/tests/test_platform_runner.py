@@ -17,6 +17,7 @@ import zipfile
 
 import platform_runner as platform
 from engine_lichtfeld import relocate_densification_config
+from scan_transfer import spz_count
 
 
 def spz(path, count=3):
@@ -346,19 +347,19 @@ class PlatformTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / 'output.spz'
             spz(path)
-            self.assertEqual(platform.spz_count(path, 3), 3)
+            self.assertEqual(spz_count(path, 3), 3)
             with self.assertRaisesRegex(ValueError, 'outside'):
-                platform.spz_count(path, 2)
+                spz_count(path, 2)
             with gzip.open(path, 'wb') as stream:
                 stream.write(struct.pack('<III4B', 0x5053474e, 3, 3, 0, 12, 0, 0))
             with self.assertRaisesRegex(ValueError, 'truncated'):
-                platform.spz_count(path, 3)
+                spz_count(path, 3)
             spz(path)
             data = bytearray(path.read_bytes())
             data[-8] ^= 1
             path.write_bytes(data)
             with self.assertRaises(gzip.BadGzipFile):
-                platform.spz_count(path, 3)
+                spz_count(path, 3)
 
     def test_cap_and_engine_settings_do_not_silently_change(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -393,7 +394,7 @@ class PlatformTests(unittest.TestCase):
             (folder / 'state.tar').write_bytes(b'corrupt')
             with self.assertRaisesRegex(ValueError, 'artifact changed'):
                 platform.Runner(request)
-            with self.assertRaisesRegex(ValueError, 'escapes'):
+            with self.assertRaisesRegex(ValueError, 'must be relative'):
                 runner.path('../input.mp4')
 
     def test_archive_failure_preserves_completed_stage_and_every_attempt(self):

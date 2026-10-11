@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 from html.parser import HTMLParser
+import gzip
 import json
+import struct
 from pathlib import Path
 import urllib.parse
 import urllib.request
 import zipfile
-
 
 
 class VideoMetadata(HTMLParser):
@@ -92,4 +93,27 @@ def gaussian_count(path, cap):
             raise ValueError('Invalid PLY header')
     if count is None or not 0 < count <= cap:
         raise ValueError(f'PLY Gaussian count {count} is outside 1..{cap}')
+    return count
+
+
+def spz_count(path, cap):
+    """Validate the pinned converter's gzip SPZ v1-v3, including CRC and lengths."""
+    with gzip.open(path, 'rb') as stream:
+        header = stream.read(16)
+        if len(header) != 16:
+            raise ValueError('SPZ header is truncated')
+        magic, version, count, degree, fractional, flags, reserved = struct.unpack('<III4B', header)
+        if magic != 0x5053474e or version not in (1, 2, 3) or degree > 3 or reserved or flags & ~1:
+            raise ValueError('Unsupported or invalid SPZ header')
+        if not 0 < count <= cap or fractional > 24:
+            raise ValueError(f'SPZ Gaussian count {count} is outside 1..{cap}')
+        stride = (6 if version == 1 else 9) + 3 + (4 if version == 3 else 3) + 1 + 3
+        stride += ((degree + 1) ** 2 - 1) * 3
+        expected, actual = count * stride, 0
+        while block := stream.read(1024 * 1024):
+            actual += len(block)
+            if actual > expected:
+                raise ValueError('SPZ has unexpected trailing attribute data')
+        if actual != expected:
+            raise ValueError('SPZ attributes are truncated')
     return count

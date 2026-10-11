@@ -91,17 +91,17 @@ export async function execute(client: Client, assignment: Assignment, shutdown: 
     const needsInput = !(resumeState?.completed as Record<string,unknown> | undefined)?.selection;
     const input = path.join(job,'input.mp4');
     if (needsInput) {
-    await sendEvent('stage','Preparing video',{status:'running'},'download');
-    if (assignment.input.kind === 'stored') {
-      if (!assignment.input.sha256 || assignment.input.size === null) throw new Error('Missing input identity');
-      const expected = {sha256:assignment.input.sha256,size:assignment.input.size};
-      try { await download(assignment.input.url,input,expected,signal); }
-      catch {signal.throwIfAborted();const refreshed=await client.post<{input:Assignment['input']}>('refresh',{...fence,input:true,artifactIds:[]},signal);await download(refreshed.input.url,input,expected,signal);}
-    } else {
-      await dependencies.runPipeline({command:python,args:[runner,'--download',assignment.input.url,'--public-source','--destination',input],parentGuard:path.join(pipelineRoot,'parent_guard.py'),cwd:pipelineRoot,logPath:path.join(job,'download.log'),signal,onEvent:async()=>{}});
-      await archiveFile(client,fence,input,'input/source.mp4','input',undefined,signal);
-    }
-    await sendEvent('stage','Video ready',{status:'completed'},'download');
+      await sendEvent('stage','Preparing video',{status:'running'},'download');
+      if (assignment.input.kind === 'stored') {
+        if (!assignment.input.sha256 || assignment.input.size === null) throw new Error('Missing input identity');
+        const expected = {sha256:assignment.input.sha256,size:assignment.input.size};
+        try { await download(assignment.input.url,input,expected,signal); }
+        catch {signal.throwIfAborted();const refreshed=await client.post<{input:Assignment['input']}>('refresh',{...fence,input:true,artifactIds:[]},signal);await download(refreshed.input.url,input,expected,signal);}
+      } else {
+        await dependencies.runPipeline({command:python,args:[runner,'--download',assignment.input.url,'--public-source','--destination',input],parentGuard:path.join(pipelineRoot,'parent_guard.py'),cwd:pipelineRoot,logPath:path.join(job,'download.log'),signal,onEvent:async()=>{}});
+        await archiveFile(client,fence,input,'input/source.mp4','input',undefined,signal);
+      }
+      await sendEvent('stage','Video ready',{status:'completed'},'download');
     }
     const requestPath = path.join(output,'.worker','request.json');
     await writeFile(requestPath,JSON.stringify({...assignment.request,scanId:assignment.scanId,attemptId:assignment.attemptId,inputPath:input,outputPath:output,resume:!!resumeState,selectiveResume:!!resumeState,inputSha256:assignment.input.sha256,archiveAck:true,backgroundArchive:true,...(assignment.runtimeVersions ? {runtimeVersions:assignment.runtimeVersions} : {})}),{mode:0o600});

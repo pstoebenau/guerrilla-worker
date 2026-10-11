@@ -11,7 +11,7 @@ import urllib.parse
 import pipeline_common as common
 import scan_settings
 from pipeline_defaults import EXPORT_FORMAT
-from scan_transfer import download_video, gaussian_count
+from scan_transfer import download_video, gaussian_count, spz_count
 
 ROOT = Path(__file__).resolve().parent
 SCANS_ROOT = Path.cwd() / 'scans'
@@ -172,7 +172,6 @@ def main(argv=None):
         result = json.loads((reconstruction/'pipeline.json').read_text())
         sog, spz = Path(result['sog']), Path(result['spz'])
         count = gaussian_count(sog, args.max_cap)
-        from platform_runner import spz_count
         if spz_count(spz, args.max_cap) != count:
             raise ValueError('SOG and SPZ Gaussian counts differ')
         state.update(sog=str(sog), spz=str(spz), gaussians=count)

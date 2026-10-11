@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pipeline_common as common
 import platform_runner as platform
-from scan_transfer import gaussian_count
+from scan_transfer import gaussian_count, spz_count
 
 
 CLI = Path(common.__file__).parent / 'docker/converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs'
@@ -37,7 +37,7 @@ class ConverterTests(unittest.TestCase):
             with patch.dict(os.environ, {'SPIRULA_BIN': str(executable)}), \
                     patch.object(common, 'studio_path', side_effect=AssertionError('LichtFeld must not be consulted')), \
                     patch.object(common, 'converter_version', return_value='splat-transform v3.10.1'):
-                versions = platform.runtime_versions('spirula')
+                versions = platform.runtime_versions(platform.get_engine('spirula'))
             self.assertEqual(versions['spirulaBinarySha256'], common.file_hash(executable))
             self.assertEqual(versions['splatTransform'], 'splat-transform v3.10.1')
             self.assertNotIn('lichtfeld', versions)
@@ -54,13 +54,13 @@ class ConverterTests(unittest.TestCase):
             common.export_sog(ply, sog, root / 'sog.log', 512)
             common.export_spz(ply, spz, root / 'spz.log')
             self.assertEqual(gaussian_count(sog, 512), 512)
-            self.assertEqual(platform.spz_count(spz, 512), 512)
+            self.assertEqual(spz_count(spz, 512), 512)
             self.assertEqual(sog.with_suffix('.ppisp').read_bytes(), b'sidecar')
             self.assertEqual(spz.with_suffix('.ppisp').read_bytes(), b'sidecar')
             with self.assertRaises(ValueError):
                 gaussian_count(sog, 511)
             with self.assertRaises(ValueError):
-                platform.spz_count(spz, 511)
+                spz_count(spz, 511)
             with self.assertRaises(FileExistsError):
                 common.export_spz(ply, spz, root / 'overwrite.log')
 

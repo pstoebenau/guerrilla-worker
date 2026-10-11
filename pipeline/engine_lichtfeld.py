@@ -111,7 +111,7 @@ class LichtFeldEngine:
     def run(self, runner):
         options_file = runner.output / 'settings.json'
         common.save_json(options_file, runner.request['settings'])
-        options = scan_settings.load(options_file)
+        options = scan_settings.load(options_file, validate=False)
         selected = runner.stage('selection', lambda folder: runner.command(
             [sys.executable, ROOT / 'select_frames.py', runner.source, folder,
              *scan_settings.selection_arguments(options), '--image-format', 'jpg', '--jpeg-quality', '95'], runner.output / f'{folder.name}.log'))
@@ -145,18 +145,14 @@ class LichtFeldEngine:
 
     def train(self, runner, folder, dataset, options):
         runner.restore(dataset / 'images', dataset / 'sparse')
-        runner.active_log = folder / 'training.log'
         config = scan_settings.training(options, runner.cap)
         checkpoints = [runner.path(item['path']) for item in runner.state.get('checkpoints', [])
                        if item['path'].endswith('.resume')]
-        if not folder.exists():
-            with contextlib.redirect_stdout(sys.stderr):
-                common.train(common.studio_path(), dataset, folder, config, on_tick=runner.poll_checkpoints, on_progress=runner.report_log)
-            return
         if not checkpoints:
-            # Preserve failed work; a new directory is a distinct training attempt.
-            archived = folder.with_name(folder.name + '-failed-' + uuid.uuid4().hex[:8])
-            folder.rename(archived)
+            if folder.exists():
+                # Preserve failed work; a new directory is a distinct training attempt.
+                archived = folder.with_name(folder.name + '-failed-' + uuid.uuid4().hex[:8])
+                folder.rename(archived)
             with contextlib.redirect_stdout(sys.stderr):
                 common.train(common.studio_path(), dataset, folder, config, on_tick=runner.poll_checkpoints, on_progress=runner.report_log)
             return

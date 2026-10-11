@@ -143,6 +143,7 @@ class EngineTests(unittest.TestCase):
         self.assertFalse(report['backends'][missing.name]['available'])
         self.assertIn('not installed', report['backends'][missing.name]['error'])
         self.assertEqual(report['gpus'], healthy.preflight())
+        self.assertNotIn('runtimeVersions', report, 'Runtime identities belong to individual engines')
 
     def test_job_startup_preflights_only_the_requested_engine(self):
         engine = StubEngine()

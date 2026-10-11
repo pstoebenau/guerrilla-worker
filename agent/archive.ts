@@ -63,7 +63,7 @@ export async function checkpoint(client: Client, fence: Fence, root: string, che
     for (const file of stage.files ?? []) required.add(file.path);
   const retained = new Map(inherited.filter(file => required.has(file.relativePath) && !excluded(file.relativePath,exclusions)).map(file => [file.relativePath,file]));
   const files: {relative:string; file:string; size:number}[] = [];
-  for await (const relative of selectedFiles(root,await retentionExclusions(root))) {
+  for await (const relative of selectedFiles(root,exclusions)) {
     const file = await checkedPath(root,relative);
     files.push({relative,file,size:(await stat(file)).size});
   }
