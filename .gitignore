@@ -9,3 +9,4 @@ scans/
 credentials.json
 windows/bin/
 windows/obj/
+.DS_Store
