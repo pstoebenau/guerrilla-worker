@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { ENGINES, PROTOCOL_VERSION, redactSecrets, type Assignment, type EnrollmentResponse, type Registration, type PollResponse, type HeartbeatResponse } from '@guerrilla/worker-protocol';
-import { ApiError, Client } from './http';
+import { ApiError, Client, describeWorkerError } from './http';
 import { runPipeline } from './process';
 import { removeScratchPath } from './retention-files';
 import { restoreArtifacts } from './restore';
@@ -60,7 +60,14 @@ export async function execute(client: Client, assignment: Assignment, shutdown: 
       drain ||= response.command === 'drain';
       const renewed = Date.parse(response.leaseExpiresAt);
       if (Number.isFinite(renewed)) deadline = renewed;
-    } catch { abort.abort(new Error('Lease renewal failed')); }
+    } catch (error) {
+      if (signal.aborted) return;
+      const failure = new Error(`Lease renewal failed: ${describeWorkerError(error)}`,{cause:error});
+      // Transport failures do not revoke a still-valid lease. The watchdog
+      // stops execution at its last acknowledged deadline if renewal fails.
+      if (error instanceof ApiError && error.status < 500 && error.status !== 429) abort.abort(failure);
+      else console.error(failure.message);
+    }
     finally { beating = false; }
   },5000);
   const job = path.join(scratch,assignment.scanId,assignment.attemptId), output = path.join(job,'run');
@@ -218,7 +225,10 @@ export async function main(shutdown = new AbortController()) {
         clean=await scratchIsClean();
         continue;
       }
-      if (response.command !== 'continue') break;
+      if (response.command !== 'continue') {
+        console.log(response.command === 'stop' ? 'Worker stopped by server. Check My workers for quarantine before restarting.' : 'Worker drained; no further scans will be assigned.');
+        break;
+      }
       if (response.assignment) {
         clean=false;
         const drain=await execute(client,response.assignment,shutdown.signal);
@@ -229,7 +239,7 @@ export async function main(shutdown = new AbortController()) {
     } catch (error) {
       if (shutdown.signal.aborted) break;
       clean=await scratchIsClean().catch(()=>false);
-      console.error(redactSecrets(error instanceof Error?error.message:'Worker request failed'));
+      console.error(describeWorkerError(error));
       await delay(5000,undefined,{signal:shutdown.signal}).catch(()=>{});
     }
   }

@@ -28,11 +28,11 @@ for (const cancelled of [true, false]) test(`event conflict before heartbeat is 
   try {
     await expect(execute(new Client(server.url.href,'secret'),assignment,new AbortController().signal,{runPipeline:async options=> {
       await options.onEvent({type:'progress',message:'Processing'});
-    }})).rejects.toThrow(cancelled?'Assignment cancelled by owner.':'Worker API rejected request (409)');
+    }})).rejects.toThrow(cancelled?'Assignment cancelled by owner.':'Worker API events rejected request (409)');
     expect(heartbeats).toBe(1);
     expect(finishes).toHaveLength(1);
     expect(finishes[0]!.state).toBe(cancelled?'interrupted':'failed');
-    expect(finishes[0]!.error).toBe(cancelled?'Cancelled by owner.':'Worker API rejected request (409)');
+    expect(finishes[0]!.error).toBe(cancelled?'Cancelled by owner.':'Worker API events rejected request (409)');
   } finally {server.stop(true);}
 });
 
@@ -181,12 +181,12 @@ test('single upload retry keeps immutable client intent and checkpoint ack follo
   } finally {server.stop(true);}
 });
 
-test('server stop heartbeat aborts execution before reporting completion',async()=> {
+for (const rejected of [false, true]) test(`${rejected ? 'ownership rejection' : 'server stop'} heartbeat aborts execution before reporting completion`,async()=> {
   const states:string[]=[];
   const server=Bun.serve({port:0,async fetch(request):Promise<Response> {
     const route=new URL(request.url).pathname.split('/').pop()!;
     if(route==='input')return new Response('input');
-    if(route==='heartbeat')return Response.json({command:'stop',leaseExpiresAt:new Date(Date.now()+30000).toISOString()});
+    if(route==='heartbeat')return rejected ? new Response(null,{status:409}) : Response.json({command:'stop',leaseExpiresAt:new Date(Date.now()+30000).toISOString()});
     if(route==='finish')states.push((await request.json() as {state:string}).state);
     return Response.json({});
   }});
@@ -197,6 +197,43 @@ test('server stop heartbeat aborts execution before reporting completion',async(
     }})).rejects.toThrow('fenced');expect(states).toEqual(['interrupted']);
   } finally {server.stop(true);}
 },10000);
+
+for (const recovers of [true, false]) test(`transient heartbeat failures ${recovers ? 'allow renewal before the deadline' : 'stop execution at the unrenewed deadline'}`,async()=> {
+  let heartbeats=0, resume: (()=>void) | undefined, aborted=false;
+  const states:string[]=[];
+  const server=Bun.serve({port:0,async fetch(request):Promise<Response> {
+    const route=new URL(request.url).pathname.split('/').pop()!;
+    if(route==='input')return new Response('input');
+    if(route==='heartbeat') {
+      if (++heartbeats<=3 || !recovers) return new Response(null,{status:503});
+      setTimeout(()=>resume?.(),0);
+      return Response.json({command:'continue',leaseExpiresAt:new Date(Date.now()+30000).toISOString()});
+    }
+    if(route==='finish')states.push((await request.json() as {state:string}).state);
+    return Response.json({});
+  }});
+  const assignment:Assignment={protocolVersion:2,scanId:crypto.randomUUID(),attemptId:crypto.randomUUID(),leaseId:crypto.randomUUID(),leaseExpiresAt:new Date(Date.now()+(recovers?30000:8500)).toISOString(),settingsHash:'0'.repeat(64),request:{version:1,backend:'spirula',inputId:'i',title:'test',maxCap:100000,settings:{}},input:{kind:'stored',filename:'input.mp4',url:new URL('/input',server.url).href,size:5,sha256:createHash('sha256').update('input').digest('hex')},resume:[]};
+  const started=Date.now();
+  try {
+    const run=execute(new Client(server.url.href,''),assignment,new AbortController().signal,{runPipeline:async options=> {
+      await new Promise<void>((resolve,reject)=> {
+        resume=resolve;
+        options.signal.addEventListener('abort',()=> {aborted=true;reject(options.signal.reason);},{once:true});
+      });
+    }});
+    if(recovers) {
+      await run;
+      expect(aborted).toBe(false);
+      expect(heartbeats).toBe(4);
+      expect(states).toEqual(['completed']);
+    } else {
+      await expect(run).rejects.toThrow('Lease expired');
+      expect(aborted).toBe(true);
+      expect(Date.now()-started).toBeGreaterThanOrEqual(8500);
+      expect(states).toEqual(['interrupted']);
+    }
+  } finally {server.stop(true);}
+},15000);
 
 test('durable completion removes predecessor attempt scratch only for its scan',async()=> {
   let prior='', unrelated='', scanRoot='';
