@@ -1,0 +1,136 @@
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import path from 'node:path';
+import { vendorWindowsCrt } from './windows-crt';
+
+type Asset = { url: string; sha256: string };
+type RuntimeLock = {
+  version: number;
+  pythonVersion: string;
+  nodeVersion: string;
+  ffmpegRelease: string;
+  models: { roma: Asset; dinov3: Asset; dinov3Commit: string };
+  targets: Record<string, Record<'python' | 'node' | 'ffmpegArchive' | 'ffmpegConfig' | 'ffmpegLicense' | 'ffmpegReadme', Asset>>;
+};
+const root = path.resolve(import.meta.dir, '..');
+
+export async function sha256(file: string): Promise<string> {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(file)) hash.update(chunk);
+  return hash.digest('hex');
+}
+
+export async function verifiedDownload(asset: Asset, cache: string): Promise<string> {
+  if (!/^[a-f0-9]{64}$/.test(asset.sha256) || new URL(asset.url).protocol !== 'https:') throw new Error('Invalid runtime asset identity');
+  await mkdir(cache, { recursive: true });
+  const file = path.join(cache, `${asset.sha256}-${decodeURIComponent(path.basename(new URL(asset.url).pathname))}`);
+  if (await Bun.file(file).exists()) {
+    if (await sha256(file) === asset.sha256) return file;
+    throw new Error(`Cached runtime checksum mismatch: ${path.basename(file)}`);
+  }
+  const temporary = `${file}.${crypto.randomUUID()}.download`;
+  try {
+    console.log(`Downloading ${path.basename(new URL(asset.url).pathname)}…`);
+    const response = await fetch(asset.url, { signal: AbortSignal.timeout(600_000) });
+    if (!response.ok) throw new Error(`Runtime download failed: HTTP ${response.status}`);
+    await Bun.write(temporary, response);
+    if (await sha256(temporary) !== asset.sha256) throw new Error('Runtime checksum mismatch; download refused');
+    await rename(temporary, file);
+    return file;
+  } finally { await rm(temporary, { force: true }); }
+}
+
+async function run(args: string[], cwd: string, env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  const child = Bun.spawn(args, { cwd, env, stdin: 'ignore', stdout: 'inherit', stderr: 'inherit', windowsHide: true });
+  if (await child.exited !== 0) throw new Error(`Runtime preparation failed: ${path.basename(args[0]!)}`);
+}
+
+export async function vendorRuntime(destination: string): Promise<void> {
+  const target = `${process.platform}-${process.arch}`;
+  const lock = JSON.parse(await readFile(path.join(root, 'packaging/runtime-lock.json'), 'utf8')) as RuntimeLock;
+  const assets = lock.targets[target];
+  if (!assets) throw new Error(`No vendored runtime for ${target}; supported targets: ${Object.keys(lock.targets).join(', ')}`);
+  const cache = process.env.WORKER_BUILD_CACHE ?? path.join(homedir(), '.cache', 'guerrilla-worker', 'build');
+  await mkdir(path.dirname(destination), { recursive: true });
+  const staging = await mkdtemp(path.join(path.dirname(destination), '.runtime-'));
+  const windows = process.platform === 'win32';
+  const suffix = windows ? '.exe' : '';
+  try {
+    for (const name of ['python', 'node'] as const) {
+      const archive = await verifiedDownload(assets[name], cache);
+      const install = path.join(staging, name);
+      await mkdir(install);
+      await run(['tar', '-xf', archive, '-C', install, '--strip-components=1'], root);
+    }
+    await vendorWindowsCrt(staging);
+    await mkdir(path.join(staging, 'ffmpeg'));
+    await run(['tar', '-xf', await verifiedDownload(assets.ffmpegArchive, cache), '-C', path.join(staging, 'ffmpeg')], root);
+    for (const name of ['ffmpeg', 'ffprobe'] as const) {
+      const installed = path.join(staging, 'ffmpeg', name + suffix);
+      await chmod(installed, 0o755);
+    }
+    await cp(await verifiedDownload(assets.ffmpegConfig, cache), path.join(staging, 'ffmpeg', 'configure.txt'));
+    const ffmpegCheck = Bun.spawnSync([path.join(staging, 'ffmpeg', 'ffmpeg' + suffix), '-version'], { stdout: 'pipe', stderr: 'pipe' });
+    const ffmpegConfiguration = ffmpegCheck.stdout.toString() + ffmpegCheck.stderr.toString();
+    if (ffmpegCheck.exitCode !== 0 || !ffmpegConfiguration.includes('--disable-nonfree') || ffmpegConfiguration.includes('--enable-nonfree')) throw new Error('FFmpeg runtime failed the redistribution configuration check');
+    for (const [name, installed] of [['ffmpegLicense', 'LICENSE'], ['ffmpegReadme', 'README']] as const) {
+      await cp(await verifiedDownload(assets[name], cache), path.join(staging, 'ffmpeg', installed));
+    }
+    const python = path.join(staging, 'python', windows ? 'python.exe' : 'bin/python3');
+    const node = path.join(staging, 'node', windows ? 'node.exe' : 'bin/node');
+    const npm = path.join(staging, 'node', windows ? 'node_modules/npm/bin/npm-cli.js' : 'lib/node_modules/npm/bin/npm-cli.js');
+    const requirements = process.platform === 'darwin' ? 'python-base.txt' : windows ? 'python-windows-cuda.txt' : 'python-linux-cuda.txt';
+    await run([python, '-I', '-m', 'pip', '--isolated', '--cache-dir', path.join(cache, 'pip'), 'install', '--disable-pip-version-check', '--require-hashes', '--only-binary=:all:', '--no-compile', '-r', path.join(root, 'packaging', requirements)], root);
+    const converter = path.join(staging, 'converter');
+    await mkdir(converter);
+    for (const file of ['package.json', 'package-lock.json']) await cp(path.join(root, 'pipeline/docker/converter', file), path.join(converter, file));
+    const runtimeEnv = { ...process.env, PATH: [path.dirname(node), path.join(staging, 'ffmpeg'), process.env.PATH ?? ''].join(path.delimiter) };
+    const npmConfig = path.join(staging, '.npmrc');
+    await writeFile(npmConfig, '');
+    await run([node, npm, 'ci', '--prefix', converter, '--global=false', '--userconfig', npmConfig, '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], converter, runtimeEnv);
+    await rm(npmConfig);
+    await run([node, path.join(converter, 'node_modules/@playcanvas/splat-transform/bin/cli.mjs'), '--version'], root, runtimeEnv);
+    await run([python, '-I', '-c', 'import cv2, numpy, jsonschema, filelock, psutil; print("Python integration dependencies ready")'], root);
+    if (windows) {
+      const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT;
+      if (!systemRoot || !path.isAbsolute(systemRoot)) throw new Error('Windows SystemRoot is required for the isolated runtime import check');
+      const smokeEnv = { ...process.env, PATH: [path.dirname(python), path.dirname(node), path.join(staging, 'ffmpeg'), path.join(systemRoot, 'System32'), systemRoot].join(path.delimiter) };
+      await run([python, '-I', '-c', 'import torch, pycolmap, cv2, open3d; print("Vendored native dependencies:", torch.__version__, pycolmap.__version__, cv2.__version__, open3d.__version__)'], root, smokeEnv);
+    } else if (process.platform === 'linux') {
+      await run([python, '-I', '-c', 'import torch, pycolmap, cv2, open3d; print("Vendored native dependencies:", torch.__version__, pycolmap.__version__, cv2.__version__, open3d.__version__)'], root);
+    }
+    if (process.platform !== 'darwin') {
+      const hub = path.join(staging, 'models/hub');
+      await mkdir(path.join(hub, 'checkpoints'), { recursive: true });
+      await cp(await verifiedDownload(lock.models.roma, cache), path.join(hub, 'checkpoints/romav2.pt'));
+      const source = path.join(staging, '.dinov3');
+      await mkdir(source);
+      await run([python, '-I', '-m', 'zipfile', '-e', await verifiedDownload(lock.models.dinov3, cache), source], root);
+      const folders = await readdir(source);
+      if (folders.length !== 1 || !folders[0]?.startsWith('facebookresearch-dinov3-')) throw new Error('Unexpected DINOv3 source archive layout');
+      await rename(path.join(source, folders[0]), path.join(hub, `facebookresearch_dinov3_${lock.models.dinov3Commit}`));
+      await rm(source, { recursive: true });
+      await writeFile(path.join(hub, 'trusted_list'), '');
+    }
+    await run([path.join(staging, 'ffmpeg', 'ffmpeg' + suffix), '-version'], root);
+    await mkdir(path.join(staging, 'notices'));
+    await cp(path.join(root, 'legal'), path.join(staging, 'notices/legal'), { recursive: true });
+    await cp(path.join(root, 'LICENSE'), path.join(staging, 'notices/Worker-LICENSE'));
+    await cp(path.join(root, 'THIRD_PARTY_NOTICES'), path.join(staging, 'notices/THIRD_PARTY_NOTICES'));
+    await cp(path.join(root, 'packaging', requirements), path.join(staging, 'notices/python-requirements.txt'));
+    const files = { python: await sha256(python), node: await sha256(node), ffmpeg: await sha256(path.join(staging, 'ffmpeg', 'ffmpeg' + suffix)), ffprobe: await sha256(path.join(staging, 'ffmpeg', 'ffprobe' + suffix)) };
+    const windowsCrtManifestSha256 = windows ? await sha256(path.join(staging, 'windows-crt/manifest.json')) : undefined;
+    await writeFile(path.join(staging, 'manifest.json'), JSON.stringify({ version: 1, target, pythonVersion: lock.pythonVersion, nodeVersion: lock.nodeVersion, ffmpegRelease: lock.ffmpegRelease, requirementsSha256: await sha256(path.join(root, 'packaging', requirements)), windowsCrtManifestSha256, files }, null, 2) + '\n');
+    const backup = `${destination}.previous-${crypto.randomUUID()}`;
+    const exists = await Bun.file(path.join(destination, 'manifest.json')).exists();
+    if (exists) await rename(destination, backup);
+    try { await rename(staging, destination); }
+    catch (error) { if (exists) await rename(backup, destination); throw error; }
+    if (exists) await rm(backup, { recursive: true, force: true });
+    console.log(`Vendored runtime ready: ${destination}`);
+  } finally { await rm(staging, { recursive: true, force: true }); }
+}
+
+if (import.meta.main) await vendorRuntime(path.resolve(process.argv[2] ?? path.join(root, 'dist/runtime')));

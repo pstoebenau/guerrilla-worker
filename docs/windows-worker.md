@@ -1,90 +1,119 @@
-# Windows tray worker
+# Windows desktop worker
 
-Download the unsigned Windows x64 setup executable from the worker repository's
-GitHub Releases, install it, and open **Guerrilla Worker** from Start. A tray icon
-appears and the settings/enrollment window opens on first launch. No terminal,
-PowerShell, Bun, Node or .NET installation is required.
+Install Guerrilla Worker for Windows x64 from the prepared installer package.
+Keep the setup executable and **every matching `.bin` payload file** together in
+one folder, then run setup. CUDA, PyTorch, and reconstruction libraries make this
+a large package; splitting payloads avoids single-executable installer limits.
+No terminal, Python, Node, .NET, or separate WebView2 installation is required.
 
-## Setup and enrollment
+The separate [Linux Docker image](../README.md#linux-docker-image) includes its
+engines, plugins, and models; this Windows desktop package uses your installations.
 
-1. Review detected Python, Spirula, LichtFeld and densification paths. Browse to your
-   existing installations if needed. Python must have the pipeline dependencies;
-   FFmpeg and `nvidia-smi` must be on PATH. Exactly one NVIDIA GPU must be visible.
-   Exports also require `@playcanvas/splat-transform@3.10.1`: install it with
-   `npm install -g @playcanvas/splat-transform@3.10.1` using Node.js 22+.
-   Alternatively, set `SPLAT_TRANSFORM_BIN` to its `bin/cli.mjs` and `NODE_BIN`
-   to a Node executable before starting the tray app. Spirula does not require
-   LichtFeld for exports.
-2. The server defaults to `https://guerrilla.dad`; change it before enrolling if
-   using your own Guerrilla server. Click **Check dependencies**.
-3. Open the server, create an enrollment token on its Workers page, and paste it
-   into the masked enrollment field. Click **Enroll and start**. Tokens are sent
-   through stdin to the agent, never saved in configuration or command arguments.
-4. Close the settings window to keep running in the tray. The tray menu offers
-   settings, start/stop, the server, logs, manual release downloads, and quit.
+The installer runs under your account and includes Microsoft's signed Evergreen
+Standalone WebView2 installer. It installs that bundled runtime offline only
+when an adequate runtime is missing. Microsoft's shared Evergreen runtime can
+receive its normal automatic updates afterward. There is no installer-time
+runtime download. Worker registration and execution are not started by setup;
+opening the GUI after installation is optional and initially unchecked.
 
-Startup at Windows sign-in is enabled by default. Stop the worker, uncheck
-**Start at Windows sign-in**, and save settings to disable it. The app runs as
-your Windows user, not a service before login. It does not restart after crashes.
-Unexpected tray exit causes its agent to shut down. Only one tray instance runs
-per Windows session; launching it again opens the existing settings window.
+## Setup
 
-**Stop worker** and **Quit** cancel active execution using the existing shutdown
-path and retain verified checkpoints. Use the server's drain action when the
-current job should finish first. A shutdown timeout leaves the app running for
-inspection instead of force-killing a scan. Tray status reports process liveness;
-the server reports connectivity and job status.
+1. Install LichtFeld or Spirula yourself. The Windows desktop app and installer
+   do not build, download, or bundle either engine. Review detected paths in
+   **Setup**, or browse to the existing engine executable. If using LichtFeld densification, select the
+   installed plugin folder too.
+2. Choose your Guerrilla server and scratch folder. The app supplies its own
+   pinned Python, Node, FFmpeg, export converter, and integration dependencies;
+   your GPU drivers come from your existing installation. Run **Save and check
+   dependencies** and resolve reported hardware or engine compatibility issues.
+3. Paste an enrollment token from the server's Workers page and choose **Enroll
+   and start**. Tokens travel through stdin, never through command arguments or
+   saved settings. Jobs and training settings are assigned by the server.
+4. Closing the window keeps the tray and background worker running. Quitting the
+   interface also leaves the worker running. **Stop worker** shuts execution down
+   and retains verified checkpoints. **Finish job, then pause** finishes the
+   current assignment before stopping.
 
-Settings, enrollment, launch logs and scratch are stored in
-`%LOCALAPPDATA%\Guerrilla\worker`, protected for your account and SYSTEM.
-Existing portable-worker settings in that folder are reused. Credentials bind
-an enrolled identity to its original server. To change servers, stop and use
-**Disconnect**, then change the URL and enroll again. Disconnect preserves
-checkpoints; revoke the old identity from the old server's Workers page.
+**Start worker when I log in** is optional and managed in Setup. The worker runs
+under your Windows account during your logged-in session, without a boot-time
+system service. Reopening the app attaches to the existing background worker.
+
+Settings, credentials, logs, and default scratch are stored in
+`%LOCALAPPDATA%\Guerrilla\worker`, protected for your account. Existing Windows
+tray profiles keep their enrollment, engine paths, and scratch checkpoints;
+Python now comes from the worker distribution. Enrollment binds the worker to
+its original server. Stop and disconnect before changing servers. Disconnect
+keeps checkpoints; revoke the old identity on the original server if needed.
 
 ## Updates and removal
 
-**Download updates…** opens GitHub Releases. Quit the tray app before installing
-a new version. Settings and checkpoints survive upgrades and uninstallation;
-uninstallation removes startup registration. Installers are unsigned initially
-and Windows may show a security warning. There is no automatic updater.
+Quit the interface before upgrading or uninstalling. Setup also asks any old
+Windows tray app to close and uses the installed background worker's normal
+shutdown command before replacing or removing files. If shutdown cannot be
+confirmed, installation/removal stops so you can inspect logs and retry. Setup
+never force-kills a scan or starts a worker afterward.
+
+Upgrades and uninstall preserve settings, enrollment, checkpoints, and your
+engine installations. Uninstall removes this app's login registration and app
+files. Microsoft's shared WebView2 runtime stays installed for other apps.
+Installer packages are unsigned initially; Windows may require you to accept
+its standard unsigned-app prompt. No release is automatically published.
 
 ## Building
 
-On Windows with Bun 1.4.2 and .NET SDK 8.0.425 or newer installed:
+On a Windows x64 machine with the repository's pinned Bun and Rust toolchain,
+and licensed Visual Studio/Build Tools with the x64 C++ tools installed.
+
+Use a build disk with at least 70 GiB free. CUDA/PyTorch dependencies can make
+GPU distributions about 20 GiB; download caches, staging, installer data, and
+installed-app smoke testing need additional copies. The optional package CI job
+checks capacity and requires a larger or self-hosted runner when standard hosted
+runner storage is insufficient. Runtime dependencies are never removed to make
+a package fit.
+
+When manually dispatching package CI, enable `packages` and use
+`linux_package_runner`, `windows_package_runner`, and `macos_package_runner` to
+select suitable larger or dedicated self-hosted runner labels. Defaults use the
+standard hosted labels; change them when their disks fail the capacity check.
+The smaller macOS base runtime needs 12 GiB free; Windows and Linux CUDA package
+jobs require 70 GiB.
+Custom labels must identify runners with the matching OS, native build tools,
+and a clean test account. Automatic check jobs keep their normal hosted matrix.
+
+Then run:
 
 ```powershell
 bun install --frozen-lockfile
-bun run build:windows
-bun run build:installer
+bun run build
 ```
 
-The native tray executable is `dist/windows-app/guerrilla-worker.exe`. Keep the
-whole folder together when using it without installation. Installer output is
-under `dist/installer`. The build downloads checksum-verified Node 22.22.0,
-pins .NET 8.0.31, includes upstream notices and runs app self-tests. Installer
-builds use the signed upstream Inno Setup 6.4.3 compiler, installed under the
-user's Guerrilla build-tools cache. No scan engines or model assets are bundled.
+The prepared app is `dist/windows-app`. Installer artifacts are under
+`desktop/src-tauri/target/release/bundle/installer`: the setup executable, all payload slices, SHA-256 checksums,
+and the embedded WebView2 payload's source/version/signature manifest.
 
-Every push to the independent worker repository's `main` runs
-the Windows job in `windows-release.yml` (displayed as **Worker release**):
-checks, installer build, install/uninstall smoke test,
-and a GitHub Release with the installer, matching source and checksums. Each
-successful push receives a distinct `windows-vMAJOR.MINOR.RUN_NUMBER` tag.
-Failed checks produce no release. Updates to the parent monorepo alone do not
-trigger a worker release. Local builds remain uncommitted generated artifacts.
-
-## Reconstruction dependency
-
-Reconstruction runs Guerrilla's code directly against CUDA-enabled pycolmap
-4.0.2 in the selected Python environment. It does not load the LichtFeld COLMAP
-plugin or Studio's Python for reconstruction. Existing profiles automatically
-discard the obsolete COLMAP plugin setting; other settings are preserved.
-Install the reconstruction wheel into the Python selected in the tray app:
+To package an already prepared, self-contained app folder:
 
 ```powershell
-python -m pip install "https://github.com/lyehe/build_gpu_colmap/releases/download/v4.0.2/pycolmap-4.0.2%2Bcuda.cudss-cp312-cp312-win_amd64.whl"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 `
+  -SourceDirectory C:\absolute\prepared-app -Version 0.3.0 `
+  -Destination C:\absolute\installer-output
 ```
 
-This Windows CUDA wheel requires Python 3.12 x64. The Linux image already includes
-`pycolmap-cuda12==4.0.2`. Dependency checks reject a CPU-only or incompatible build.
+The packaging script validates required runtime files, rejects staged scan-engine
+executables, obtains and checks Microsoft's signed x64 standalone WebView2
+payload at build time, and uses the pinned, signature-verified Inno Setup 6.4.3
+compiler cache. A cached WebView2 installer remains the build's recorded payload;
+remove `%LOCALAPPDATA%\Guerrilla\build-tools\MicrosoftEdgeWebView2RuntimeInstallerX64.exe`
+to refresh it for a later build. All installer parts must travel together.
+
+The Windows build discovers the licensed x64 MSVC CRT/OpenMP redistributable
+through `VCToolsRedistDir` or `vswhere`, verifies Microsoft's signatures, and
+includes app-local DLLs beside the native executables and bundled Python.
+There is no machine-wide Visual C++ redistributable installation. If discovery
+fails, install the C++ build tools or point `VCToolsRedistDir` to their
+`VC\Redist\MSVC\14.x` folder. The runtime's `windows-crt/manifest.json` records
+the copied files, versions, signatures, and checksums.
+
+[Microsoft's offline deployment instructions](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution#offline-deployment)
+and [Inno Setup's disk-spanning requirements](https://jrsoftware.org/ishelp/topic_setup_diskspanning.htm)
+explain the two packaging choices.

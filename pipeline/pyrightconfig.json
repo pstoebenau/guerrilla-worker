@@ -1,0 +1,7 @@
+{
+  "include": ["native_bindings.py"],
+  "stubPath": "typing",
+  "typeCheckingMode": "strict",
+  "pythonVersion": "3.11",
+  "reportMissingModuleSource": false
+}

@@ -1,188 +1,193 @@
 # Guerrilla Worker
 
-Independent pipeline source and outbound HTTP worker, protocol 1.0.0. This is a
-local release candidate; publication remains pending redistribution review.
-It includes complete Spirula and LichtFeld workflows. It has no database driver,
-bucket credential client, private package, queue access, or inbound server.
+Cross-platform management app and independent background worker for Guerrilla.
+The Tauri desktop app uses Svelte/TypeScript; the enrolled agent and pipeline
+orchestration use Rust. Focused Python helpers handle COLMAP, image processing,
+and engine APIs. The outbound worker protocol remains version 2.
 
-## Native worker setup
+## Desktop
 
-The same worker and commands run on Windows x64, Linux x64, and Apple Silicon
-macOS. Spirula uses the host's hardware Vulkan GPU (MoltenVK on macOS).
-LichtFeld additionally requires NVIDIA CUDA and its engine/plugins; it is optional
-and is advertised only when its own preflight passes.
+The desktop app runs on Windows x64, Linux x64, and macOS 14 or later (Apple Silicon and
+Intel management builds). Install LichtFeld and/or Spirula through their own
+upstream distribution, then select their executable paths in **Setup**. LichtFeld
+requires an NVIDIA CUDA GPU and the compatible densification plugin. Apple Silicon
+execution uses Spirula. Available engines are advertised only after their own
+preflight passes; an unavailable engine never silently falls back to another.
 
-Install Bun, Node.js 22.22.0+, FFmpeg, and Python 3.12+ or `uv`, then run:
+Python, FFmpeg/FFprobe, Node, the export converter, and supporting Python libraries
+are included in desktop packages. GPU drivers and engine installations are supplied
+by the owner. Desktop build and setup commands do not build or download engines.
+The Linux Docker image has a separate, fully bundled engine policy described below.
 
-```sh
-bun run setup
-bun start --preflight
-```
+Open **Guerrilla Worker**, check dependencies, create an enrollment token on your
+server's Workers page, and enroll in Setup. The main window shows actual worker
+state, GPU/engine availability, current job progress, and bounded logs. It manages
+server-assigned work only; it has no local scan creation flow.
 
-Setup installs the checksum-verified Spirula release, an isolated Python
-environment, and the locked converter, then builds and preflights the worker.
-Engines live in `~/.local/share/guerrilla-worker/runtimes/` outside the checkout.
-`SPIRULA_BIN` and `PYTHON` can select an existing installation instead. Linux
-also needs its GPU driver and the system libraries required by Spirula's Ubuntu
-binary. Setup does not install NVIDIA/CUDA dependencies for Spirula-only workers.
+Closing the window leaves the tray and worker running. **Quit interface** closes
+the GUI while the independent worker continues. **Stop worker** safely interrupts
+execution and retains recovery data; **Finish and pause** completes the current
+job and stops claiming work. Login startup is optional and runs under your account,
+not as a system service before login. Reopening attaches to the existing worker.
 
-Set `WORKER_CONTROL_URL` to your Guerrilla server, create a token in **My workers**,
-and enroll once:
+See [desktop operation and architecture](docs/cross-platform-worker.md).
 
-```sh
-bun start enroll --token-stdin
-bun start
-```
+## Build a desktop package
 
-Credentials stay outside the checkout. In Guerrilla, choose **Spirula** and
-**My workers** for an Apple Silicon, AMD, or Intel GPU worker. For local Guerrilla
-development, use `bun run worker:setup`, `bun run worker enroll --token-stdin`,
-and `bun dev --worker` from the Guerrilla repository instead.
-
-GPU discovery comes from Spirula itself, rather than an OS-specific hardware
-inventory. Checkpoint freezing and process containment live in `process_runtime.py`;
-the shared pipeline keeps engine commands and artifacts independent of the host.
-Windows uses Job Objects, Linux uses parent-death signals, and macOS uses a process
-group watchdog. These host primitives preserve GPU exclusion after supervisor exit.
-
-## Engine architecture
-
-`agent/` owns enrollment, leases, transfers and supervision. It runs the Python
-pipeline through JSONL events; it does not build engine commands. Each engine's
-registration hash includes its own runtime versions, shared pipeline/converter
-identity and the worker bundle hash when available. Job startup preflights only
-the requested engine.
-
-`pipeline/platform_runner.py` owns stage manifests, selective restoration,
-checkpoint freezing/archival, retention and verified SOG exports. It receives an
-engine object: `Runner(request, engine=adapter)`. Normal CLI execution selects the
-adapter from the explicit registry in `pipeline/engines.py`. This is dependency
-injection through a constructor; there is no DI framework or plugin loader.
-
-`pipeline/engine.py` defines the structural `Engine` contract and artifact
-descriptors. `engine_lichtfeld.py` and `engine_spirula.py` implement their settings,
-runtime identity, prerequisites, stage commands, checkpoint layouts and preview
-conversion. Adapters use the runner's stage/restore/command methods so they share
-the durability and cancellation guarantees. Native GPU imports stay in preflight.
-
-To add an engine such as Brush, implement an adapter and register it in
-`pipeline/engines.py`. Return a final PLY and describe its native checkpoints;
-reuse existing reconstruction helpers where appropriate. Keep engine-specific
-formats and commands inside the adapter. Add its ID to the protocol's `ENGINES`
-list, then update server settings validation, UI selection and engine setup/release
-packaging. An adapter alone does not enable an engine across the product. Validate
-its complete workflow, Gaussian cap and checkpoint resume on the actual GPU.
-`pipeline/tests/test_engines.py` exercises a third test adapter through execution,
-retention, compaction and resume without changing shared orchestration.
-
-## License
-
-The owner accepted GPL-3.0-only for the original worker code. That code is
-licensed under GNU GPL version 3 only; see [LICENSE](LICENSE). Third-party
-components retain their own terms. The separate `packages/protocol` contract
-is licensed under MIT; see its LICENSE. RoMa/DINOv3-based processing is also
-subject to the [model terms](docs/model-terms.md), including the complete
-DINOv3 agreement and its use restrictions.
-License acceptance does not clear the redistribution blockers in
-[the dependency review](docs/dependency-review.md).
-
-## Standalone scans
-
-Install Python 3.12+, FFmpeg, the required engine and its documented plugins.
-Create a virtual environment and install `pipeline/requirements.txt`. LichtFeld
-also needs CUDA-enabled pycolmap 4.0.2 in that environment (see
-[Windows instructions](docs/windows-worker.md#reconstruction-dependency); Linux
-uses `pycolmap-cuda12==4.0.2`). Reconstruction uses our own direct pycolmap
-pipeline; the LichtFeld COLMAP plugin is not required. Set
-`LICHTFELD_BIN`, `LICHTFELD_DENSIFICATION_PLUGIN`, or
-`SPIRULA_BIN` when overriding normal install locations.
-
-Exports use the independent PlayCanvas `splat-transform` CLI, never the training
-engine. Install Node.js 22+ and run `npm ci --prefix pipeline/docker/converter`
-for the locked converter, or install `@playcanvas/splat-transform@3.10.1` globally.
-`SPLAT_TRANSFORM_BIN` can select its executable or `bin/cli.mjs` entry point.
-Spirula scans require Spirula and this converter; LichtFeld is only required for
-the LichtFeld workflow. SOG compression uses Metal on macOS, Vulkan on Linux,
-and D3D12 on Windows. Set
-`SPLAT_TRANSFORM_GPU=cpu` explicitly for CPU compression or a GPU adapter index;
-`SPLAT_TRANSFORM_GPU_BACKEND` selects another WebGPU backend.
+Developers need Bun, Rust, and the platform's Tauri build prerequisites. Users of
+the resulting package do not need those tools or a system Python/Node/FFmpeg.
 
 ```sh
-python pipeline/run_scan.py video.mp4 --output output --max-cap 100000
-python pipeline/run_scan.py video.mp4 --output output --max-cap 100000 --resume
+bun install --frozen-lockfile
+bun run build
 ```
 
-The original desktop entry point runs LichtFeld. For either complete engine use
-`python pipeline/platform_runner.py --request request.json` with backend,
-maxCap, settings, inputPath and outputPath. Settings schema is in pipeline/.
-No account is required. Local files, direct video URLs and Google Photos links
-are supported by the desktop entry point. Completed stages and verified resume
-checkpoints are preserved on failure. Never change settings during resume.
+The build compiles both Rust executables, stages Tauri sidecars and Python helpers,
+then prepares checksum-pinned runtime assets and hash-locked Python dependencies.
+Runtime preparation is host-native. Windows packages use a disk-spanned Inno
+installer with offline WebView2 and app-local Microsoft runtime libraries. Keep
+the setup executable and every payload slice together. Windows/Linux CUDA bundles
+are large because they include reconstruction libraries. Desktop packages do not
+include engine binaries.
 
-## Enrolled agent
-
-Install Bun 1.4.2 and Node 22.22.0+. Run `bun install --frozen-lockfile`, then
-`bun run build`. `PYTHON` selects the Python environment; `PIPELINE_ROOT` may
-select an installed pipeline directory. `node dist/worker.mjs --preflight`
-reports the actual engine/GPU availability. One agent executes one scan at a time.
-The worker requires exactly one visible hardware GPU; isolate Docker devices with
-`--gpus device=GPU_UUID`. Multiple visible GPUs or a nonzero worker index are rejected.
-All local agents sharing a GPU must share `GPU_LOCK_PATH` and
-`WORKER_AGENT_LOCK_DIRECTORY`. The latter is an absolute directory holding
-GPU-UUID-keyed supervisor locks acquired before polling or downloading work.
-The native Windows defaults use shared Guerrilla directories. Containers must
-bind the same host GPU-lock directory at `/gpu` across worktrees and workers;
-separate per-container directories or volumes do not provide host-wide exclusion.
-A lease loss stops the process tree.
-
-Create an enrollment token from your account's worker settings. Set
-`WORKER_CONTROL_URL` and pass the token through `WORKER_ENROLLMENT_TOKEN` or stdin:
+To work on the interface after staging the resources:
 
 ```sh
-node dist/worker.mjs enroll --token-stdin
-node dist/worker.mjs
+bun --cwd desktop install --frozen-lockfile
+bun run dev
 ```
 
-`WORKER_CREDENTIAL_FILE` defaults outside this checkout at
-`~/.config/guerrilla-worker/credentials.json`. Protect its host directory with
-owner-only permissions/ACLs. The agent waits for enrollment if it is absent.
-`WORKER_SCRATCH` controls local data storage. Credentials and signed URLs must
-never be copied into images or diagnostic reports. The platform verifies uploads
-and commits each checkpoint before the runner acknowledges/prunes older data.
-Account owners can drain, revoke, or cancel through the control plane.
+Browser preview displays a native-runtime-unavailable state; enrollment and worker
+controls require Tauri. Package output is under `desktop/src-tauri/target/release/bundle/`.
 
-## Docker and checks
+## Headless native worker
+
+For a headless native source checkout, install the engines through their upstream
+channels. The setup helper prepares the supporting runtime and native binaries;
+it does not install engines. Then use the management CLI:
+
+```sh
+bun scripts/setup.ts
+bun scripts/worker.ts preflight
+WORKER_CONTROL_URL=https://guerrilla.dad bun scripts/worker.ts enroll --token-stdin
+bun scripts/worker.ts run
+```
+
+`dist/guerrilla-worker` and `dist/guerrilla-pipeline` are native binaries. The
+CLI also supports `start`, `status`, `stop`, `drain`, and `disconnect` for a
+background worker, with `--config /absolute/path/profile.json` to select a profile.
+Set `SPIRULA_BIN`, `LICHTFELD_BIN`, and `LICHTFELD_DENSIFICATION_PLUGIN` to your
+installed engines/plugin when using environment-based configuration.
+
+Credentials and writable state stay outside the checkout/image. Enrollment tokens
+travel through stdin; credentials and signed transfer URLs never belong in logs.
+The agent needs no database, storage-provider credentials, inbound ports, or Docker
+socket. One agent executes one scan at a time and requires one visible hardware
+GPU. Agents using the same GPU must share their supervisor and pipeline lock paths.
+
+## Linux Docker image
+
+The Linux NVIDIA image includes built LichtFeld and Spirula engines, the compatible
+LichtFeld densification plugin, reconstruction models, and all supporting runtimes.
+It needs no host engine installation or engine bind mounts. This differs from the
+desktop app, which uses engines installed by the owner.
+
+Build the combined runtime and Rust worker layers using Bun and Docker Buildx:
+
+```sh
+bun install --frozen-lockfile
+bun run build:docker
+```
+
+The build helper downloads and verifies checksum-locked LichtFeld and Spirula
+artifacts at build time. LichtFeld's artifact includes its built libraries and
+resources; the worker build does not compile it again. Default image tags are
+`guerrilla-runtime:local` and `guerrilla-worker:local`. Override them with
+`bun run build:docker --runtime-image TAG --worker-image TAG`. The resulting image
+contains the engines and model assets needed by both workflows, without a
+first-job engine or model download.
+
+The host still needs an NVIDIA driver, NVIDIA Container Toolkit, and a CPU exposing
+the x86-64-v3 features required by the bundled LichtFeld artifact. Enroll once
+using a persistent credential/state directory; paste the token into stdin and
+press Enter:
+
+```sh
+docker run --rm -i --gpus device=GPU_UUID \
+  -v /host/worker-state:/state \
+  -e WORKER_CREDENTIAL_FILE=/state/credentials.json \
+  -e WORKER_CONTROL_URL=https://guerrilla.dad \
+  guerrilla-worker:local enroll --token-stdin
+```
+
+Run the foreground worker with one visible GPU and persistent scratch/lock paths:
+
+```sh
+docker run --rm --gpus device=GPU_UUID \
+  -v /host/worker-state:/state \
+  -v /host/worker-scratch:/scratch \
+  -v /host/shared-gpu-locks:/gpu \
+  -e WORKER_CREDENTIAL_FILE=/state/credentials.json \
+  -e WORKER_SCRATCH=/scratch \
+  -e WORKER_CONTROL_URL=https://guerrilla.dad \
+  guerrilla-worker:local run
+```
+
+Use the same server URL for enrollment and execution. Enrollment also performs
+GPU preflight, so expose the same single GPU in both commands. Make these host
+directories writable by the container's worker account. Share the
+same host `/gpu` bind directory across all workers/worktrees using a GPU; separate
+container volumes cannot provide host exclusion. Both supervisor and pipeline
+locks use that directory. No ports or Docker socket are exposed. Credentials,
+scratch checkpoints, and GPU locks are the only required host data mounts.
+
+`Dockerfile.engine` and its artifact tooling remain source-build references for
+the LichtFeld artifact consumed by the current runtime. The previous automatic
+artifact/image publication recipes are retained in
+[release-process notes](docs/release-process.md); the current helper builds local
+images without publishing them.
+
+## Durability and compatibility
+
+The worker preserves successful stage outputs and the latest verified resume
+checkpoint. Replacement outputs become durable before superseded data is pruned.
+Lease loss stops execution; cancellation cleanup requires the server's explicit
+cancel authorization. Startup recovery precedes claiming new work. Gaussian limits
+are enforced and enrolled SOG exports are verified locally. There is no public
+SuperSplat publication integration.
+
+Checkpoint compatibility requires matching input, settings, engine builds, and
+runtime identities; a matching worker protocol alone does not establish it.
+
+## Checks
 
 ```sh
 bun run check
-bun test
-bun run build
-python -m unittest discover -s pipeline/tests
+bun run check:python
+bun run test
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --all-targets -- -D warnings
+bun run test:rust
+bun run test:python
+python -m unittest discover -s tests -p 'test_*.py'
+bun --cwd desktop run check
+bun --cwd desktop run test
+bun --cwd desktop run build
 docker build --target test -t guerrilla-worker:test .
-# Build/download the checksummed engine artifact and runtime first; see below.
-docker build --target worker --build-arg WORKER_RUNTIME_IMAGE=guerrilla-runtime:local -t guerrilla-worker:local .
 ```
 
-Set `PYTHONPATH=pipeline` for Python tests. Docker builds use only this checkout
-and public dependencies. See [Linux build separation](docs/release-process.md#reusable-linux-runtime-and-worker-builds)
-for prebuilt artifacts and single-engine targets. Final image is a local review candidate, not approved
-for redistribution; see [dependency review](docs/dependency-review.md).
-After enrollment, mount the credential file read-only, mount scratch and the
-shared host GPU-lock directory at `/gpu`, pass
-`WORKER_CREDENTIAL_FILE`, `WORKER_SCRATCH=/scratch` and `--gpus all`. Do not expose
-ports, mount Docker sockets, or pass database/S3/provider credentials.
+CI checks Windows, Linux, and macOS. Native desktop packages are built by the manual
+`packages` workflow input and uploaded as artifacts. The workflow does not publish
+releases or bundle engines into desktop packages. The separate `build:docker`
+command bundles engines into the Linux image. CPU/mock checks are not GPU scan
+acceptance; validate complete engine workflows and resume on the target GPU before
+claiming a release's GPU acceptance.
 
-Linux NVIDIA is the Docker target. Native Windows, Linux and macOS use the same protocol.
-For a portable Windows executable using installed engines, see
-[Windows worker packaging](docs/windows-worker.md).
-Windows Docker/WSL previously exposed CUDA but no NVIDIA Vulkan adapter to
-Spirula. No remote Linux or 3090/4090/5090 acceptance is claimed by this candidate.
-There is no SuperSplat publication integration. SOG/SPZ outputs are locally verified.
+## License
 
-## Release and security
-
-Use fresh public history only after source review and license approval. Release
-source, dependency notices, corresponding source for GPL components, protocol
-version and immutable image digest together. No registry release exists yet.
-Report suspected security issues privately to the repository owner; do not post
-credentials, presigned URLs or customer media in public issues.
+Original worker code is GPL-3.0-only; the separately versioned protocol is MIT.
+Bundled dependencies retain their own terms. Desktop engine installations are
+external; the Docker image includes engines under their upstream terms.
+Existing RoMa/DINOv3 model terms are in [docs/model-terms.md](docs/model-terms.md).
+See [dependency review](docs/dependency-review.md) for redistribution evidence and
+remaining release work. Report security issues privately to the repository owner.

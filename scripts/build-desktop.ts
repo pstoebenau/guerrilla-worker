@@ -1,0 +1,55 @@
+import { cp, mkdir, readFile, readdir, rm } from 'node:fs/promises';
+import path from 'node:path';
+import { vendorRuntime } from './vendor-runtime';
+
+const root = path.resolve(import.meta.dir, '..');
+const app = path.join(root, 'desktop');
+const tauri = path.join(app, 'src-tauri');
+if (process.argv.slice(2).some(argument => argument === '--target' || argument.startsWith('--target='))) {
+  throw new Error('Desktop packages must be built natively on their target OS and architecture; the supporting runtimes are host-specific.');
+}
+async function run(args: string[], cwd = root, env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  const child = Bun.spawn(args, { cwd, env, stdin: 'inherit', stdout: 'inherit', stderr: 'inherit' });
+  if (await child.exited !== 0) throw new Error(`Desktop build failed: ${args.join(' ')}`);
+}
+const version = Bun.spawnSync(['rustc', '-vV'], { stdout: 'pipe' });
+const target = version.stdout.toString().match(/^host: (.+)$/m)?.[1];
+if (!target) throw new Error('Install the Rust toolchain before building the desktop app');
+const suffix = process.platform === 'win32' ? '.exe' : '';
+await run(['cargo', 'build', '--release', '--locked', '--workspace', '--target-dir', path.join(root, 'target')]);
+await mkdir(path.join(tauri, 'binaries'), { recursive: true });
+for (const binary of ['guerrilla-worker', 'guerrilla-pipeline']) {
+  await cp(path.join(root, 'target/release', binary + suffix), path.join(tauri, 'binaries', `${binary}-${target}${suffix}`));
+}
+await vendorRuntime(path.join(tauri, 'resources/runtime'));
+const pipeline = path.join(tauri, 'resources/pipeline');
+await rm(pipeline, { recursive: true, force: true });
+await mkdir(pipeline, { recursive: true });
+for (const file of await readdir(path.join(root, 'pipeline'))) {
+  if (file.endsWith('.py') || file.endsWith('.json') || file.endsWith('.pyi')) await cp(path.join(root, 'pipeline', file), path.join(pipeline, file));
+}
+await run([process.execPath, 'install', '--frozen-lockfile'], app);
+await run([process.execPath, 'run', 'check'], app);
+const buildArguments = process.argv.slice(2);
+await run([process.execPath, 'run', 'tauri', 'build', '--config', 'src-tauri/tauri.bundle.conf.json', ...(process.platform === 'win32' && !buildArguments.includes('--no-bundle') ? ['--no-bundle'] : []), ...buildArguments], app, { ...process.env, CARGO_TARGET_DIR: path.join(tauri, 'target') });
+if (process.platform === 'win32') {
+  // CUDA bindings can exceed a single NSIS/MSI payload. Inno's spanned data
+  // files package the complete native app without trimming runtime dependencies.
+  const portable = path.join(root, 'dist/windows-app');
+  await rm(portable, { recursive: true, force: true });
+  await mkdir(portable, { recursive: true });
+  await cp(path.join(tauri, 'target/release/guerrilla-worker-desktop.exe'), path.join(portable, 'guerrilla-worker-desktop.exe'));
+  for (const binary of ['guerrilla-worker', 'guerrilla-pipeline']) await cp(path.join(root, 'target/release', binary + suffix), path.join(portable, binary + suffix));
+  await mkdir(path.join(portable, 'resources'));
+  await cp(path.join(tauri, 'resources/runtime'), path.join(portable, 'resources/runtime'), { recursive: true });
+  await cp(pipeline, path.join(portable, 'resources/pipeline'), { recursive: true });
+  await cp(path.join(root, 'LICENSE'), path.join(portable, 'LICENSE'));
+  await cp(path.join(root, 'docs/windows-worker.md'), path.join(portable, 'README.md'));
+  for (const file of await readdir(path.join(tauri, 'resources/runtime/windows-crt'))) {
+    if (file.toLowerCase().endsWith('.dll')) await cp(path.join(tauri, 'resources/runtime/windows-crt', file), path.join(portable, file));
+  }
+  if (!buildArguments.includes('--no-bundle')) {
+    const version = (JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')) as {version: string}).version;
+    await run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(root, 'scripts/build-windows.ps1'), '-SourceDirectory', portable, '-Version', version, '-Destination', path.join(tauri, 'target/release/bundle/installer')]);
+  }
+}

@@ -1,63 +1,110 @@
-param([string]$Version = '0.1.0', [switch]$Installer)
+param(
+    [Parameter(Mandatory = $true)][string]$SourceDirectory,
+    [Parameter(Mandatory = $true)][string]$Version,
+    [string]$Destination = ''
+)
+# Packaging only. build-desktop.ts supplies the tested app and vendored runtime.
 $ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+if ($env:OS -ne 'Windows_NT') { throw 'Build the Windows installer on Windows.' }
 if ($Version -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') { throw 'Version must have three or four numeric components.' }
 $root = Split-Path $PSScriptRoot -Parent
-$destination = Join-Path $root 'dist/windows-app'
-$runtime = Join-Path $destination 'runtime'
-$pipeline = Join-Path $runtime 'pipeline'
-$notices = Join-Path $destination 'notices'
+if (!(Test-Path -LiteralPath $SourceDirectory -PathType Container)) { throw 'SourceDirectory must be an existing prepared app folder.' }
+$sourceItem = Get-Item -LiteralPath $SourceDirectory
+if ($sourceItem.PSProvider.Name -ne 'FileSystem') { throw 'SourceDirectory must be a filesystem folder.' }
+if ($sourceItem.FullName -eq [IO.Path]::GetPathRoot($sourceItem.FullName)) { throw 'SourceDirectory must be a prepared app folder below a filesystem root.' }
+$source = $sourceItem.FullName.TrimEnd('\')
+if ($Destination -eq '') { $Destination = Join-Path $root 'dist/installer' }
+$destinationPath = [IO.Path]::GetFullPath($Destination)
+if ($destinationPath -eq [IO.Path]::GetPathRoot($destinationPath)) { throw 'Destination must be an installer folder below a filesystem root.' }
+$output = $destinationPath.TrimEnd('\')
+if ($output -eq $source -or $output.StartsWith($source + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Installer output must be outside the prepared app folder.' }
+foreach ($required in @(
+    'guerrilla-worker-desktop.exe', 'guerrilla-worker.exe', 'guerrilla-pipeline.exe', 'LICENSE', 'README.md',
+    'resources/runtime/manifest.json', 'resources/runtime/python/python.exe',
+    'resources/runtime/node/node.exe', 'resources/runtime/ffmpeg/ffmpeg.exe',
+    'resources/runtime/ffmpeg/ffprobe.exe', 'resources/runtime/converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs',
+    'resources/pipeline/native_bindings.py', 'resources/pipeline/scan-settings.schema.json'
+)) {
+    if (!(Test-Path -LiteralPath (Join-Path $source $required) -PathType Leaf)) { throw "Prepared app is missing $required" }
+}
+$engineFiles = @(Get-ChildItem -LiteralPath $source -Recurse -File | Where-Object { $_.Name -match '^(?i:spirula|LichtFeld[- ]Studio|LichtFeld-Studio)\.exe$' })
+if ($engineFiles.Count -gt 0) { throw 'Prepared app contains a scan engine executable. LichtFeld and Spirula must remain user-installed.' }
 $cache = Join-Path $env:LOCALAPPDATA 'Guerrilla/build-tools'
-foreach ($directory in @($destination, $runtime, $pipeline, $notices, $cache)) { $null = New-Item -ItemType Directory -Path $directory -Force }
-
-& bun build (Join-Path $root 'agent/windows.ts') --target=node --outfile (Join-Path $runtime 'worker.mjs')
-if ($LASTEXITCODE) { throw 'Agent build failed.' }
-& dotnet publish (Join-Path $root 'windows/Guerrilla.Worker.csproj') -c Release -r win-x64 --self-contained true -p:Version=$Version -o $destination
-if ($LASTEXITCODE) { throw 'Tray application build failed.' }
-
-# Node ships the complete runtime LICENSE. Pin and verify its archive from the
-# upstream checksum inventory; engines and model weights are never bundled.
-$nodeVersion = '22.22.0'
-$archiveName = "node-v$nodeVersion-win-x64.zip"
-$archive = Join-Path $cache $archiveName
-$checksums = (Invoke-WebRequest "https://nodejs.org/dist/v$nodeVersion/SHASUMS256.txt" -UseBasicParsing).Content
-$match = [regex]::Match($checksums, "(?m)^([a-f0-9]{64})\s+" + [regex]::Escape($archiveName) + '\r?$')
-if (!$match.Success) { throw 'Node archive missing from upstream checksums.' }
-if (!(Test-Path -LiteralPath $archive)) { Invoke-WebRequest "https://nodejs.org/dist/v$nodeVersion/$archiveName" -OutFile $archive -UseBasicParsing }
-if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $match.Groups[1].Value) { throw 'Node checksum mismatch.' }
-$nodeDirectory = Join-Path $cache "node-v$nodeVersion-win-x64"
-Expand-Archive -LiteralPath $archive -DestinationPath $cache -Force
-Copy-Item -LiteralPath (Join-Path $nodeDirectory 'node.exe') -Destination $runtime
-Copy-Item -LiteralPath (Join-Path $nodeDirectory 'LICENSE') -Destination (Join-Path $notices 'Node-LICENSE.txt')
-foreach ($file in Get-ChildItem (Join-Path $root 'pipeline') -File) {
-    if ($file.Extension -eq '.py' -or $file.Name -eq 'scan-settings.schema.json') { Copy-Item -LiteralPath $file.FullName -Destination $pipeline }
-}
-Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination $destination
-Copy-Item -LiteralPath (Join-Path $root 'packages/protocol/LICENSE') -Destination (Join-Path $notices 'Protocol-LICENSE.txt')
-Copy-Item -LiteralPath (Join-Path $root 'docs/windows-worker.md') -Destination (Join-Path $destination 'README.md')
-Copy-Item -LiteralPath (Join-Path $root 'windows/THIRD_PARTY_NOTICES.txt') -Destination $notices
-foreach ($document in @{
-    'Dotnet-LICENSE.txt' = 'https://raw.githubusercontent.com/dotnet/runtime/v8.0.31/LICENSE.TXT';
-    'Dotnet-NOTICES.txt' = 'https://raw.githubusercontent.com/dotnet/runtime/v8.0.31/THIRD-PARTY-NOTICES.TXT';
-    'WinForms-LICENSE.txt' = 'https://raw.githubusercontent.com/dotnet/winforms/v8.0.31/LICENSE.TXT';
-    'WinForms-NOTICES.txt' = 'https://raw.githubusercontent.com/dotnet/winforms/v8.0.31/THIRD-PARTY-NOTICES.TXT'
-}.GetEnumerator()) {
-    Invoke-WebRequest $document.Value -OutFile (Join-Path $notices $document.Key) -UseBasicParsing
-}
-$selfTest = Start-Process -FilePath (Join-Path $destination 'guerrilla-worker.exe') -ArgumentList '--self-test' -WindowStyle Hidden -Wait -PassThru
-if ($selfTest.ExitCode) { throw "Tray self-tests failed ($($selfTest.ExitCode))." }
-Write-Output "Tray package built and self-tested: $destination"
-
-if ($Installer) {
-    $compiler = Join-Path $cache 'inno-6.4.3/ISCC.exe'
-    if (!(Test-Path -LiteralPath $compiler)) {
-        $setup = Join-Path $cache 'innosetup-6.4.3.exe'
-        Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-6_4_3/innosetup-6.4.3.exe' -OutFile $setup -UseBasicParsing
-        $signature = Get-AuthenticodeSignature -LiteralPath $setup
-        if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '^CN=Pyrsys B\.V\.,') { throw 'Unexpected Inno Setup signature.' }
-        $installDirectory = Split-Path $compiler -Parent
-        $install = Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', "/DIR=`"$installDirectory`"") -WindowStyle Hidden -Wait -PassThru
-        if ($install.ExitCode) { throw 'Could not install the build-only installer compiler.' }
+$prerequisites = Join-Path $source 'prerequisites'
+foreach ($directory in @($output, $cache, $prerequisites)) { $null = New-Item -ItemType Directory -Path $directory -Force }
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+function Assert-Signature([string]$Path, [string]$SubjectPattern) {
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or $signature.SignerCertificate.Subject -notmatch $SubjectPattern) {
+        throw "Unexpected or invalid code signature: $([IO.Path]::GetFileName($Path))"
     }
-    & $compiler "/DAppVersion=$Version" (Join-Path $root 'windows/installer.iss')
-    if ($LASTEXITCODE) { throw 'Installer build failed.' }
+    return $signature
 }
+# Official Microsoft developer page: 'Evergreen Standalone Installer / x64' is
+# 2124701. 2124703 is the network bootstrapper and MUST NOT be used here.
+# https://developer.microsoft.com/en-us/microsoft-edge/webview2/
+# https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution
+$webViewUrl = 'https://go.microsoft.com/fwlink/?linkid=2124701'
+$webViewName = 'MicrosoftEdgeWebView2RuntimeInstallerX64.exe'
+$webViewCache = Join-Path $cache $webViewName
+if (!(Test-Path -LiteralPath $webViewCache -PathType Leaf)) {
+    $temporary = $webViewCache + '.' + [Guid]::NewGuid().ToString('N') + '.download.exe'
+    try {
+        Invoke-WebRequest -Uri $webViewUrl -OutFile $temporary -UseBasicParsing
+        $null = Assert-Signature $temporary '(^|,\s*)CN=Microsoft Corporation(,|$)'
+        if ((Get-Item -LiteralPath $temporary).Length -lt 50000000) { throw 'Expected the full offline WebView2 standalone installer, not a bootstrapper.' }
+        Move-Item -LiteralPath $temporary -Destination $webViewCache
+    } finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force } }
+}
+$webViewSignature = Assert-Signature $webViewCache '(^|,\s*)CN=Microsoft Corporation(,|$)'
+if ((Get-Item -LiteralPath $webViewCache).Length -lt 50000000) { throw 'Cached WebView2 payload is not a full offline standalone installer.' }
+$webViewPayload = Join-Path $prerequisites $webViewName
+Copy-Item -LiteralPath $webViewCache -Destination $webViewPayload -Force
+$webViewVersion = (Get-Item -LiteralPath $webViewPayload).VersionInfo.ProductVersion
+$webViewHash = (Get-FileHash -LiteralPath $webViewPayload -Algorithm SHA256).Hash.ToLowerInvariant()
+$webViewManifest = [ordered]@{
+    schemaVersion = 1; architecture = 'x64'; distribution = 'Evergreen Standalone Installer';
+    source = $webViewUrl; documentation = 'https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution';
+    fileName = $webViewName; sha256 = $webViewHash; productVersion = $webViewVersion;
+    signer = $webViewSignature.SignerCertificate.Subject; signatureStatus = 'Valid'
+}
+$webViewManifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $prerequisites 'WebView2Runtime-manifest.json') -Encoding UTF8
+# Reuse the pinned Inno Setup cache and verify its upstream signed installer on
+# every build, including builds using an already installed cached compiler.
+$innoSetup = Join-Path $cache 'innosetup-6.4.3.exe'
+if (!(Test-Path -LiteralPath $innoSetup -PathType Leaf)) {
+    $temporary = $innoSetup + '.' + [Guid]::NewGuid().ToString('N') + '.download.exe'
+    try {
+        Invoke-WebRequest -Uri 'https://github.com/jrsoftware/issrc/releases/download/is-6_4_3/innosetup-6.4.3.exe' -OutFile $temporary -UseBasicParsing
+        $null = Assert-Signature $temporary '^CN=Pyrsys B\.V\.,'
+        Move-Item -LiteralPath $temporary -Destination $innoSetup
+    } finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force } }
+}
+$null = Assert-Signature $innoSetup '^CN=Pyrsys B\.V\.,'
+$compiler = Join-Path $cache 'inno-6.4.3/ISCC.exe'
+if (!(Test-Path -LiteralPath $compiler -PathType Leaf)) {
+    $installDirectory = Split-Path $compiler -Parent
+    $install = Start-Process -FilePath $innoSetup -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', "/DIR=`"$installDirectory`"") -WindowStyle Hidden -Wait -PassThru
+    if ($install.ExitCode -ne 0 -or !(Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'Could not install the build-only Inno Setup compiler.' }
+}
+$compilerVersion = (Get-Item -LiteralPath $compiler).VersionInfo.FileVersion
+if ($compilerVersion -notmatch '^6\.4\.3(?:\.0)?(?:\s|$)') { throw 'Unexpected Inno Setup compiler version; expected 6.4.3.' }
+$baseName = "Guerrilla-Worker-$Version-windows-x64-setup"
+# Remove only artifacts from this exact version so older extra slices cannot be
+# mistaken for part of a smaller rebuilt package. Other releases remain intact.
+Get-ChildItem -LiteralPath $output -File | Where-Object {
+    $_.Name -eq ($baseName + '.exe') -or $_.Name -like ($baseName + '-*.bin') -or
+    $_.Name -eq ($baseName + '-SHA256SUMS.txt') -or $_.Name -eq ($baseName + '-WebView2.json')
+} | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
+& $compiler "/DAppVersion=$Version" "/DAppSource=$source" "/DInstallerOutput=$output" (Join-Path $root 'packaging/windows-installer.iss')
+if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed.' }
+$setupFile = Join-Path $output ($baseName + '.exe')
+$slices = @(Get-ChildItem -LiteralPath $output -File | Where-Object { $_.Name -like ($baseName + '-*.bin') })
+if (!(Test-Path -LiteralPath $setupFile -PathType Leaf) -or $slices.Count -eq 0) { throw 'Disk-spanned installer output is incomplete.' }
+$artifacts = @((Get-Item -LiteralPath $setupFile)) + $slices
+$checksumLines = @($artifacts | Sort-Object Name | ForEach-Object { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + $_.Name })
+[IO.File]::WriteAllLines((Join-Path $output ($baseName + '-SHA256SUMS.txt')), $checksumLines, [Text.UTF8Encoding]::new($false))
+$webViewManifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $output ($baseName + '-WebView2.json')) -Encoding UTF8
+Write-Output "Windows installer prepared: $setupFile"
+Write-Output "Keep setup.exe and every matching .bin file together ($($slices.Count) payload slices). No release was published."

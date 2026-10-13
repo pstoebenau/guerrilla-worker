@@ -10,3 +10,9 @@ credentials.json
 windows/bin/
 windows/obj/
 .DS_Store
+target/
+desktop/src-tauri/target/
+desktop/src-tauri/binaries/
+desktop/src-tauri/resources/runtime/
+desktop/src-tauri/resources/pipeline/
+desktop/src-tauri/gen/

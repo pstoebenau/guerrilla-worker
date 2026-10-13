@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import sysconfig
 import uuid
 
 import pipeline_common as common
@@ -71,11 +72,19 @@ class LichtFeldEngine:
         probe_colmap(scan_settings.defaults()['reconstruction'])
         if os.name == 'nt':
             studio_python = common.studio_path().parent / 'python.exe'
-            probe = ('import sys,site; from pathlib import Path; '
+            probe = ('import sys,site,os; from pathlib import Path; '
+                     'crt=os.environ.get("WORKER_CRT_ROOT"); '
+                     'dll=os.add_dll_directory(crt) if crt and Path(crt).is_dir() else None; '
+                     'assert list(sys.version_info[:2]) == [int(v) for v in sys.argv[3].split(".")], '
+                     '"LichtFeld Python API ABI differs from bundled Python; use a compatible engine installation"; '
+                     'site.addsitedir(sys.argv[2]); sys.path.remove(sys.argv[2]); sys.path.insert(0,sys.argv[2]); '
                      'p=Path(sys.argv[1]); site.addsitedir(str(p/".venv/Lib/site-packages")); '
                      'import torch,lichtfeld; assert torch.cuda.is_available()')
-            subprocess.run([str(studio_python), '-c', probe, str(common.densification_plugin_path())],
-                           capture_output=True, text=True, check=True, timeout=60)
+            process = subprocess.run([str(studio_python), '-c', probe, str(common.densification_plugin_path()),
+                                      sysconfig.get_path('purelib'), f'{sys.version_info.major}.{sys.version_info.minor}'],
+                                     capture_output=True, text=True, timeout=60)
+            if process.returncode:
+                raise RuntimeError('LichtFeld Python API probe failed: ' + (process.stderr or process.stdout)[-2000:])
             return
         import pycolmap
         import torch

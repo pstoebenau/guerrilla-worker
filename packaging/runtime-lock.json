@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "pythonVersion": "3.12.15",
+  "pythonRelease": "20261009",
+  "nodeVersion": "22.22.0",
+  "ffmpegRelease": "ffmpeg-8.0.3-build4",
+  "targets": {
+    "darwin-arm64": {
+      "python": {
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261009/cpython-3.12.15%2B20261009-aarch64-apple-darwin-install_only.tar.gz",
+        "sha256": "83dcb04777c798bd95f3687acf9ae84b09860272ee6bdfb05be8bcf9447f75b8"
+      },
+      "node": {
+        "url": "https://nodejs.org/dist/v22.22.0/node-v22.22.0-darwin-arm64.tar.gz",
+        "sha256": "5ed4db0fcf1eaf84d91ad12462631d73bf4576c1377e192d222e48026a902640"
+      },
+      "ffmpegArchive": {
+        "url": "https://github.com/AtlasYang/ffmpeg-static-builds/releases/download/ffmpeg-8.0.3-build4/ffmpeg-8.0.3-macos-arm64.tar.gz",
+        "sha256": "26f6269b117a51c5fdfd3a870c4e0a62b99f0575740a3933fc3d852f0a3f80b1"
+      },
+      "ffmpegConfig": {
+        "url": "https://github.com/AtlasYang/ffmpeg-static-builds/releases/download/ffmpeg-8.0.3-build4/ffmpeg-8.0.3-macos-arm64.configure.txt",
+        "sha256": "35e03b193478f2d5bca3a1ff0db92afade1dd2d616dc78946ae81907c0337222"
+      },
+      "ffmpegLicense": {
+        "url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/n8.0.3/COPYING.LGPLv2.1",
+        "sha256": "246041b6ecf9bc32d718a62c57877c78b5eb397b6467e74ed7ae2626ab189c30"
+      },
+      "ffmpegReadme": {
+        "url": "https://raw.githubusercontent.com/AtlasYang/ffmpeg-static-builds/0393ae2c796360fbcbbc44c85eeb769eead473b1/README.md",
+        "sha256": "2f062dd342cd8fe43d445b7d92810ded885b1989dd2c41e180dd3814d469d9bb"
+      }
+    },
+    "darwin-x64": {
+      "python": {
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261009/cpython-3.12.15%2B20261009-x86_64-apple-darwin-install_only.tar.gz",
+        "sha256": "4c84ef5abe4bc145646175fce9b881936d60126b9a3f9a24c6308e2d035ca5c6"
+      },
+      "node": {
+        "url": "https://nodejs.org/dist/v22.22.0/node-v22.22.0-darwin-x64.tar.gz",
+        "sha256": "5ea50c9d6dea3dfa3abb66b2656f7a4e1c8cef23432b558d45fb538c7b5dedce"
+      },
+      "ffmpegArchive": {
+        "url": "https://github.com/AtlasYang/ffmpeg-static-builds/releases/download/ffmpeg-8.0.3-build4/ffmpeg-8.0.3-macos-x64.tar.gz",
+        "sha256": "b84b4515aaf2fe443a76445f02d05544a384dcd46cc6059fb8a1a4f9aaa3035d"
+      },
+      "ffmpegConfig": {
+        "url": "https://github.com/AtlasYang/ffmpeg-static-builds/releases/download/ffmpeg-8.0.3-build4/ffmpeg-8.0.3-macos-x64.configure.txt",
+        "sha256": "b23147a6f4e7dd65abb8e312722d6dccffeea75c353c2cf78cf72f3369c26c56"
+      },
+      "ffmpegLicense": {
+        "url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/n8.0.3/COPYING.LGPLv2.1",
+        "sha256": "246041b6ecf9bc32d718a62c57877c78b5eb397b6467e74ed7ae2626ab189c30"
+      },
+      "ffmpegReadme": {
+        "url": "https://raw.githubusercontent.com/AtlasYang/ffmpeg-static-builds/0393ae2c796360fbcbbc44c85eeb769eead473b1/README.md",
+        "sha256": "2f062dd342cd8fe43d445b7d92810ded885b1989dd2c41e180dd3814d469d9bb"
+      }
+    },
+    "linux-x64": {
+      "python": {
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261009/cpython-3.12.15%2B20261009-x86_64-unknown-linux-gnu-install_only.tar.gz",
+        "sha256": "5864001bf969db329fadc2b654c4878c6027d170c6bd77e28f88666260bcaf63"
+      },
+      "node": {
+        "url": "https://nodejs.org/dist/v22.22.0/node-v22.22.0-linux-x64.tar.gz",
+        "sha256": "c33c39ed9c80deddde77c960d00119918b9e352426fd604ba41638d6526a4744"
+      },
+      "ffmpegArchive": {
+        "url": "https://github.com/AtlasYang/ffmpeg-static-builds/releases/download/ffmpeg-8.0.3-build4/ffmpeg-8.0.3-linux-x64.tar.gz",
+        "sha256": "2612ed26322c864a7411c3578b74fe7f229127e6f9f906d3aa994937a4c9620e"
+      },
+      "ffmpegConfig": {
+        "url": "https://github.com/AtlasYang/ffmpeg-static-builds/releases/download/ffmpeg-8.0.3-build4/ffmpeg-8.0.3-linux-x64.configure.txt",
+        "sha256": "db117771679b14be2afc8a3d801735f510a82b4bcd626c019b95d1988b6bb1be"
+      },
+      "ffmpegLicense": {
+        "url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/n8.0.3/COPYING.LGPLv2.1",
+        "sha256": "246041b6ecf9bc32d718a62c57877c78b5eb397b6467e74ed7ae2626ab189c30"
+      },
+      "ffmpegReadme": {
+        "url": "https://raw.githubusercontent.com/AtlasYang/ffmpeg-static-builds/0393ae2c796360fbcbbc44c85eeb769eead473b1/README.md",
+        "sha256": "2f062dd342cd8fe43d445b7d92810ded885b1989dd2c41e180dd3814d469d9bb"
+      }
+    },
+    "win32-x64": {
+      "python": {
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261009/cpython-3.12.15%2B20261009-x86_64-pc-windows-msvc-install_only.tar.gz",
+        "sha256": "194c8f0d9e0de6f1c4576e5dfa67819a48c764be87608b74b8ad43387a57b93b"
+      },
+      "node": {
+        "url": "https://nodejs.org/dist/v22.22.0/node-v22.22.0-win-x64.zip",
+        "sha256": "c97fa376d2becdc8863fcd3ca2dd9a83a9f3468ee7ccf7a6d076ec66a645c77a"
+      },
+      "ffmpegArchive": {
+        "url": "https://github.com/AtlasYang/ffmpeg-static-builds/releases/download/ffmpeg-8.0.3-build4/ffmpeg-8.0.3-win-x64.zip",
+        "sha256": "fd3473736674343cd1948eb45f28b46f377616432a5cc15eb896bdaabea506f2"
+      },
+      "ffmpegConfig": {
+        "url": "https://github.com/AtlasYang/ffmpeg-static-builds/releases/download/ffmpeg-8.0.3-build4/ffmpeg-8.0.3-win-x64.configure.txt",
+        "sha256": "6d0d6e37f261fb2a9ffc5bbd50db13256d6427f248496b34cc1e9be2e1f2ba06"
+      },
+      "ffmpegLicense": {
+        "url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/n8.0.3/COPYING.LGPLv2.1",
+        "sha256": "246041b6ecf9bc32d718a62c57877c78b5eb397b6467e74ed7ae2626ab189c30"
+      },
+      "ffmpegReadme": {
+        "url": "https://raw.githubusercontent.com/AtlasYang/ffmpeg-static-builds/0393ae2c796360fbcbbc44c85eeb769eead473b1/README.md",
+        "sha256": "2f062dd342cd8fe43d445b7d92810ded885b1989dd2c41e180dd3814d469d9bb"
+      }
+    }
+  },
+  "models": {
+    "roma": {
+      "url": "https://github.com/Parskatt/RoMaV2/releases/download/weights/romav2.pt",
+      "sha256": "3516ccdbbd8eb89d50dfc0bc4562ccdcc2c60b7908e1819d5aae0cbe1bf979bc"
+    },
+    "dinov3": {
+      "url": "https://github.com/facebookresearch/dinov3/zipball/adc254450203739c8149213a7a69d8d905b4fcfa",
+      "sha256": "923e23a8cea28c9255fb3c2674ecea3dafc9dcc23259754ab7b91dd02f14d38a"
+    },
+    "dinov3Commit": "adc254450203739c8149213a7a69d8d905b4fcfa"
+  },
+  "ffmpegBuildCommit": "0393ae2c796360fbcbbc44c85eeb769eead473b1"
+}

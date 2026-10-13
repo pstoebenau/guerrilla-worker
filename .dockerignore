@@ -49,3 +49,10 @@
 **/node_modules
 **/__pycache__
 **/*.pyc
+
+!Cargo.toml
+!Cargo.lock
+!rust/
+!rust/**
+!packaging/
+!packaging/**

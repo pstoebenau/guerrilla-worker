@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "lichtfeld": {
+    "recipe": "d3e6d99ee12c02d9c87998f68ee09decdb45c3caea03197a410bdaae98b135c5",
+    "releaseUrl": "https://github.com/pstoebenau/guerrilla-worker/releases/tag/lichtfeld-linux-recipe-d3e6d99ee12c02d9c87998f68ee09decdb45c3caea03197a410bdaae98b135c5",
+    "archive": {
+      "url": "https://github.com/pstoebenau/guerrilla-worker/releases/download/lichtfeld-linux-recipe-d3e6d99ee12c02d9c87998f68ee09decdb45c3caea03197a410bdaae98b135c5/lichtfeld-linux-amd64.tar.gz",
+      "sha256": "9d4d3b4516153b9c99115558c2d8d8c3626452d6f0c14cba9ae6c21508a4d499"
+    },
+    "metadata": {
+      "url": "https://github.com/pstoebenau/guerrilla-worker/releases/download/lichtfeld-linux-recipe-d3e6d99ee12c02d9c87998f68ee09decdb45c3caea03197a410bdaae98b135c5/engine-artifact.json",
+      "sha256": "9dd22e1bb5a752687c5fe4c6450bd855713f57ba9c90278ad5a928ba956d8b43"
+    },
+    "checksums": {
+      "url": "https://github.com/pstoebenau/guerrilla-worker/releases/download/lichtfeld-linux-recipe-d3e6d99ee12c02d9c87998f68ee09decdb45c3caea03197a410bdaae98b135c5/SHA256SUMS.txt",
+      "sha256": "35b6bca717fbbe0df64f6fe8cefee944a3da9ac77ed2713734950a54e1319cfd"
+    }
+  }
+}
