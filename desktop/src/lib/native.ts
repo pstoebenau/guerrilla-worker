@@ -1,5 +1,5 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
-import type { BrowseField, DesktopInfo, Logs, Preflight, Profile, WorkerAction, WorkerStatus } from './types';
+import type { AvailableUpdate, BrowseField, DesktopInfo, Logs, Preflight, Profile, WorkerAction, WorkerStatus } from './types';
 import { parsePreflight, parseStatus } from './parse';
 
 export const nativeAvailable = isTauri();
@@ -18,6 +18,8 @@ export const api = {
   browse: (field: BrowseField) => native<string | null>('browse_path', { field }),
   detect: () => native<Partial<Profile>>('detect_engines'),
   openServer: () => native<void>('open_server'),
+  checkForUpdates: () => native<AvailableUpdate | null>('check_for_updates'),
+  openRelease: (url: string) => native<void>('open_release', { url }),
   openData: () => native<void>('open_data_directory'),
   quit: () => native<void>('quit_interface'),
 };

@@ -266,10 +266,10 @@ pub fn validate_paths(profile: &Profile) -> Result<(), String> {
 
 pub fn detect_engines(profile: &mut Profile) {
     fn first(value: &mut String, candidates: Vec<PathBuf>) {
-        if value.is_empty() {
-            if let Some(path) = candidates.into_iter().find(|p| p.exists()) {
-                *value = path.to_string_lossy().into_owned();
-            }
+        if value.is_empty()
+            && let Some(path) = candidates.into_iter().find(|p| p.exists())
+        {
+            *value = path.to_string_lossy().into_owned();
         }
     }
     let home =

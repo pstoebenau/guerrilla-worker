@@ -96,6 +96,9 @@ p { line-height: 1.5; }
 .alert span { min-width: 0; }
 .alert.error { color: var(--danger); border-color: var(--danger); background: var(--input); }
 .alert button { border: 0; padding: 0 3px; min-height: 18px; background: transparent; color: inherit; font-size: 18px; }
+.update-notice { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 8px 0; margin-bottom: 14px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.update-notice > span { margin-right: auto; }
+.dismiss-update { border: 0; background: transparent; color: var(--muted); padding: 0 3px; min-height: 24px; font-size: 18px; }
 .worker-summary { display: flex; justify-content: space-between; align-items: center; gap: 18px; padding-bottom: 20px; }
 .worker-summary-body { min-width: 0; }
 .summary-copy { color: var(--muted); font-size: 12px; margin: 6px 0 0; max-width: 460px; overflow-wrap: anywhere; }

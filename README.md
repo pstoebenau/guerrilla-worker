@@ -60,6 +60,14 @@ bun run dev
 Browser preview displays a native-runtime-unavailable state; enrollment and worker
 controls require Tauri. Package output is under `desktop/src-tauri/target/release/bundle/`.
 
+The desktop app checks the public worker GitHub releases on startup and every six
+hours. A newer stable version with a desktop package for the current OS and
+architecture shows a dismissible notice linking to its release page. Install
+updates manually; the check does not download packages or stop jobs. Drafts,
+prereleases, engine releases and Docker-only releases are ignored. Offline or
+rate-limited checks stay quiet. This requires publishing desktop packages as
+GitHub Release assets; temporary Actions artifacts do not trigger a notice.
+
 ## Headless native worker
 
 For a headless native source checkout, install the engines through their upstream

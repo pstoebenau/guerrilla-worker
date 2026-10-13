@@ -35,6 +35,7 @@ export interface DesktopInfo {
   runtimeAvailable: boolean;
   version: string;
 }
+export interface AvailableUpdate { version: string; releaseUrl: string }
 export interface DependencyCheck { name: string; available: boolean; message?: string; version?: string }
 export interface Preflight { ok: boolean; checks?: DependencyCheck[]; engines?: EngineStatus[]; gpus?: GpuStatus[]; message?: string }
 export interface Logs { lines: string[]; truncated?: boolean }

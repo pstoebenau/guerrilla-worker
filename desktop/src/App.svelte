@@ -7,7 +7,7 @@
   import { api, nativeAvailable } from './lib/native';
   import { parseStatus } from './lib/parse';
   import { isRunning, progressPercent, statusTitle } from './lib/types';
-  import type { BrowseField, DesktopInfo, Preflight, Profile, WorkerAction, WorkerStatus } from './lib/types';
+  import type { AvailableUpdate, BrowseField, DesktopInfo, Preflight, Profile, WorkerAction, WorkerStatus } from './lib/types';
 
   type Page = 'overview' | 'setup' | 'logs';
   let page = $state<Page>('overview');
@@ -32,6 +32,9 @@
   let disconnectOpen = $state(false);
   let stopOpen = $state(false);
   let advancedOpen = $state(false);
+  let availableUpdate = $state<AvailableUpdate | null>(null);
+  let dismissedVersion = '';
+  let checkingUpdates = false;
   let refreshing = false;
   let alive = true;
   const running = $derived(isRunning(status));
@@ -50,6 +53,15 @@
       if (page === 'logs') { const result = await api.logs(); if (alive) { logs = result.lines.slice(-200); logsLoaded = true; } }
     } catch (e) { if (alive) error = String(e); }
     finally { refreshing = false; }
+  }
+  async function checkForUpdates() {
+    if (!nativeAvailable || checkingUpdates) return;
+    checkingUpdates = true;
+    try {
+      const update = await api.checkForUpdates();
+      if (alive) availableUpdate = update?.version === dismissedVersion ? null : update;
+    } catch { /* Offline or rate-limited checks should not interrupt worker management. */ }
+    finally { checkingUpdates = false; }
   }
   async function perform(label: string, work: () => Promise<void>) {
     if (busy) return;
@@ -87,13 +99,15 @@
     motion.addEventListener('change', updateMotion);
     const unlisteners: (() => void)[] = [];
     if (nativeAvailable) {
+      void checkForUpdates();
       void perform('Loading worker…', async () => { await reloadInfo(); status = await api.status(); if (!info?.enrolled) page = 'setup'; });
       void listen<unknown>('worker-status', event => { try { status = parseStatus(event.payload); } catch (e) { error = String(e); } }).then(unlisten => alive ? unlisteners.push(unlisten) : unlisten());
       void listen<string>('worker-error', event => { error = event.payload; }).then(unlisten => alive ? unlisteners.push(unlisten) : unlisten());
       void listen('window-hidden', () => { token = ''; }).then(unlisten => alive ? unlisteners.push(unlisten) : unlisten());
     }
     const timer = setInterval(() => { void refresh(); }, 3000);
-    return () => { alive = false; motion.removeEventListener('change', updateMotion); clearInterval(timer); unlisteners.forEach(unlisten => unlisten()); };
+    const updateTimer = setInterval(() => { void checkForUpdates(); }, 6 * 60 * 60 * 1000);
+    return () => { alive = false; motion.removeEventListener('change', updateMotion); clearInterval(timer); clearInterval(updateTimer); unlisteners.forEach(unlisten => unlisten()); };
   });
 </script>
 
@@ -117,6 +131,13 @@
     {/if}
     {#if error}<div class="alert error" role="alert"><span>{error}</span><button aria-label="Dismiss error" onclick={() => error = ''}>×</button></div>{/if}
     {#if notice}<div class="alert" role="status"><span>{notice}</span><button aria-label="Dismiss notification" onclick={() => notice = ''}>×</button></div>{/if}
+    {#if availableUpdate}
+      <div class="update-notice" role="status">
+        <span>Version {availableUpdate.version} available</span>
+        <button class="text-button" disabled={!!busy} onclick={() => perform('Opening release…', () => api.openRelease(availableUpdate!.releaseUrl))}>View release <Icon name="external" size={12} /></button>
+        <button class="dismiss-update" aria-label="Dismiss update notification" onclick={() => { dismissedVersion = availableUpdate!.version; availableUpdate = null; }}>×</button>
+      </div>
+    {/if}
 
     {#key page}
       <div class="page-content" class:logs-page={page === 'logs'} in:fly={{ y: 2, duration: reducedMotion ? 0 : 100 }}>

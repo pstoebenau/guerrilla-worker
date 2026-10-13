@@ -1,4 +1,5 @@
 mod profile;
+mod updates;
 
 use profile::Profile;
 use serde::Serialize;
@@ -235,10 +236,10 @@ async fn save_profile(
     let _guard = state.gate.lock().await;
     let current = read_profile(&state)?;
     profile.control_url = profile::normalize_server(&profile.control_url)?;
-    if let Some(origin) = profile::bound_server(&state.directory)? {
-        if origin != profile.control_url {
-            return Err("Stop and disconnect this worker before changing servers. Enrollment belongs to its original server.".into());
-        }
+    if let Some(origin) = profile::bound_server(&state.directory)?
+        && origin != profile.control_url
+    {
+        return Err("Stop and disconnect this worker before changing servers. Enrollment belongs to its original server.".into());
     }
     if state.worker.is_file() {
         let status = cli(&state, "status", None).await?;
@@ -370,6 +371,19 @@ async fn open_server(
         .map_err(|e| e.to_string())
 }
 #[tauri::command]
+async fn check_for_updates() -> Result<Option<updates::AvailableUpdate>, String> {
+    updates::check().await
+}
+#[tauri::command]
+async fn open_release(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    if !updates::valid_release_url(&url) {
+        return Err("Invalid worker release URL".into());
+    }
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
 async fn open_data_directory(
     app: tauri::AppHandle,
     state: tauri::State<'_, DesktopState>,
@@ -467,6 +481,8 @@ pub fn run() {
             browse_path,
             detect_engines,
             open_server,
+            check_for_updates,
+            open_release,
             open_data_directory,
             quit_interface
         ])
