@@ -442,9 +442,9 @@ class Runner:
             with contextlib.redirect_stdout(sys.stderr):
                 log = folder / 'previews' / (preview.stem + '.log')
                 source = self.engine.preview_ply(source, temporary, log,
-                                                timeout_seconds=max(0, deadline - time.monotonic()))
+                                                timeout_seconds=min(300, max(0, deadline - time.monotonic())))
                 common.export_sog(source, candidate, log, self.cap,
-                                  timeout_seconds=max(0, deadline - time.monotonic()))
+                                  timeout_seconds=min(300, max(0, deadline - time.monotonic())))
             gaussian_count(candidate, self.cap)
             candidate.replace(preview)
             sidecar = candidate.with_suffix('.ppisp')

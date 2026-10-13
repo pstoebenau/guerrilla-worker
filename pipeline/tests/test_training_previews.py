@@ -74,6 +74,12 @@ class PreviewTests(unittest.TestCase):
                 self.assertTrue(all(file.with_suffix('.ppisp').read_bytes() == b'sidecar' for file in previews))
                 self.assertFalse(list((folder / '.worker').iterdir()))
 
+    def test_preview_timeout_handles_clock_rounding(self):
+        # Adding the budget and subtracting the same reading rounds above 300.
+        # Exercise both engine paths even when the clock has not advanced.
+        with patch.object(platform.time, 'monotonic', return_value=1000.0000000000003):
+            self.test_native_and_spirula_previews_are_immutable_sog_milestones()
+
     def test_failed_or_over_cap_conversion_never_publishes_a_preview(self):
         for count in (None, 11, 'timeout'):
             with self.subTest(count=count), tempfile.TemporaryDirectory() as temporary:
