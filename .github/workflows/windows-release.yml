@@ -2,7 +2,6 @@ name: Worker checks and desktop packages
 on:
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
     inputs:
       packages:
@@ -28,6 +27,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   checks:
+    if: github.ref == 'refs/heads/main'
     name: Check ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -102,7 +102,7 @@ jobs:
           cargo check --locked --manifest-path desktop/src-tauri/Cargo.toml
           cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
   packages:
-    if: github.event_name == 'workflow_dispatch' && inputs.packages
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.packages
     needs: checks
     name: Desktop package ${{ matrix.platform }}
     strategy:
