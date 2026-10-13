@@ -47,6 +47,18 @@ async function run(args: string[], cwd: string, env: NodeJS.ProcessEnv = process
   if (await child.exited !== 0) throw new Error(`Runtime preparation failed: ${path.basename(args[0]!)}`);
 }
 
+export async function extractRuntimeArchive(archive: string, destination: string, stripComponents = 0): Promise<void> {
+  let tar = 'tar';
+  if (process.platform === 'win32') {
+    const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT;
+    if (!systemRoot || !path.isAbsolute(systemRoot)) throw new Error('Windows SystemRoot is required for runtime archive extraction');
+    // Git Bash's GNU tar interprets a drive-letter archive path as a remote host.
+    // Windows' native bsdtar accepts those paths and handles both tarballs and ZIPs.
+    tar = path.join(systemRoot, 'System32', 'tar.exe');
+  }
+  await run([tar, '-xf', archive, '-C', destination, ...(stripComponents ? [`--strip-components=${stripComponents}`] : [])], root);
+}
+
 export async function vendorRuntime(destination: string): Promise<void> {
   const target = `${process.platform}-${process.arch}`;
   const lock = JSON.parse(await readFile(path.join(root, 'packaging/runtime-lock.json'), 'utf8')) as RuntimeLock;
@@ -62,11 +74,11 @@ export async function vendorRuntime(destination: string): Promise<void> {
       const archive = await verifiedDownload(assets[name], cache);
       const install = path.join(staging, name);
       await mkdir(install);
-      await run(['tar', '-xf', archive, '-C', install, '--strip-components=1'], root);
+      await extractRuntimeArchive(archive, install, 1);
     }
     await vendorWindowsCrt(staging);
     await mkdir(path.join(staging, 'ffmpeg'));
-    await run(['tar', '-xf', await verifiedDownload(assets.ffmpegArchive, cache), '-C', path.join(staging, 'ffmpeg')], root);
+    await extractRuntimeArchive(await verifiedDownload(assets.ffmpegArchive, cache), path.join(staging, 'ffmpeg'));
     for (const name of ['ffmpeg', 'ffprobe'] as const) {
       const installed = path.join(staging, 'ffmpeg', name + suffix);
       await chmod(installed, 0o755);

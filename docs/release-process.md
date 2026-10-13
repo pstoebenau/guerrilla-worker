@@ -50,6 +50,10 @@ gh workflow run worker.yml --ref main -f packages=true
 gh run list --workflow worker.yml --branch main --event workflow_dispatch --limit 1
 ```
 
+For a Windows-only package run, add `-f windows_only=true` to the dispatch command.
+Push-triggered checks and manual package runs have separate concurrency groups, so
+pushing a fix does not cancel an active package run.
+
 Use the returned run ID for `gh run watch RUN_ID --exit-status`. Once it passes,
 download its Windows x64, Linux x64, and macOS Apple Silicon/Intel artifacts:
 

@@ -1,10 +1,31 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { sha256, verifiedDownload } from '../scripts/vendor-runtime';
+import { extractRuntimeArchive, sha256, verifiedDownload } from '../scripts/vendor-runtime';
 
 describe('vendored runtime integrity', () => {
+  test('runtime archives extract from absolute paths and preserve the required layout', async () => {
+    const temporary = await mkdtemp(path.join(tmpdir(), 'guerrilla-runtime-archive-'));
+    const tar = process.platform === 'win32' ? path.join(process.env.SystemRoot ?? process.env.SYSTEMROOT!, 'System32', 'tar.exe') : 'tar';
+    try {
+      const source = path.join(temporary, 'source');
+      await mkdir(path.join(source, 'runtime'), { recursive: true });
+      await writeFile(path.join(source, 'runtime', 'payload.txt'), 'runtime payload');
+      for (const extension of process.platform === 'win32' ? ['tar.gz', 'zip'] : ['tar.gz']) {
+        const archive = path.join(temporary, `runtime.${extension}`);
+        const result = Bun.spawnSync([tar, '-a', '-cf', archive, '-C', source, 'runtime'], { stdout: 'pipe', stderr: 'pipe' });
+        expect(result.exitCode, result.stderr.toString()).toBe(0);
+        for (const strip of [0, 1]) {
+          const destination = path.join(temporary, `extracted-${extension}-${strip}`);
+          await mkdir(destination);
+          await extractRuntimeArchive(archive, destination, strip);
+          expect(await readFile(path.join(destination, ...(strip ? [] : ['runtime']), 'payload.txt'), 'utf8')).toBe('runtime payload');
+        }
+      }
+    } finally { await rm(temporary, { recursive: true, force: true }); }
+  }, 30_000);
+
   test('a tampered cached download is refused rather than reused', async () => {
     const cache = await mkdtemp(path.join(tmpdir(), 'guerrilla-runtime-test-'));
     const digest = 'a'.repeat(64);

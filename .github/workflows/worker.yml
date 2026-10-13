@@ -8,6 +8,10 @@ on:
         description: Build self-contained desktop packages (large CUDA dependencies on Windows/Linux)
         type: boolean
         default: false
+      windows_only:
+        description: Build only the Windows desktop package (checks still run on all platforms)
+        type: boolean
+        default: false
       linux_package_runner:
         description: Linux package runner label (use a larger or dedicated self-hosted runner with 70 GiB free)
         type: string
@@ -27,7 +31,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: worker-${{ github.workflow }}-${{ github.ref }}
+  group: worker-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 jobs:
   checks:
@@ -116,16 +120,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: Linux x64
-            runner: ${{ inputs.linux_package_runner || 'ubuntu-24.04' }}
-          - platform: Windows x64
-            runner: ${{ inputs.windows_package_runner || 'windows-2022' }}
-          - platform: macOS Apple Silicon
-            runner: ${{ inputs.macos_package_runner || 'macos-15' }}
-          - platform: macOS Intel
-            runner: ${{ inputs.macos_intel_package_runner || 'macos-15-intel' }}
-    runs-on: ${{ matrix.runner }}
+        platform: ${{ fromJSON(inputs.windows_only && '["Windows x64"]' || '["Linux x64","Windows x64","macOS Apple Silicon","macOS Intel"]') }}
+    runs-on: >-
+      ${{ matrix.platform == 'Windows x64' && (inputs.windows_package_runner || 'windows-2022') ||
+          matrix.platform == 'Linux x64' && (inputs.linux_package_runner || 'ubuntu-24.04') ||
+          matrix.platform == 'macOS Intel' && (inputs.macos_intel_package_runner || 'macos-15-intel') ||
+          inputs.macos_package_runner || 'macos-15' }}
     defaults:
       run:
         shell: bash
