@@ -9,7 +9,7 @@ on:
         type: boolean
         default: false
       windows_only:
-        description: Build only the Windows desktop package (checks still run on all platforms)
+        description: Run only Windows checks and desktop packaging
         type: boolean
         default: false
       linux_package_runner:
@@ -40,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2022, macos-15, macos-15-intel]
+        os: ${{ fromJSON(inputs.windows_only && '["windows-2022"]' || '["ubuntu-24.04","windows-2022","macos-15","macos-15-intel"]') }}
     runs-on: ${{ matrix.os }}
     defaults:
       run:

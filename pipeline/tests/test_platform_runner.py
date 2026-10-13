@@ -573,8 +573,8 @@ class PlatformTests(unittest.TestCase):
                     status = Path(f'/proc/{pid}/stat')
                     try:
                         state = status.read_text().split()[2]
-                    except FileNotFoundError:
-                        break  # The process was reaped before the read.
+                    except (FileNotFoundError, ProcessLookupError):
+                        break  # The process was reaped before or during the read.
                     if state == 'Z':
                         break
                     time.sleep(.05)
@@ -606,8 +606,8 @@ class PlatformTests(unittest.TestCase):
                     status = Path(f'/proc/{pid}/stat')
                     try:
                         state = status.read_text().split()[2]
-                    except FileNotFoundError:
-                        break  # The process was reaped before the read.
+                    except (FileNotFoundError, ProcessLookupError):
+                        break  # The process was reaped before or during the read.
                     if state == 'Z':
                         break
                     time.sleep(.05)
