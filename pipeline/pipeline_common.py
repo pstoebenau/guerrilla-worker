@@ -122,7 +122,7 @@ def selected_images(folder):
     return paths
 
 
-def run_logged(command, log, on_tick=None, on_progress=None):
+def run_logged(command, log, on_tick=None, on_progress=None, timeout_seconds=None):
     """Run a child process with stdout/stderr in `log`; kill it on interruption; raise with a log tail on failure."""
     command = [str(x) for x in command]
     print("Running: " + subprocess.list2cmdline(command), flush=True)
@@ -131,6 +131,7 @@ def run_logged(command, log, on_tick=None, on_progress=None):
     from process_runtime import launch, terminate
     with log.open("w", encoding="utf-8") as stream:
         process = launch(command, stdout=stream, stderr=subprocess.STDOUT)
+        deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
         previous = {}
 
         def interrupted(signum, _frame):
@@ -140,6 +141,8 @@ def run_logged(command, log, on_tick=None, on_progress=None):
             for sig in (signal.SIGTERM, signal.SIGINT):
                 previous[sig] = signal.signal(sig, interrupted)
             while process.poll() is None:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError(f'Command exceeded {timeout_seconds:g} seconds; see {log}')
                 if on_progress:
                     on_progress(log)
                 if on_tick:
@@ -241,7 +244,7 @@ def export_spz(ply, spz, log, on_progress=None):
     return spz
 
 
-def export_sog(ply, sog, log, max_cap, on_progress=None):
+def export_sog(ply, sog, log, max_cap, on_progress=None, timeout_seconds=None):
     """Export the default SOG and verify its embedded Gaussian count."""
     from scan_transfer import gaussian_count
     expected = gaussian_count(ply, max_cap)
@@ -250,6 +253,7 @@ def export_sog(ply, sog, log, max_cap, on_progress=None):
         if gpu := os.environ.get('SPLAT_TRANSFORM_GPU'):
             flags += ['--gpu', gpu]
         run_logged([*splat_transform_command(), *flags, ply, sog], log,
+                   **({'timeout_seconds': timeout_seconds} if timeout_seconds is not None else {}),
                    **({'on_progress': on_progress} if on_progress else {}))
     count = gaussian_count(sog, max_cap)
     if count != expected:

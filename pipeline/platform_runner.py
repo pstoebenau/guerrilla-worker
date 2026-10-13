@@ -437,11 +437,14 @@ class Runner:
         temporary.mkdir(parents=True)
         candidate = temporary / 'scene.sog'
         preview.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + 300
         try:
             with contextlib.redirect_stdout(sys.stderr):
                 log = folder / 'previews' / (preview.stem + '.log')
-                source = self.engine.preview_ply(source, temporary, log)
-                common.export_sog(source, candidate, log, self.cap)
+                source = self.engine.preview_ply(source, temporary, log,
+                                                timeout_seconds=max(0, deadline - time.monotonic()))
+                common.export_sog(source, candidate, log, self.cap,
+                                  timeout_seconds=max(0, deadline - time.monotonic()))
             gaussian_count(candidate, self.cap)
             candidate.replace(preview)
             sidecar = candidate.with_suffix('.ppisp')
@@ -467,8 +470,8 @@ class Runner:
             return
         # Freeze every engine thread before snapshotting. Open native checkpoint
         # files are never accepted, even if their current size looks plausible.
+        changed = False
         with (paused_engine(process) if process is not None else contextlib.nullcontext(set())) as open_paths:
-            changed = False
             snapshots = self.state.setdefault('checkpoints', [])
             hashes = {item['sha256'] for item in snapshots}
             for native in candidates:
@@ -510,20 +513,25 @@ class Runner:
                     config = self.engine.checkpoint(snapshot).config
                     shutil.copy2(native.config, config)
                     recorded['configSha256'] = common.file_hash(config)
-                self.training_preview(snapshot, identity)
                 self.state['checkpoints'] = [recorded]
                 self.checkpoint_signatures[str(candidate)] = (candidate.stat().st_size, candidate.stat().st_mtime_ns)
                 changed = True
                 break
-            if changed:
-                plan = training_retention_plan(self.output, self.state, engine=self.engine)
-                self.state['retention'] = dict(version=1, excludePaths=plan['excludePaths'])
-                self.state.setdefault('stageCheckpoints', {})['training'] = dict(directory=folder.name,
-                    files=self.file_manifest([*files_under(snapshot.parent), *files_under(folder / 'previews')]))
-                self.save()
-                self.checkpoint('training')
-                if self.request.get('archiveAck') and not self.request.get('backgroundArchive'):
-                    self.prune_training(plan, open_paths, candidate if process is not None else None)
+        if changed:
+            # The immutable copy is complete. Resume training before optional
+            # conversion or archival; neither operation needs live engine bytes.
+            self.training_preview(snapshot, identity)
+            plan = training_retention_plan(self.output, self.state, engine=self.engine)
+            self.state['retention'] = dict(version=1, excludePaths=plan['excludePaths'])
+            self.state.setdefault('stageCheckpoints', {})['training'] = dict(directory=folder.name,
+                files=self.file_manifest([*files_under(snapshot.parent), *files_under(folder / 'previews')]))
+            self.save()
+            self.checkpoint('training')
+            if self.request.get('archiveAck') and not self.request.get('backgroundArchive'):
+                # Training may have opened new files while we converted/uploaded.
+                running = process is not None and process.poll() is None
+                with (paused_engine(process) if running else contextlib.nullcontext(set())) as current_open_paths:
+                    self.prune_training(plan, current_open_paths, candidate if running else None)
 
     def poll_dense_checkpoint(self, process):
         """Only closed, readable chunk archives are safe native resume points."""

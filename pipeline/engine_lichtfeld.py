@@ -103,9 +103,10 @@ class LichtFeldEngine:
         selected = final if final.exists() else folder
         return TrainingOutput(common.find_ply(selected), selected / 'config.json')
 
-    def preview_ply(self, source, temporary, log):
+    def preview_ply(self, source, temporary, log, timeout_seconds=None):
         ply = temporary / 'checkpoint.ply'
-        common.run_logged([common.studio_path(), 'convert', source, ply], log)
+        common.run_logged([common.studio_path(), 'convert', source, ply], log,
+                          **({'timeout_seconds': timeout_seconds} if timeout_seconds is not None else {}))
         return ply
 
     def run(self, runner):

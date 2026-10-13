@@ -46,7 +46,7 @@ class StubEngine:
     def training_output(self, folder):
         return TrainingOutput(folder / 'final/scene.ply' if (folder / 'final').exists() else folder / 'scene.ply')
 
-    def preview_ply(self, source, temporary, log):
+    def preview_ply(self, source, temporary, log, timeout_seconds=None):
         return source
 
     def run(self, runner):

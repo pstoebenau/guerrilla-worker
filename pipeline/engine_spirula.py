@@ -84,7 +84,7 @@ class SpirulaEngine:
         ply = max(candidates, key=lambda path: self.checkpoint(path.parent).order)
         return TrainingOutput(ply, ply.parent.parent / 'config.json')
 
-    def preview_ply(self, source, temporary, log):
+    def preview_ply(self, source, temporary, log, timeout_seconds=None):
         return source
 
     def run(self, runner):

@@ -1,10 +1,11 @@
+import contextlib
 import io
 import json
 from pathlib import Path
 import tempfile
 import tarfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import zipfile
 import platform_runner as platform
 
@@ -34,12 +35,16 @@ class PreviewTests(unittest.TestCase):
                 runner = self.runner(root, backend)
                 folder = root / 'training-test'
                 folder.mkdir()
-                def unpack(command, log):
+                def unpack(command, log, timeout_seconds):
+                    self.assertGreater(timeout_seconds, 0)
+                    self.assertLessEqual(timeout_seconds, 300)
                     self.assertEqual(command[1], 'convert')
                     self.assertIn('retained-checkpoints', str(command[2]))
                     self.assertEqual(Path(command[3]).suffix, '.ply')
                     Path(command[3]).write_bytes(b'frozen splats')
-                def convert(source, candidate, log, cap):
+                def convert(source, candidate, log, cap, timeout_seconds):
+                    self.assertGreater(timeout_seconds, 0)
+                    self.assertLessEqual(timeout_seconds, 300)
                     self.assertEqual(Path(source).name, 'checkpoint.ply' if backend == 'lichtfeld' else 'splat.ply')
                     self.assertTrue(Path(source).is_file())
                     self.assertEqual(cap, 10)
@@ -70,14 +75,17 @@ class PreviewTests(unittest.TestCase):
                 self.assertFalse(list((folder / '.worker').iterdir()))
 
     def test_failed_or_over_cap_conversion_never_publishes_a_preview(self):
-        for count in (None, 11):
+        for count in (None, 11, 'timeout'):
             with self.subTest(count=count), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary).resolve()
                 runner = self.runner(root, 'lichtfeld')
                 snapshot = root / 'training-test/retained-checkpoints/a/checkpoint_100.resume'
                 snapshot.parent.mkdir(parents=True)
                 snapshot.write_bytes(b'recovery must survive')
-                def convert(source, candidate, log, cap):
+                def convert(source, candidate, log, cap, timeout_seconds):
+                    if count == 'timeout':
+                        candidate.write_bytes(b'partial')
+                        raise TimeoutError('preview budget exceeded')
                     if count is None:
                         candidate.write_bytes(b'partial')
                         raise RuntimeError('converter failed')
@@ -96,7 +104,7 @@ class PreviewTests(unittest.TestCase):
             runner = platform.Runner(dict(scanId='scan', attemptId='attempt', backend='spirula', inputPath=str(source), outputPath=str(root / 'work'), settings={'training': {'iterations': 200}}, maxCap=3))
             runner.state.update(stage='training', stages={'training': 'training-test'})
             folder = runner.output / 'training-test'
-            def convert(source, candidate, log, cap):
+            def convert(source, candidate, log, cap, timeout_seconds):
                 sog(candidate)
             with patch.object(platform.common, 'export_sog', side_effect=convert), \
                     patch.object(platform.common, 'studio_path', side_effect=AssertionError('Spirula previews must not require LichtFeld')):
@@ -116,6 +124,53 @@ class PreviewTests(unittest.TestCase):
             self.assertEqual(len(previews), 2)
             self.assertEqual(len(runner.state['checkpoints']), 1)
             self.assertTrue(all(not platform.excluded_path(path, runner.state['retention']['excludePaths']) for path in previews))
+
+    def test_training_resumes_before_preview_and_archive_read_frozen_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(platform, 'runtime_versions', return_value={}), \
+                patch.object(platform, 'PROTOCOL_STREAM', io.StringIO()):
+            root = Path(temporary).resolve()
+            source = root / 'input.mp4'
+            source.write_bytes(b'input')
+            runner = platform.Runner(dict(scanId='scan', attemptId='attempt', backend='lichtfeld',
+                inputPath=str(source), outputPath=str(root / 'work'), settings={}, maxCap=3,
+                archiveAck=True, backgroundArchive=True))
+            runner.state.update(stage='training', stages={'training': 'training-test'})
+            folder = runner.output / 'training-test'
+            folder.mkdir()
+            native = folder / 'checkpoint_30000.resume'
+            native.write_bytes(b'closed checkpoint')
+            paused = False
+            phases = []
+
+            @contextlib.contextmanager
+            def pause(process):
+                nonlocal paused
+                paused = True
+                try:
+                    yield set()
+                finally:
+                    paused = False
+                    native.write_bytes(b'engine overwrote native after resume')
+                    phases.append('resumed')
+
+            def preview(snapshot, identity):
+                self.assertFalse(paused)
+                self.assertEqual(snapshot.read_bytes(), b'closed checkpoint')
+                phases.append('preview')
+
+            def archive(stage):
+                self.assertFalse(paused)
+                snapshot = runner.path(runner.state['checkpoints'][0]['path'])
+                self.assertEqual(snapshot.read_bytes(), b'closed checkpoint')
+                self.assertEqual(runner.state['checkpoints'][0]['sha256'], platform.common.file_hash(snapshot))
+                phases.append('archive')
+
+            with patch.object(platform, 'paused_engine', side_effect=pause), \
+                    patch.object(runner, 'training_preview', side_effect=preview), \
+                    patch.object(runner, 'checkpoint', side_effect=archive):
+                runner.poll_checkpoints(Mock(poll=Mock(return_value=None)))
+            self.assertEqual(phases, ['resumed', 'preview', 'archive'])
 
 if __name__ == '__main__':
     unittest.main()

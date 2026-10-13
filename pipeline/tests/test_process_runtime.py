@@ -9,10 +9,22 @@ import unittest
 
 import psutil
 from process_runtime import paused_engine
+from pipeline_common import run_logged
 
 
 @unittest.skipIf(os.name == 'nt', 'POSIX process groups; Windows has Job Object tests')
 class ProcessRuntimeTests(unittest.TestCase):
+    def test_command_timeout_terminates_and_reaps_process(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / 'conversion.log'
+            observed = []
+            with self.assertRaisesRegex(TimeoutError, 'Command exceeded'):
+                run_logged([sys.executable, '-c', 'import time; time.sleep(60)'], log,
+                           on_tick=lambda process: observed.append(process), timeout_seconds=.5)
+            self.assertTrue(observed)
+            self.assertIsNotNone(observed[0].returncode)
+            self.assertFalse(psutil.pid_exists(observed[0].pid))
+
     def test_checkpoint_freezes_descendants_and_reports_their_open_files(self):
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / 'writing.ckpt'
