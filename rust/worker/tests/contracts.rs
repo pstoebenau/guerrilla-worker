@@ -100,9 +100,9 @@ fn portable_retention_rejects_escape_reserved_and_links() {
         assert!(!files::safe_relative(value), "{value}");
     }
     assert!(files::safe_relative("checkpoints/native_0001.ply"));
-    let temp = tempfile::tempdir().unwrap();
     #[cfg(unix)]
     {
+        let temp = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(temp.path(), temp.path().join("linked")).unwrap();
         assert!(files::checked(temp.path(), "linked/output").is_err());
         assert!(files::remove(temp.path(), "linked").is_err());

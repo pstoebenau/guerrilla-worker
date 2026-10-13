@@ -1,5 +1,6 @@
 import { access, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { windowsPowerShellEnvironment } from './windows-powershell';
 
 interface CrtFile {
   fileName: string;
@@ -147,7 +148,7 @@ export async function vendorWindowsCrt(stagingRuntime: string): Promise<void> {
   await access(path.join(stagingRuntime, 'python', 'python.exe'));
   const encodedScript = Buffer.from(vendorScript, 'utf16le').toString('base64');
   const child = Bun.spawn(['powershell.exe', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedScript], {
-    env: { ...process.env, GUERRILLA_CRT_STAGE_DIRECTORY: stagingRuntime },
+    env: { ...windowsPowerShellEnvironment(), GUERRILLA_CRT_STAGE_DIRECTORY: stagingRuntime },
     stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', windowsHide: true,
   });
   const [stdout, stderr, exitCode] = await Promise.all([

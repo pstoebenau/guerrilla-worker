@@ -1,6 +1,7 @@
 import { cp, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { vendorRuntime } from './vendor-runtime';
+import { windowsPowerShellEnvironment } from './windows-powershell';
 
 const root = path.resolve(import.meta.dir, '..');
 const app = path.join(root, 'desktop');
@@ -50,6 +51,6 @@ if (process.platform === 'win32') {
   }
   if (!buildArguments.includes('--no-bundle')) {
     const version = (JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')) as {version: string}).version;
-    await run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(root, 'scripts/build-windows.ps1'), '-SourceDirectory', portable, '-Version', version, '-Destination', path.join(tauri, 'target/release/bundle/installer')]);
+    await run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(root, 'scripts/build-windows.ps1'), '-SourceDirectory', portable, '-Version', version, '-Destination', path.join(tauri, 'target/release/bundle/installer')], root, windowsPowerShellEnvironment());
   }
 }
