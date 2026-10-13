@@ -27,6 +27,7 @@ interface CrtManifest {
 // variable; no user path is interpolated into executable PowerShell source.
 const vendorScript = String.raw`
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $stage = $env:GUERRILLA_CRT_STAGE_DIRECTORY
 $python = Join-Path $stage 'python'
@@ -76,7 +77,10 @@ function CheckedSignature([string]$file) {
   $entry = Get-Item -LiteralPath $file
   if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'MSVC runtime DLLs cannot be filesystem links.' }
   $signature = Get-AuthenticodeSignature -LiteralPath $file
-  if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or $signature.SignerCertificate.Subject -notmatch '(^|,\s*)CN=Microsoft Corporation(,|$)') { throw ('Unexpected or invalid Microsoft runtime DLL signature: ' + $entry.Name) }
+  if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or $signature.SignerCertificate.Subject -notmatch '(^|,\s*)CN=Microsoft Corporation(,|$)') {
+    $signer = if ($null -eq $signature.SignerCertificate) { '(none)' } else { $signature.SignerCertificate.Subject }
+    throw ('Unexpected or invalid Microsoft runtime DLL signature: {0}; status={1}; message={2}; signer={3}; path={4}' -f $entry.Name, $signature.Status, $signature.StatusMessage, $signer, $entry.FullName)
+  }
   return $signature
 }
 function NumericVersion([string]$value) {
@@ -147,7 +151,7 @@ export async function vendorWindowsCrt(stagingRuntime: string): Promise<void> {
   if (!path.isAbsolute(stagingRuntime)) throw new Error('Windows CRT staging directory must be absolute');
   await access(path.join(stagingRuntime, 'python', 'python.exe'));
   const encodedScript = Buffer.from(vendorScript, 'utf16le').toString('base64');
-  const child = Bun.spawn(['powershell.exe', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedScript], {
+  const child = Bun.spawn(['powershell.exe', '-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-EncodedCommand', encodedScript], {
     env: { ...windowsPowerShellEnvironment(), GUERRILLA_CRT_STAGE_DIRECTORY: stagingRuntime },
     stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', windowsHide: true,
   });
