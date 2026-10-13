@@ -4,7 +4,7 @@ Install Guerrilla Worker for Windows x64 from the prepared installer package.
 Keep the setup executable and **every matching `.bin` payload file** together in
 one folder, then run setup. CUDA, PyTorch, and reconstruction libraries make this
 a large package; splitting payloads avoids single-executable installer limits.
-No terminal, Python, Node, .NET, or separate WebView2 installation is required.
+No terminal, Python, Node, or separate WebView2 installation is required.
 
 The separate [Linux Docker image](../README.md#linux-docker-image) includes its
 engines, plugins, and models; this Windows desktop package uses your installations.

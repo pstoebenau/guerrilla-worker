@@ -38,76 +38,85 @@ dependency-source, and model-term review remains applicable before public
 distribution, including the engines bundled into Docker. See
 [cross-platform architecture](cross-platform-worker.md).
 
-The next section records the previous automatic release workflow as historical
-reference. Its publication behavior is not active. The later Linux engine artifact
-and runtime sections retain useful artifact/source-build references; consuming the
-pinned LichtFeld artifact is part of the current Docker build.
+## Desktop release
 
-# Historical release preparation and gates
+The cross-platform workflow is `.github/workflows/worker.yml`, displayed as
+**Worker checks and desktop packages**. Pushes to `main` run checks only.
+To build desktop distributions, select **Run workflow** on `main` and enable
+`packages`, or run from this repository:
 
-## Shared GitHub Actions run (previous behavior)
+```sh
+gh workflow run worker.yml --ref main -f packages=true
+gh run list --workflow worker.yml --branch main --event workflow_dispatch --limit 1
+```
 
-Before the cross-platform migration, `.github/workflows/windows-release.yml` was
-displayed as **Worker release** and started once per push to `main` or manual
-dispatch. Windows and Linux ran as parallel jobs with the same commit and run
-number. Each job checked and published its own platform independently; a Linux
-failure did not block a successful Windows installer release. The existing Windows workflow path is
-retained to continue its run counter and avoid reusing installer version tags.
+Use the returned run ID for `gh run watch RUN_ID --exit-status`. Once it passes,
+download its Windows, Linux, and macOS artifacts:
 
-## Windows tray installer
+```sh
+gh run download RUN_ID --dir dist/release
+```
 
-The owner approved automatic Windows installer publication on each push to
-`main` in `pstoebenau/guerrilla-worker`. The protocol is now MIT licensed.
-`.github/workflows/windows-release.yml` builds an unsigned, per-user Windows x64
-installer, runs agent checks and application/install/uninstall smoke tests, and
-publishes a GitHub Release with matching source, build identity and SHA-256 sums.
-Versions use the package major/minor and GitHub run number (`windows-v0.1.N`).
-Reruns preserve an already published release. Each push builds its tip commit;
-a push containing multiple commits produces one release. Failing checks prevent
-publication. No cancellation of older builds is configured.
+Windows and Linux package runners require at least 70 GiB free; macOS requires
+12 GiB. Use `windows_package_runner`, `linux_package_runner`, and
+`macos_package_runner` to choose larger or dedicated runner labels when needed.
+Each label must select the correct OS with its native build tools. The Windows
+installer smoke test also requires a fresh worker account. The default macOS
+runner builds Apple Silicon; build on an Intel Mac separately for Intel packages.
 
-Only the tray application, worker source, protocol, Node and .NET runtimes are
-included. No Python, engines, plugins, CUDA libraries, weights or scans are
-redistributed. Notices for the exact bundled runtimes are included by the build.
-CI does not claim GPU scan acceptance. Updates are manual; signing is intentionally
-not configured. The desktop application works without Bun, Node or .NET installed.
+Package builds upload Actions artifacts, not GitHub Releases. Artifacts expire
+after 14 days. To publish them:
 
-## Docker image (separate review)
+1. Choose a version and commit it on `main` before dispatching the package build.
+   Keep `package.json`, `desktop/package.json`, `desktop/src-tauri/tauri.conf.json`,
+   and `desktop/src-tauri/Cargo.toml` in sync, and refresh the desktop Cargo lockfile.
+2. Create one cross-platform release tag, such as `v0.3.0`, targeting the exact
+   commit from the successful package run. A draft lets you upload and review all
+   packages before publishing:
 
-The owner approved automatic Linux releases on every push to worker `main`.
-The Linux job in the shared workflow also supports manual runs on `main`; it no longer
-requires `RELEASE_APPROVED`, a pre-existing version tag, or environment approval.
-Each push gets a `linux-vMAJOR.MINOR.RUN_NUMBER` GitHub Release and a
-`ghcr.io/pstoebenau/guerrilla-worker:MAJOR.MINOR.RUN_NUMBER` image tag.
-Image tags use the version alone. GitHub Release tags retain the platform
-prefix so Windows and Linux can publish separate releases for the same version.
-Windows and Linux now share the workflow run number. Linux releases do not
-replace the latest Windows installer release used by the tray app. Completed release reruns
-preserve their assets; newer pushes do not cancel older builds.
+   ```sh
+   gh release create v0.3.0 --target BUILD_COMMIT_SHA --draft \
+     --title 'Guerrilla Worker 0.3.0' --generate-notes
+   gh release upload v0.3.0 /absolute/path/to/package /absolute/path/to/checksums
+   ```
 
-GPL-3.0-only is accepted for worker code and MIT for the protocol. The owner
-approved release with the upstream terms, including the RoMa MIT assessment and
-separate DINOv3 agreement. The previous blanket legal attestation gate has been
-replaced by checksummed document packaging (legal/manifest.json version 2).
+3. Upload the platform packages and their checksums, notices, and matching source
+   evidence. Upload every Windows `.bin` payload slice with its setup executable;
+   a setup executable alone is incomplete. Repeat the upload command for the
+   remaining assets. GitHub provides worker source archives for the release tag;
+   preserve the bundled dependencies' corresponding source and notices too.
+4. Review the assets and release notes, then publish:
 
-Each release runs source/CPU checks, packages worker and protocol sources,
-collects pinned upstream sources including submodules, and builds the image.
-Before pushing, it exports installed binary notices and the LichtFeld builder's
-dependency source trees, downloads, patches/ports and build settings. Missing
-required documents, changed checksums, failed source downloads, failed builds or
-missing builder sources stop publication.
+   ```sh
+   gh release edit v0.3.0 --draft=false --latest
+   ```
 
-The registry image receives SBOM and provenance attestations. Matching source,
-notice, dependency-build and runtime-inventory assets accompany the GitHub
-Release. Dependency archives are split into numbered parts; concatenate in
-filename order before extracting. The inventory contains SHA-256 checksums.
-See linux-release-review.md for the scope and how to obtain distribution sources.
-CI does not claim Linux GPU scan acceptance or blanket legal certification.
+GitHub limits each release asset to [under 2 GiB](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases).
+The Windows installer already spans files below this limit. Check Linux/macOS
+package sizes before uploading; oversized packages need another download host or
+split files with reassembly instructions. The desktop update notice currently
+recognizes complete `.AppImage`, `.deb`, `.rpm`, `.dmg`, `.app.tar.gz`, and Windows
+installer assets, not split-only packages or external download links.
 
-The release gate checks concrete contents rather than requiring a human to
-certify every transitive package. Third-party licenses remain their own; source
-and notice access must be maintained for recipients of published images.
+The app's update notice requires a published stable release with a higher version
+and a desktop asset matching the user's OS and architecture. Drafts, prereleases,
+Actions artifacts, and source-only releases do not trigger it. Installation is
+manual. Docker image publication remains separate from desktop releases.
 
+## What CI verifies
+
+Compilation verifies code and linking. Behavioral tests verify checkpoint retention,
+resume, leases, cancellation, profile isolation, and update selection; these can
+fail even when the binaries build successfully. Python checks cover helpers that
+Rust compilation does not validate. The Linux CPU image job checks the container
+build and its tests.
+
+The Windows installer smoke test runs only for manual package builds. It installs
+the distribution, checks bundled files, runs the installed worker's status and
+preflight commands, and uninstalls while verifying that the isolated profile and
+checkpoint survive. Installer compilation alone cannot establish those behaviors.
+Native desktop `cargo test` also compiles the app, so a separate preceding
+`cargo check` is unnecessary.
 
 # Linux engine artifact and build references
 

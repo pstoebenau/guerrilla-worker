@@ -150,10 +150,9 @@ locks use that directory. No ports or Docker socket are exposed. Credentials,
 scratch checkpoints, and GPU locks are the only required host data mounts.
 
 `Dockerfile.engine` and its artifact tooling remain source-build references for
-the LichtFeld artifact consumed by the current runtime. The previous automatic
-artifact/image publication recipes are retained in
-[release-process notes](docs/release-process.md); the current helper builds local
-images without publishing them.
+the LichtFeld artifact consumed by the current runtime. See the
+[engine build references](docs/release-process.md#linux-engine-artifact-and-build-references).
+The current helper builds local images without publishing them.
 
 ## Durability and compatibility
 
@@ -184,13 +183,18 @@ bun --cwd desktop run build
 docker build --target test -t guerrilla-worker:test .
 ```
 
-One CI workflow checks Windows, Linux, and macOS on each push to `main`.
+The [worker workflow](.github/workflows/worker.yml) checks Windows, Linux, and
+macOS on each push to `main`.
 Native desktop packages are built by the manual
 `packages` workflow input and uploaded as artifacts. The workflow does not publish
 releases or bundle engines into desktop packages. The separate `build:docker`
 command bundles engines into the Linux image. CPU/mock checks are not GPU scan
 acceptance; validate complete engine workflows and resume on the target GPU before
 claiming a release's GPU acceptance.
+
+To build downloadable packages, open **Actions → Worker checks and desktop packages
+→ Run workflow**, select `main`, and enable `packages`. Publishing a GitHub Release
+is a separate step; see [release instructions](docs/release-process.md#desktop-release).
 
 ## License
 
