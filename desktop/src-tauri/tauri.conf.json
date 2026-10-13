@@ -10,7 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{ "label": "main", "title": "Guerrilla Worker", "width": 1100, "height": 790, "minWidth": 760, "minHeight": 560, "visible": false }],
+    "windows": [{ "label": "main", "title": "Guerrilla Worker", "width": 820, "height": 620, "minWidth": 660, "minHeight": 480, "visible": false }],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data:; connect-src ipc: http://ipc.localhost"
     }

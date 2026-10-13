@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
+    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 use tauri::{
@@ -23,6 +24,7 @@ struct DesktopState {
     resources: PathBuf,
     worker: PathBuf,
     gate: Mutex<()>,
+    quitting: AtomicBool,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -282,6 +284,9 @@ async fn enroll_worker(
     token: String,
 ) -> Result<Value, String> {
     let _guard = state.gate.lock().await;
+    if state.quitting.load(Ordering::SeqCst) {
+        return Err("Worker is quitting.".into());
+    }
     if token.trim().is_empty() || token.len() > 4096 {
         return Err("Paste an enrollment token from the server's Workers page.".into());
     }
@@ -295,6 +300,9 @@ async fn action(state: &DesktopState, action: &str) -> Result<Value, String> {
         return Err("Unknown worker action".into());
     }
     let _guard = state.gate.lock().await;
+    if state.quitting.load(Ordering::SeqCst) {
+        return Err("Worker is quitting.".into());
+    }
     cli(state, action, None).await?;
     cli(state, "status", None).await
 }
@@ -371,8 +379,47 @@ async fn open_data_directory(
         .map_err(|e| e.to_string())
 }
 #[tauri::command]
-fn quit_interface(app: tauri::AppHandle) {
+async fn quit_interface(app: tauri::AppHandle) -> Result<(), String> {
+    stop_and_quit(&app).await
+}
+
+async fn stop_for_quit(state: &DesktopState) -> Result<(), String> {
+    let status = cli(state, "stop", None).await?;
+    if status.get("running").and_then(Value::as_bool) != Some(false) {
+        return Err(
+            "The worker has not stopped yet. Check its status and try quitting again.".into(),
+        );
+    }
+    Ok(())
+}
+
+async fn stop_and_quit(app: &tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<DesktopState>();
+    if state.quitting.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+    // Finish pending management work, then stop it. Reject queued starts and
+    // enrollments until the app has exited or shutdown fails.
+    let _guard = state.gate.lock().await;
+    if let Err(error) = stop_for_quit(&state).await {
+        state.quitting.store(false, Ordering::SeqCst);
+        return Err(error);
+    }
     app.exit(0);
+    Ok(())
+}
+
+fn request_quit(app: &tauri::AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(message) = stop_and_quit(&app).await {
+            let _ = app.emit(
+                "worker-error",
+                format!("Could not stop jobs and quit: {message}"),
+            );
+            show_window(&app);
+        }
+    });
 }
 
 fn show_window(app: &tauri::AppHandle) {
@@ -458,6 +505,7 @@ pub fn run() {
                 resources,
                 worker,
                 gate: Mutex::new(()),
+                quitting: AtomicBool::new(false),
             };
             let p = read_profile(&state).map_err(std::io::Error::other)?;
             profile::atomic_save(&state.directory.join("config.json"), &p)
@@ -474,13 +522,8 @@ pub fn run() {
                 true,
                 None::<&str>,
             )?;
-            let quit = MenuItem::with_id(
-                app,
-                "quit",
-                "Quit interface (keep worker running)",
-                true,
-                None::<&str>,
-            )?;
+            let quit =
+                MenuItem::with_id(app, "quit", "Quit and stop all jobs", true, None::<&str>)?;
             let separator = PredefinedMenuItem::separator(app)?;
             let menu =
                 Menu::with_items(app, &[&overview, &separator, &start, &stop, &drain, &quit])?;
@@ -495,7 +538,7 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "overview" => show_window(app),
-                    "quit" => app.exit(0),
+                    "quit" => request_quit(app),
                     "start" | "stop" | "drain" => {
                         let app = app.clone();
                         let command = event.id.as_ref().to_owned();
@@ -528,7 +571,7 @@ pub fn run() {
                 })
                 .build(app);
             // Linux desktop environments without a tray can still manage the
-            // worker. Closing their window exits only this interface.
+            // worker. Without a tray, closing stops jobs and quits the app.
             let has_tray = tray.is_ok();
             let background = std::env::args().any(|a| a == "--background");
             if !background || !has_tray {
@@ -552,17 +595,75 @@ pub fn run() {
                     let _ = window.hide();
                     let _ = window.emit("window-hidden", ());
                 } else {
-                    window.app_handle().exit(0);
+                    request_quit(window.app_handle());
                 }
             }
         })
-        .run(context)
-        .expect("Guerrilla Worker desktop could not start");
+        .build(context)
+        .expect("Guerrilla Worker desktop could not start")
+        .run(|app, event| {
+            // OS quit requests (e.g. Cmd+Q) follow the same shutdown path.
+            // app.exit(0) from stop_and_quit supplies a code and may proceed.
+            if let tauri::RunEvent::ExitRequested {
+                api, code: None, ..
+            } = event
+            {
+                api.prevent_exit();
+                request_quit(app);
+            }
+        });
 }
 
 #[cfg(test)]
 mod integration_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn quit_waits_for_stop_and_rejects_unconfirmed_shutdown() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!(
+            "guerrilla-quit-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        profile::secure_directory(&directory).unwrap();
+        let worker = directory.join("worker");
+        let state = DesktopState {
+            directory: directory.clone(),
+            resources: directory.clone(),
+            worker: worker.clone(),
+            gate: Mutex::new(()),
+            quitting: AtomicBool::new(false),
+        };
+        tauri::async_runtime::block_on(async {
+            for (output, exit_code, succeeds) in [
+                (r#"{"running":false,"state":"stopped"}"#, 0, true),
+                (r#"{"running":false,"state":"unenrolled"}"#, 0, true),
+                (r#"{"running":true,"state":"busy"}"#, 0, false),
+                (r#"{"state":"stopped"}"#, 0, false),
+                ("invalid response", 0, false),
+                (r#"{"running":false}"#, 1, false),
+            ] {
+                // The fixture accepts only the stop command and publishes its
+                // response after completing its work, just like the real CLI.
+                std::fs::write(&worker, format!(
+                    "#!/bin/sh\n[ \"$3\" = stop ] || exit 2\nprintf '%s' '{output}'\nexit {exit_code}\n"
+                )).unwrap();
+                std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700)).unwrap();
+                assert_eq!(stop_for_quit(&state).await.is_ok(), succeeds, "{output}");
+            }
+            state.quitting.store(true, Ordering::SeqCst);
+            assert_eq!(
+                action(&state, "start").await.unwrap_err(),
+                "Worker is quitting."
+            );
+        });
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     #[ignore = "requires a built real worker; set GUERRILLA_DESKTOP_TEST_WORKER and run --ignored"]
@@ -586,6 +687,7 @@ mod integration_tests {
             directory: directory.clone(),
             worker,
             gate: Mutex::new(()),
+            quitting: AtomicBool::new(false),
         };
         let profile = read_profile(&state).unwrap();
         profile::atomic_save(&directory.join("config.json"), &profile).unwrap();

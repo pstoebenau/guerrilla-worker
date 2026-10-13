@@ -1,9 +1,10 @@
 # Desktop worker
 
 The Tauri app manages an independent `guerrilla-worker` process. Closing its
-window hides the interface in the tray; quitting the interface leaves the worker
-running. On Linux desktops without tray support, closing exits only the
-interface. Use **Stop worker** to stop execution or **Finish job, then pause** to
+window hides the interface in the tray and keeps the worker running.
+**Quit and stop all jobs** stops active execution before exiting the app. If
+shutdown fails, the app stays open and displays the error. On Linux desktops
+without tray support, closing the window also stops jobs and quits. Use **Stop worker** to stop execution or **Finish job, then pause** to
 complete the current assignment before stopping.
 
 The desktop distribution supplies Python, Node, FFmpeg, and the export converter.
@@ -20,6 +21,14 @@ repository root. For frontend development, run `bun install`, then `bun run dev`
 here. Browser previews explicitly indicate that native worker access is
 unavailable. `bun run check`, `bun run build`, and `bun test tests` validate the
 frontend. Native checks use `cargo test --manifest-path src-tauri/Cargo.toml`.
+
+## Appearance
+
+The desktop interface shares the website’s Guerrilla branding, Inter typeface,
+and light and dark color palettes. The footer offers Light, System (default),
+and Dark modes; the choice is saved on this computer. Fonts and the logo are
+bundled locally, so appearance does not require network access. Page transitions,
+confirmation dialogs, and progress animations respect reduced-motion settings.
 
 ## Isolated development and installed-app QA
 
