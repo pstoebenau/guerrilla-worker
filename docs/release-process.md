@@ -51,18 +51,19 @@ gh run list --workflow worker.yml --branch main --event workflow_dispatch --limi
 ```
 
 Use the returned run ID for `gh run watch RUN_ID --exit-status`. Once it passes,
-download its Windows, Linux, and macOS artifacts:
+download its Windows x64, Linux x64, and macOS Apple Silicon/Intel artifacts:
 
 ```sh
 gh run download RUN_ID --dir dist/release
 ```
 
 Windows and Linux package runners require at least 70 GiB free; macOS requires
-12 GiB. Use `windows_package_runner`, `linux_package_runner`, and
-`macos_package_runner` to choose larger or dedicated runner labels when needed.
+12 GiB. Use `windows_package_runner`, `linux_package_runner`,
+`macos_package_runner`, and `macos_intel_package_runner` to choose larger or
+dedicated runner labels when needed.
 Each label must select the correct OS with its native build tools. The Windows
-installer smoke test also requires a fresh worker account. The default macOS
-runner builds Apple Silicon; build on an Intel Mac separately for Intel packages.
+installer smoke test also requires a fresh worker account. macOS packages have
+separate Apple Silicon (`macos-15`) and Intel (`macos-15-intel`) jobs.
 
 Package builds upload Actions artifacts, not GitHub Releases. Artifacts expire
 after 14 days. To publish them:

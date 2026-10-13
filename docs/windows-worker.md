@@ -72,7 +72,8 @@ runner storage is insufficient. Runtime dependencies are never removed to make
 a package fit.
 
 When manually dispatching package CI, enable `packages` and use
-`linux_package_runner`, `windows_package_runner`, and `macos_package_runner` to
+`linux_package_runner`, `windows_package_runner`, `macos_package_runner`, and
+`macos_intel_package_runner` to
 select suitable larger or dedicated self-hosted runner labels. Defaults use the
 standard hosted labels; change them when their disks fail the capacity check.
 The smaller macOS base runtime needs 12 GiB free; Windows and Linux CUDA package

@@ -1,5 +1,22 @@
 # Cross-platform worker
 
+## Supported platforms
+
+Desktop runtime assets and package jobs cover Windows x64, Linux x64, and macOS
+14 or later on Apple Silicon and Intel. CI runs checks on Windows Server 2022,
+Ubuntu 24.04, and macOS 15 on both architectures. The desktop package workflow
+builds four distributions with the same app and protocol.
+
+GPU job support depends on the engine and hardware. Windows/Linux workers require
+compatible installed engines and GPU drivers; LichtFeld requires NVIDIA CUDA.
+Apple Silicon uses Spirula. Intel Mac distributions support worker management;
+the pinned engine distribution does not provide Intel Mac GPU execution.
+The Linux NVIDIA Docker image is x64 only.
+
+Windows ARM and Linux ARM do not have bundled runtime targets. Other Linux
+distributions need separate runtime validation before claiming support beyond the
+Ubuntu build baseline. Android, iOS, and ChromeOS have no native worker packages.
+
 ## Architecture
 
 The desktop is a Tauri v2 shell with a Svelte/TypeScript interface. It invokes the

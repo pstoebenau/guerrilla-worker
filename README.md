@@ -30,7 +30,8 @@ execution and retains recovery data; **Finish and pause** completes the current
 job and stops claiming work. Login startup is optional and runs under your account,
 not as a system service before login. Reopening attaches to the existing worker.
 
-See [desktop operation and architecture](docs/cross-platform-worker.md).
+See [supported platforms](docs/cross-platform-worker.md#supported-platforms) and
+[desktop operation and architecture](docs/cross-platform-worker.md).
 
 ## Build a desktop package
 
@@ -183,8 +184,8 @@ bun --cwd desktop run build
 docker build --target test -t guerrilla-worker:test .
 ```
 
-The [worker workflow](.github/workflows/worker.yml) checks Windows, Linux, and
-macOS on each push to `main`.
+The [worker workflow](.github/workflows/worker.yml) checks Windows x64, Linux x64,
+and macOS on Apple Silicon and Intel on each push to `main`.
 Native desktop packages are built by the manual
 `packages` workflow input and uploaded as artifacts. The workflow does not publish
 releases or bundle engines into desktop packages. The separate `build:docker`
