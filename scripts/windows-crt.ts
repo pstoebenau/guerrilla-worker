@@ -29,6 +29,7 @@ const vendorScript = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
+try {
 $stage = $env:GUERRILLA_CRT_STAGE_DIRECTORY
 $python = Join-Path $stage 'python'
 if (!(Test-Path -LiteralPath (Join-Path $python 'python.exe') -PathType Leaf)) { throw 'Extract the vendored Windows Python before preparing its app-local CRT.' }
@@ -77,7 +78,11 @@ function CheckedSignature([string]$file) {
   $entry = Get-Item -LiteralPath $file
   if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'MSVC runtime DLLs cannot be filesystem links.' }
   $signature = Get-AuthenticodeSignature -LiteralPath $file
-  if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or $signature.SignerCertificate.Subject -notmatch '(^|,\s*)CN=Microsoft Corporation(,|$)') {
+  # Authenticode prefers a registered catalog signature when one exists. MSVC
+  # redistributables can therefore use Microsoft's compatibility publisher CN.
+  if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or
+      $signature.SignerCertificate.Subject -notmatch '(^|,\s*)CN=Microsoft (?:Corporation|Windows Software Compatibility Publisher)(,|$)' -or
+      $signature.SignerCertificate.Subject -notmatch '(^|,\s*)O=Microsoft Corporation(,|$)') {
     $signer = if ($null -eq $signature.SignerCertificate) { '(none)' } else { $signature.SignerCertificate.Subject }
     throw ('Unexpected or invalid Microsoft runtime DLL signature: {0}; status={1}; message={2}; signer={3}; path={4}' -f $entry.Name, $signature.Status, $signature.StatusMessage, $signer, $entry.FullName)
   }
@@ -122,6 +127,10 @@ foreach ($file in ($sourceFiles | Sort-Object Name)) {
   redistributableVersion = ($sourceFiles | Where-Object { $_.Name -eq 'msvcp140.dll' } | Select-Object -First 1).VersionInfo.FileVersion; files = @($records);
   documentation = 'https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files?view=msvc-170'
 } | ConvertTo-Json -Depth 6 -Compress
+} catch {
+  [Console]::Error.WriteLine($_.Exception.Message)
+  exit 1
+}
 `;
 
 function parseManifest(value: unknown): CrtManifest {
@@ -135,7 +144,8 @@ function parseManifest(value: unknown): CrtManifest {
     const file = raw as Record<string, unknown>;
     if (typeof file.fileName !== 'string' || !/^(?:msvcp140(?:_[a-z0-9_]+)?|vcruntime140(?:_[a-z0-9_]+)?|concrt140|vcomp140)\.dll$/i.test(file.fileName)
       || typeof file.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(file.sha256)
-      || typeof file.signer !== 'string' || !/(^|,\s*)CN=Microsoft Corporation(,|$)/.test(file.signer)
+      || typeof file.signer !== 'string' || !/(^|,\s*)CN=Microsoft (?:Corporation|Windows Software Compatibility Publisher)(,|$)/.test(file.signer)
+      || !/(^|,\s*)O=Microsoft Corporation(,|$)/.test(file.signer)
       || typeof file.source !== 'string' || typeof file.sourceFileVersion !== 'string' || typeof file.productVersion !== 'string'
       || typeof file.signerThumbprint !== 'string' || typeof file.keptNewerPythonRuntime !== 'boolean') throw new Error('Invalid Windows CRT file identity');
   }
