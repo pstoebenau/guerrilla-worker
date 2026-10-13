@@ -41,7 +41,7 @@ export interface Assignment extends Fence {
   resumeState?: Record<string, unknown>;
   runtimeVersions?: Record<string, string>;
 }
-export interface PollResponse { assignment: Assignment | null; command: Command; pollAfterMs: number; cleanup?: Fence[] }
+export interface PollResponse { assignment: Assignment | null; command: Command; pollAfterMs: number; recoveryPending?: boolean; cleanup?: Fence[] }
 export interface HeartbeatResponse { leaseExpiresAt: string; command: Command; reason?: "cancelled" }
 export interface EnrollmentRequest { token: string; registration: Registration }
 export interface EnrollmentResponse { workerId: string; credential: string }

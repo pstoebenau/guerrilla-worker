@@ -13,6 +13,13 @@ opaque fence. Event sequences start at one; event IDs make retransmission
 idempotent. Lease loss stops the subprocess tree. A heartbeat cannot revive an
 expired lease. Checkpoint acknowledgement follows durable canonical commit.
 
+After acquiring its exclusive GPU lock, an agent sends `recovering: true` in its
+startup poll. Personal-worker recovery polls do not claim an assignment. A
+`recoveryPending: true` response keeps startup recovery enabled while a previous
+lease is still valid; otherwise the next poll claims work normally. Retrying a
+startup poll cannot create duplicate resumes. Cloud termination barriers remain
+under control-plane ownership.
+
 Assignments carry scan-owned `resumeState` and verified artifact metadata across
 all attempts. Workers restore only dependencies requested by the next unfinished
 stage. `inheritedArtifactIds` references existing verified scan artifacts in a new

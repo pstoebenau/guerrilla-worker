@@ -45,7 +45,7 @@ export async function execute(client: Client, assignment: Assignment, shutdown: 
   for (const id of [assignment.scanId,assignment.attemptId,assignment.leaseId]) if (!/^[a-zA-Z0-9_-]{1,100}$/.test(id)) throw new Error('Invalid assignment identity');
   const fence = {scanId:assignment.scanId,attemptId:assignment.attemptId,leaseId:assignment.leaseId};
   const abort = new AbortController(), signal = AbortSignal.any([shutdown,abort.signal]);
-  let deadline = Date.parse(assignment.leaseExpiresAt), sequence = 0, checkpointSequence = 0, drain = false, cancelled = false, pipelineFailure: string | undefined;
+  let deadline = Date.parse(assignment.leaseExpiresAt), sequence = 0, checkpointSequence = 0, drain = false, cancelled = false, pipelineFailure: string | undefined, pipelineInterrupted = false;
   if (!Number.isFinite(deadline) || deadline <= Date.now()) throw new Error('Expired assignment');
   const watchdog = setInterval(()=> { if (Date.now() >= deadline) abort.abort(new Error('Lease expired')); },250);
   let beating = false;
@@ -126,7 +126,10 @@ export async function execute(client: Client, assignment: Assignment, shutdown: 
         await copyFile(path.join(job,'worker.log'),path.join(output,'logs','worker.log'));
         await archives.enqueue(String(event.checkpointId),++checkpointSequence,event.stage); return;
       }
-      if (event.type === 'failed' && typeof event.error === 'string') pipelineFailure = redactSecrets(event.error);
+      if (event.type === 'failed' && typeof event.error === 'string') {
+        pipelineFailure = redactSecrets(event.error);
+        pipelineInterrupted = event.interrupted === true;
+      }
       const {type, runtimeVersions, message, ...progress} = event;
       if (type === 'completed') return;
       await sendEvent(type,redactSecrets(String(message ?? event.error ?? type)),progress,event.stage,runtimeVersions);
@@ -161,7 +164,7 @@ export async function execute(client: Client, assignment: Assignment, shutdown: 
     }
     if (!signal.aborted) await archiveFile(client,fence,path.join(job,'worker.log'),'logs/worker.log','log',undefined,signal).catch(()=>{});
     // A fenced worker cannot finalize: server rejects stale identities.
-    await client.post('finish',{...fence,state:signal.aborted?'interrupted':'failed',error:cleanupFailure?'Cancelled; local cleanup pending.':cancelled?'Cancelled by owner.':pipelineFailure ?? redactSecrets(error instanceof Error?error.message:'Pipeline failed')}).catch(()=>{});
+    await client.post('finish',{...fence,state:signal.aborted || pipelineInterrupted?'interrupted':'failed',error:cleanupFailure?'Cancelled; local cleanup pending.':cancelled?'Cancelled by owner.':pipelineFailure ?? redactSecrets(error instanceof Error?error.message:'Pipeline failed')}).catch(()=>{});
     throw error;
   } finally { clearInterval(watchdog); clearInterval(heartbeats); }
   return drain;
@@ -213,9 +216,12 @@ export async function main(shutdown = new AbortController()) {
   lockProcess.once('exit',()=>shutdown.abort());
   delete process.env.WORKER_ENROLLMENT_TOKEN;
   let clean = await scratchIsClean();
+  // The GPU lock has been acquired; complete startup recovery before claiming work.
+  let recovering = true;
   while (!shutdown.signal.aborted) {
     try {
-      const response = await client.post<PollResponse>('poll',{registration:info,clean},shutdown.signal);
+      const response: PollResponse = await client.post<PollResponse>('poll',{registration:info,clean,recovering},shutdown.signal);
+      recovering = response.recoveryPending === true;
       if (response.cleanup?.length) {
         for (const fence of response.cleanup) {
           await removeScratchPath(scratch,fence.scanId);
