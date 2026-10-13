@@ -7,6 +7,8 @@ test('Windows PowerShell drops inherited module paths without changing other env
   expect(inherited.PSModulePath).toBe('PowerShell-7/Modules');
 });
 
+// Cold PowerShell startup and module loading can exceed Bun's default five
+// seconds on hosted Windows runners. Keep a bounded process integration budget.
 test.skipIf(process.platform !== 'win32')('Windows PowerShell can load packaging cmdlets with a polluted parent module path', async () => {
   const child = Bun.spawn(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
     "$ErrorActionPreference = 'Stop'; Get-Command Get-AuthenticodeSignature, Get-FileHash, ConvertTo-Json | Select-Object -ExpandProperty Name"], {
@@ -20,4 +22,4 @@ test.skipIf(process.platform !== 'win32')('Windows PowerShell can load packaging
   expect(stdout).toContain('Get-AuthenticodeSignature');
   expect(stdout).toContain('Get-FileHash');
   expect(stdout).toContain('ConvertTo-Json');
-});
+}, 30_000);
