@@ -184,7 +184,8 @@ bun --cwd desktop run build
 docker build --target test -t guerrilla-worker:test .
 ```
 
-CI checks Windows, Linux, and macOS. Native desktop packages are built by the manual
+One CI workflow checks Windows, Linux, and macOS on each push to `main`.
+Native desktop packages are built by the manual
 `packages` workflow input and uploaded as artifacts. The workflow does not publish
 releases or bundle engines into desktop packages. The separate `build:docker`
 command bundles engines into the Linux image. CPU/mock checks are not GPU scan
