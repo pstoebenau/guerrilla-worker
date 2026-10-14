@@ -80,7 +80,7 @@ standard hosted labels; change them when their disks fail the capacity check.
 The smaller macOS base runtime needs 12 GiB free; Windows and Linux CUDA package
 jobs require 70 GiB.
 Custom labels must identify runners with the matching OS, native build tools,
-and a clean test account. Automatic check jobs keep their normal hosted matrix.
+and a clean test account. Each native build job tests its compiled release and packaged integrations.
 
 Then run:
 

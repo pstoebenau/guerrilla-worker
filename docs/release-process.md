@@ -41,7 +41,7 @@ distribution, including the engines bundled into Docker. See
 ## Desktop release
 
 The cross-platform workflow is `.github/workflows/worker.yml`, displayed as
-**Build and release worker**. Every push to `main` checks and builds Windows x64,
+**Build and release worker**. Every push to `main` builds and tests Windows x64,
 Linux x64, macOS Apple Silicon and macOS Intel, then automatically publishes all
 four into **one** stable GitHub Release. No manual publication step or Windows-only
 release path is required. Manual dispatch on `main` uses the same complete matrix:
@@ -110,15 +110,18 @@ provide the persistent downloads.
 Compilation verifies code and linking. Behavioral tests verify checkpoint retention,
 resume, leases, cancellation, profile isolation, and update selection; these can
 fail even when the binaries build successfully. Python checks cover helpers that
-Rust compilation does not validate. The Linux CPU image job checks the container
-build and its tests.
+Rust compilation does not validate. Tests run inside each native release-build job, using release Cargo artifacts and
+the packaged Python/Node/converter runtimes. There is no separate check matrix,
+repeated frontend build, debug-profile compile, or Docker image publication gate.
+The Docker image can be checked independently with the documented local command.
 
 The Windows installer smoke test runs for every release build. It installs
 the distribution, checks bundled files, runs the installed worker's status and
 preflight commands, and uninstalls while verifying that the isolated profile and
 checkpoint survive. Installer compilation alone cannot establish those behaviors.
-Native desktop `cargo test` also compiles the app, so a separate preceding
-`cargo check` is unnecessary.
+Native desktop tests run with the release profile after the actual app build,
+reusing compiled dependencies. Compilation, behavioral tests and installer smoke
+serve different purposes without repeating a separate check-build matrix.
 
 # Linux engine artifact and build references
 

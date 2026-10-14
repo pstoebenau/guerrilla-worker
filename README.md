@@ -187,7 +187,9 @@ docker build --target test -t guerrilla-worker:test .
 The [worker workflow](.github/workflows/worker.yml) checks and builds Windows x64,
 Linux x64, and macOS on Apple Silicon and Intel on each push to `main`, then
 automatically publishes all four builds into one GitHub Release. It allocates
-one shared stable version and publishes only after every platform succeeds.
+one shared stable version and publishes only after every platform builds and tests
+successfully. Tests reuse release artifacts inside each OS build job; there is no
+separate check matrix or Docker gate for desktop releases.
 Desktop packages use owner-installed engines. The separate `build:docker`
 command bundles engines into the Linux image. CPU/mock checks are not GPU scan
 acceptance; validate complete engine workflows and resume on the target GPU before
