@@ -2,7 +2,7 @@ import { cp, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { vendorRuntime } from './vendor-runtime';
 import { windowsPowerShellEnvironment } from './windows-powershell';
-import { linuxRuntimeLibraryPath } from './linux-bundle';
+import { linuxBundleEnvironment } from './linux-bundle';
 
 const root = path.resolve(import.meta.dir, '..');
 const app = path.join(root, 'desktop');
@@ -36,7 +36,7 @@ const buildArguments = process.argv.slice(2);
 const nativeLinuxRpm = process.platform === 'linux' && !buildArguments.includes('--no-bundle') && !buildArguments.some(argument => argument === '--bundles' || argument.startsWith('--bundles='));
 const nativeMacDmg = process.platform === 'darwin' && !buildArguments.includes('--no-bundle') && !buildArguments.some(argument => argument === '--bundles' || argument.startsWith('--bundles='));
 const bundleEnvironment: NodeJS.ProcessEnv = { ...process.env, CARGO_TARGET_DIR: path.join(tauri, 'target') };
-if (process.platform === 'linux') bundleEnvironment.LD_LIBRARY_PATH = await linuxRuntimeLibraryPath(path.join(tauri, 'resources/runtime'), process.env.LD_LIBRARY_PATH);
+if (process.platform === 'linux') Object.assign(bundleEnvironment, await linuxBundleEnvironment(path.join(tauri, 'resources/runtime')));
 await run([process.execPath, 'run', 'tauri', 'build', '--config', 'src-tauri/tauri.bundle.conf.json', ...(process.platform === 'win32' && !buildArguments.includes('--no-bundle') ? ['--no-bundle'] : []), ...(nativeLinuxRpm ? ['--bundles', 'deb,appimage'] : nativeMacDmg ? ['--bundles', 'app'] : []), ...buildArguments], app, bundleEnvironment);
 if (nativeLinuxRpm) {
   const version = (JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')) as {version: string}).version;

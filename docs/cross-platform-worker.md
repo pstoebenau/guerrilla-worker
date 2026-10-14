@@ -10,6 +10,8 @@ one GitHub Release after every push to `main` succeeds on all platforms.
 
 GPU job support depends on the engine and hardware. Windows/Linux workers require
 compatible installed engines and GPU drivers; LichtFeld requires NVIDIA CUDA.
+Linux AppImages bundle CUDA runtime libraries while leaving `libcuda.so.1` to the
+user's installed NVIDIA driver. Packaging still rejects missing runtime libraries.
 Apple Silicon uses Spirula. Intel Mac distributions support worker management;
 the pinned engine distribution does not provide Intel Mac GPU execution.
 The Linux NVIDIA Docker image is x64 only.
