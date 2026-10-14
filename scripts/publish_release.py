@@ -71,11 +71,19 @@ def verify_remote(release, assets):
             raise ValueError(f'Uploaded release checksum differs: {name}')
 
 
+def find_release(repository, tag):
+    # The tag endpoint finds published releases, not drafts. Listing releases
+    # includes drafts for the publishing token and gives their stable IDs.
+    pages = json.loads(gh('api', f'repos/{repository}/releases', '--paginate', '--slurp'))
+    matches = [release for page in pages for release in page if release['tag_name'] == tag]
+    if len(matches) > 1:
+        raise ValueError(f'Multiple releases have the same tag: {tag}')
+    return matches[0] if matches else None
+
+
 def publish(destination, assets, version, commit, repository):
     tag = f'v{version}'
-    endpoint = f'repos/{repository}/releases/tags/{tag}'
-    previous = gh('api', endpoint, optional=True)
-    release = json.loads(previous) if previous else None
+    release = find_release(repository, tag)
     if release and release['target_commitish'] != commit:
         raise ValueError('Refusing to replace a release belonging to another commit')
     if release and not release['draft']:
@@ -103,9 +111,12 @@ def publish(destination, assets, version, commit, repository):
     if not release:
         gh('release', 'create', tag, '--repo', repository, '--target', commit, '--draft',
            '--title', f'Guerrilla Worker {version}', '--notes-file', str(notes))
+        release = find_release(repository, tag)
+        if not release or release['target_commitish'] != commit or not release['draft']:
+            raise ValueError('The newly created draft release does not match this build')
     gh('release', 'upload', tag, '--repo', repository, '--clobber',
        *(str(destination / asset['name']) for asset in assets))
-    release = json.loads(gh('api', endpoint))
+    release = json.loads(gh('api', f'repos/{repository}/releases/{release["id"]}'))
     verify_remote(release, assets)
     gh('release', 'edit', tag, '--repo', repository, '--draft=false', '--prerelease=false',
        '--latest', '--notes-file', str(notes))

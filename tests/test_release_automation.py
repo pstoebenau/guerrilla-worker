@@ -7,6 +7,7 @@ import sys
 import tempfile
 import tomllib
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import publish_release
@@ -47,14 +48,15 @@ class ReleaseAutomationTests(unittest.TestCase):
     def test_split_package_restores_exact_bytes_and_refuses_corruption(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            source = root / 'Guerrilla-Worker-0.3.0-amd64.AppImage'
+            source = root / 'Guerrilla Worker_0.3.0_amd64.AppImage'
             payload = bytes(range(256)) * 4
             source.write_bytes(payload)
             destination = root / 'assets'
             destination.mkdir()
             package = release_assets.stage_file(source, destination, limit=100)
             self.assertTrue(all(item['size'] <= 100 for item in package['assets']))
-            manifest = destination / (source.name + '.parts.json')
+            self.assertEqual(package['file']['name'], 'Guerrilla.Worker_0.3.0_amd64.AppImage')
+            manifest = destination / (package['file']['name'] + '.parts.json')
             restored = reassemble_release.reassemble(manifest)
             self.assertEqual(restored.read_bytes(), payload)
             if os.name != 'nt':
@@ -67,6 +69,21 @@ class ReleaseAutomationTests(unittest.TestCase):
                 reassemble_release.reassemble(manifest)
             self.assertFalse(restored.exists())
             self.assertFalse(list(destination.glob('*.assembling')))
+
+    def test_small_packages_use_github_asset_names_before_checksumming(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / 'Guerrilla Worker_0.3.0_aarch64.dmg'
+            source.write_bytes(b'actual image bytes')
+            destination = root / 'assets'
+            destination.mkdir()
+            package = release_assets.stage_file(source, destination)
+            target = destination / 'Guerrilla.Worker_0.3.0_aarch64.dmg'
+            self.assertEqual(target.read_bytes(), source.read_bytes())
+            self.assertEqual(package['file'], release_assets.record(target))
+            self.assertEqual(package['assets'], [release_assets.record(target)])
+            with self.assertRaisesRegex(ValueError, 'collision'):
+                release_assets.stage_file(source, destination)
 
     def test_publication_refuses_missing_platforms_and_mixed_commits(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -95,6 +112,40 @@ class ReleaseAutomationTests(unittest.TestCase):
             publish_release.verify_remote({'assets': []}, expected)
         with self.assertRaisesRegex(ValueError, 'checksum differs'):
             publish_release.verify_remote({'assets': [{**remote, 'digest': 'sha256:wrong'}]}, expected)
+
+    def test_new_and_resumed_drafts_are_verified_by_id_before_publication(self):
+        asset = {'name': 'package.dmg', 'size': 5, 'sha256': hashlib.sha256(b'bytes').hexdigest()}
+        release = {'id': 123, 'tag_name': 'v0.3.0', 'target_commitish': 'a' * 40, 'draft': True,
+                   'assets': [{**asset, 'state': 'uploaded', 'digest': 'sha256:' + asset['sha256']}]}
+        for existing in (False, True):
+            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                destination = root / 'assets'
+                destination.mkdir()
+                (destination / asset['name']).write_bytes(b'bytes')
+                calls = []
+                created = existing
+
+                def transport(*args, **kwargs):
+                    nonlocal created
+                    calls.append(args)
+                    if args[:2] == ('api', 'repos/owner/repo/releases'):
+                        return json.dumps([[{'id': 99, 'tag_name': 'v0.2.0'}], [release] if created else []])
+                    if args[:2] == ('api', 'repos/owner/repo/releases/123'):
+                        return json.dumps(release)
+                    if args[:2] == ('release', 'create'):
+                        created = True
+                        return ''
+                    if args[:2] in (('release', 'upload'), ('release', 'edit')):
+                        return ''
+                    raise AssertionError(f'Unexpected GitHub request (drafts cannot be found by tag): {args}')
+
+                with patch.object(publish_release, 'gh', side_effect=transport):
+                    publish_release.publish(destination, [asset], '0.3.0', 'a' * 40, 'owner/repo')
+                self.assertEqual(sum(call[:2] == ('release', 'create') for call in calls), int(not existing))
+                verified = calls.index(('api', 'repos/owner/repo/releases/123'))
+                published = next(i for i, call in enumerate(calls) if call[:2] == ('release', 'edit'))
+                self.assertLess(verified, published)
 
 
 if __name__ == '__main__':

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tarfile
@@ -24,8 +25,13 @@ def record(file):
 
 def stage_file(file, destination, limit=ASSET_LIMIT):
     original = record(file)
+    # GitHub normalizes spaces and other special characters in uploaded names.
+    # Use that name before making manifests, checksums, and split-file records.
+    original['name'] = re.sub(r'[^A-Za-z0-9_.-]', '.', original['name'])
     if original['size'] <= limit:
-        target = destination / file.name
+        target = destination / original['name']
+        if target.exists():
+            raise ValueError(f'Release asset name collision: {target.name}')
         try:
             os.link(file, target)
         except OSError:
@@ -34,7 +40,7 @@ def stage_file(file, destination, limit=ASSET_LIMIT):
     parts = []
     with file.open('rb') as source:
         while source.tell() < original['size']:
-            target = destination / f'{file.name}.part{len(parts) + 1:03}'
+            target = destination / f'{original["name"]}.part{len(parts) + 1:03}'
             with target.open('wb') as output:
                 remaining = limit
                 while remaining and (chunk := source.read(min(8 * 1024 * 1024, remaining))):
@@ -42,7 +48,7 @@ def stage_file(file, destination, limit=ASSET_LIMIT):
                     remaining -= len(chunk)
             parts.append(record(target))
     package = {'file': original, 'assets': parts}
-    (destination / (file.name + '.parts.json')).write_text(json.dumps(package, indent=2) + '\n')
+    (destination / (original['name'] + '.parts.json')).write_text(json.dumps(package, indent=2) + '\n')
     return package
 
 
