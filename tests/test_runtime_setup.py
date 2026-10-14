@@ -50,7 +50,12 @@ class RuntimeSetupTests(unittest.TestCase):
                 thread.join(5)
                 self.assertFalse(thread.is_alive())
                 self.assertEqual(failures, ['GPU setup canceled; verified downloads remain cached'])
-                self.assertTrue(not descendant.is_running() or descendant.status() == psutil.STATUS_ZOMBIE)
+                try:
+                    self.assertEqual(descendant.status(), psutil.STATUS_ZOMBIE)
+                except psutil.NoSuchProcess:
+                    # A killed child may already have been reaped. Query once
+                    # so its disappearance between two queries is not a race.
+                    pass
             finally:
                 runtime_setup.cancelled.set()
                 thread.join(5)
