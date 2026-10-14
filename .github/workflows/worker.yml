@@ -102,7 +102,7 @@ jobs:
           [IO.File]::AppendAllText($env:GITHUB_ENV, "WORKER_BUILD_CACHE=$runtimeCache`n", [Text.UTF8Encoding]::new($false))
       - name: Install Linux desktop build dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev patchelf libfuse2 rpm
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev patchelf libfuse2 rpm librdmacm1
       - name: Install Rust
         run: |
           rustup toolchain install 1.99.0 --profile minimal
