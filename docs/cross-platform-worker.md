@@ -32,6 +32,19 @@ user-session worker; this is not a boot-time machine service.
 
 The macOS desktop distribution requires macOS 14 or later. Bundled native Python
 wheels set the minimum: NumPy targets macOS 14 and OpenCV targets macOS 13.
+
+Install the Mac app by dragging it from the DMG to Applications, then open the
+installed copy. The DMG is read-only distribution media.
+
+Mac app bundles use a complete ad-hoc signature, including the resource seal and
+worker sidecars. The build verifies the bundle with `codesign --verify --deep
+--strict` before packaging. This prevents malformed unsigned bundles from being
+published, but does not provide Apple Developer ID verification or notarization.
+For a trusted download from this repository, macOS may require **System Settings
+→ Privacy & Security → Open Anyway** after the first launch attempt. See
+[Apple's instructions](https://support.apple.com/en-us/102445). Developer ID
+signing and notarization require Apple signing credentials; the default build
+does not disable Gatekeeper or remove quarantine from installed apps.
 The app's declared minimum follows its dependencies rather than Tauri alone.
 
 `rust/worker` owns outbound protocol v2, credentials, leases, scoped transfers,

@@ -38,6 +38,12 @@ const nativeMacDmg = process.platform === 'darwin' && !buildArguments.includes('
 const bundleEnvironment: NodeJS.ProcessEnv = { ...process.env, CARGO_TARGET_DIR: path.join(tauri, 'target') };
 if (process.platform === 'linux') Object.assign(bundleEnvironment, await linuxBundleEnvironment(path.join(tauri, 'resources/runtime')));
 await run([process.execPath, 'run', 'tauri', 'build', '--config', 'src-tauri/tauri.bundle.conf.json', ...(process.platform === 'win32' && !buildArguments.includes('--no-bundle') ? ['--no-bundle'] : []), ...(nativeLinuxRpm ? ['--bundles', 'deb,appimage'] : nativeMacDmg ? ['--bundles', 'app'] : []), ...buildArguments], app, bundleEnvironment);
+if (process.platform === 'darwin' && !buildArguments.includes('--no-bundle')) {
+  const bundles = path.join(tauri, 'target/release/bundle/macos');
+  const apps = (await readdir(bundles)).filter(name => name.endsWith('.app'));
+  if (apps.length !== 1) throw new Error('Expected one complete macOS app bundle');
+  await run(['codesign', '--verify', '--deep', '--strict', '--verbose=2', path.join(bundles, apps[0]!)]);
+}
 if (nativeLinuxRpm) {
   const version = (JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')) as {version: string}).version;
   await run(['python3', path.join(root, 'scripts/build_linux_rpm.py'), '--bundle', path.join(tauri, 'target/release/bundle'), '--version', version]);

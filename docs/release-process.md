@@ -72,9 +72,12 @@ Linux native builds need `rpm` alongside Tauri's normal system dependencies.
 The AppImage bundler receives the base runtime's private wheel library directories in its
 build-only library search path so individual ELF files resolve private wheel
 dependencies. Driver stubs are excluded from that search path.
-macOS DMGs are generated from Tauri's app bundle with `hdiutil makehybrid` and
-`hdiutil convert`, without mounting temporary images. This avoids hosted Intel
-Mac DiskArbitration detach timeouts while retaining the app and Applications link.
+macOS DMGs are generated from Tauri's signed app bundle with native
+`hdiutil create -srcfolder` into compressed HFS+ images. The build does not open
+Finder or run AppleScript and bounds image creation to five minutes. Folder
+imaging preserves symlinks and avoids the FinderInfo attributes synthesized by
+`makehybrid` that invalidate signed sidecars. Bundle signatures are verified
+before packaging; native tests verify signatures and symlinks after image installation.
 
 Every new native package is a single file below GitHub's 2 GiB asset limit.
 Publication fails if a package grows beyond this limit; new releases never split
