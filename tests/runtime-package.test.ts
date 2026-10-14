@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -48,5 +48,32 @@ describe('vendored runtime integrity', () => {
   test('unencrypted and unpinned assets fail before fetching', async () => {
     await expect(verifiedDownload({ url: 'http://example.invalid/runtime.zip', sha256: 'a'.repeat(64) }, tmpdir())).rejects.toThrow('identity');
     await expect(verifiedDownload({ url: 'https://example.invalid/runtime.zip', sha256: 'missing' }, tmpdir())).rejects.toThrow('identity');
+  });
+  test('a transient upstream error retries and still verifies downloaded bytes', async () => {
+    const cache = await mkdtemp(path.join(tmpdir(), 'guerrilla-runtime-retry-'));
+    const source = path.join(cache, 'source');
+    await writeFile(source, 'pinned bytes');
+    const digest = await sha256(source);
+    const request = spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('temporary upstream failure', { status: 500 })).mockResolvedValueOnce(new Response('pinned bytes'));
+    const sleep = spyOn(Bun, 'sleep').mockResolvedValue(undefined);
+    try {
+      const file = await verifiedDownload({ url: 'https://example.invalid/runtime.zip', sha256: digest }, cache);
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(await readFile(file, 'utf8')).toBe('pinned bytes');
+    } finally { request.mockRestore(); sleep.mockRestore(); await rm(cache, { recursive: true, force: true }); }
+  });
+  test('download retries are bounded and a checksum failure never becomes a cached runtime', async () => {
+    const cache = await mkdtemp(path.join(tmpdir(), 'guerrilla-runtime-retry-'));
+    const request = spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 503 }));
+    const sleep = spyOn(Bun, 'sleep').mockResolvedValue(undefined);
+    const asset = { url: 'https://example.invalid/runtime.zip', sha256: 'a'.repeat(64) };
+    try {
+      await expect(verifiedDownload(asset, cache)).rejects.toThrow('HTTP 503');
+      expect(request).toHaveBeenCalledTimes(4);
+      request.mockReset().mockResolvedValue(new Response('corrupt payload'));
+      await expect(verifiedDownload(asset, cache)).rejects.toThrow('checksum mismatch');
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(await Bun.file(path.join(cache, `${asset.sha256}-runtime.zip`)).exists()).toBe(false);
+    } finally { request.mockRestore(); sleep.mockRestore(); await rm(cache, { recursive: true, force: true }); }
   });
 });

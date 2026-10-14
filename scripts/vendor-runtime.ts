@@ -33,9 +33,27 @@ export async function verifiedDownload(asset: Asset, cache: string): Promise<str
   const temporary = `${file}.${crypto.randomUUID()}.download`;
   try {
     console.log(`Downloading ${path.basename(new URL(asset.url).pathname)}…`);
-    const response = await fetch(asset.url, { signal: AbortSignal.timeout(600_000) });
-    if (!response.ok) throw new Error(`Runtime download failed: HTTP ${response.status}`);
-    await Bun.write(temporary, response);
+    for (let attempt = 0; ; attempt++) {
+      let response: Response;
+      try { response = await fetch(asset.url, { signal: AbortSignal.timeout(600_000) }); }
+      catch (error) {
+        if (attempt === 3) throw error;
+        console.log(`Runtime download interrupted; retrying (${attempt + 1}/3)`);
+        await Bun.sleep(1000 * 2 ** attempt);
+        continue;
+      }
+      if (!response.ok) {
+        await response.body?.cancel();
+        if ((response.status === 429 || response.status >= 500) && attempt < 3) {
+          console.log(`Runtime download returned HTTP ${response.status}; retrying (${attempt + 1}/3)`);
+          await Bun.sleep(1000 * 2 ** attempt);
+          continue;
+        }
+        throw new Error(`Runtime download failed: HTTP ${response.status}`);
+      }
+      await Bun.write(temporary, response);
+      break;
+    }
     if (await sha256(temporary) !== asset.sha256) throw new Error('Runtime checksum mismatch; download refused');
     await rename(temporary, file);
     return file;

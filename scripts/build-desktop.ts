@@ -2,6 +2,7 @@ import { cp, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { vendorRuntime } from './vendor-runtime';
 import { windowsPowerShellEnvironment } from './windows-powershell';
+import { linuxRuntimeLibraryPath } from './linux-bundle';
 
 const root = path.resolve(import.meta.dir, '..');
 const app = path.join(root, 'desktop');
@@ -33,10 +34,17 @@ await run([process.execPath, 'install', '--frozen-lockfile'], app);
 await run([process.execPath, 'run', 'check'], app);
 const buildArguments = process.argv.slice(2);
 const nativeLinuxRpm = process.platform === 'linux' && !buildArguments.includes('--no-bundle') && !buildArguments.some(argument => argument === '--bundles' || argument.startsWith('--bundles='));
-await run([process.execPath, 'run', 'tauri', 'build', '--config', 'src-tauri/tauri.bundle.conf.json', ...(process.platform === 'win32' && !buildArguments.includes('--no-bundle') ? ['--no-bundle'] : []), ...(nativeLinuxRpm ? ['--bundles', 'deb,appimage'] : []), ...buildArguments], app, { ...process.env, CARGO_TARGET_DIR: path.join(tauri, 'target') });
+const nativeMacDmg = process.platform === 'darwin' && !buildArguments.includes('--no-bundle') && !buildArguments.some(argument => argument === '--bundles' || argument.startsWith('--bundles='));
+const bundleEnvironment: NodeJS.ProcessEnv = { ...process.env, CARGO_TARGET_DIR: path.join(tauri, 'target') };
+if (process.platform === 'linux') bundleEnvironment.LD_LIBRARY_PATH = await linuxRuntimeLibraryPath(path.join(tauri, 'resources/runtime'), process.env.LD_LIBRARY_PATH);
+await run([process.execPath, 'run', 'tauri', 'build', '--config', 'src-tauri/tauri.bundle.conf.json', ...(process.platform === 'win32' && !buildArguments.includes('--no-bundle') ? ['--no-bundle'] : []), ...(nativeLinuxRpm ? ['--bundles', 'deb,appimage'] : nativeMacDmg ? ['--bundles', 'app'] : []), ...buildArguments], app, bundleEnvironment);
 if (nativeLinuxRpm) {
   const version = (JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')) as {version: string}).version;
   await run(['python3', path.join(root, 'scripts/build_linux_rpm.py'), '--bundle', path.join(tauri, 'target/release/bundle'), '--version', version]);
+}
+if (nativeMacDmg) {
+  const version = (JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')) as {version: string}).version;
+  await run(['python3', path.join(root, 'scripts/build_macos_dmg.py'), '--bundle', path.join(tauri, 'target/release/bundle'), '--version', version]);
 }
 if (process.platform === 'win32') {
   // CUDA bindings can exceed a single NSIS/MSI payload. Inno's spanned data

@@ -69,6 +69,12 @@ and macOS DMG and `.app.tar.gz` for both architectures. Linux RPM creation uses
 system `rpmbuild` to stream the same filesystem Tauri prepares for the DEB;
 this avoids keeping the full CUDA runtime in the Tauri RPM builder's memory.
 Linux native builds need `rpm` alongside Tauri's normal system dependencies.
+The AppImage bundler receives the vendored wheel/CUDA library directories in its
+build-only library search path so individual ELF files resolve private wheel
+dependencies. Driver stubs are excluded from that search path.
+macOS DMGs are generated from Tauri's app bundle with `hdiutil makehybrid` and
+`hdiutil convert`, without mounting temporary images. This avoids hosted Intel
+Mac DiskArbitration detach timeouts while retaining the app and Applications link.
 
 GitHub requires each release asset to be under 2 GiB. Windows installer slices
 already meet that limit. Other oversized packages are split into files of at
