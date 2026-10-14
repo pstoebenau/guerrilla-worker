@@ -87,7 +87,9 @@ an installed desktop app. The GPU driver remains an operating-system prerequisit
 Use Overview to inspect connectivity, execution and engine availability. Setup owns
 server URL, enrollment, engine paths, scratch storage, and login startup. Logs are
 bounded and redact credentials. Enrollment tokens go through the worker process's
-stdin; they are not saved in settings or command arguments.
+stdin; they are not saved in settings or command arguments. Enrollment saves the
+worker identity independently of engine/GPU readiness and leaves it stopped.
+Choose **Start worker** after configuring engines and checking dependencies.
 
 Closing a window hides it in the tray. Quit interface leaves the worker running.
 Stop worker interrupts execution and retains checkpoints. Finish and pause allows

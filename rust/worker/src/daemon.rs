@@ -1,6 +1,6 @@
 use crate::{
     api::{body, Client},
-    execution, files,
+    enrollment, execution, files,
     profile::ContextPaths,
     protocol::{redact, Credentials, Gpu, Poll},
 };
@@ -135,8 +135,9 @@ pub async fn enroll(paths: &ContextPaths, token: &str) -> Result<Status> {
     if paths.profile.control_url.is_empty() {
         bail!("Set controlUrl before enrolling");
     }
-    let report = paths.preflight().await?;
-    let registration = ContextPaths::registration(&report)?;
+    // Enrollment establishes an identity. Verified capabilities are sent when
+    // starting the worker, after GPU discovery and engine dependency checks.
+    let registration = ContextPaths::enrollment_identity();
     let client = Client::new(&paths.profile.control_url, "")?;
     let enrolled: Value = client
         .post(
@@ -144,7 +145,8 @@ pub async fn enroll(paths: &ContextPaths, token: &str) -> Result<Status> {
             &json!({"token":token,"registration":registration}),
             &CancellationToken::new(),
         )
-        .await?;
+        .await
+        .map_err(enrollment::server_error)?;
     let credentials = Credentials {
         origin: client.origin,
         worker_id: enrolled["workerId"]

@@ -18,6 +18,7 @@ const version = Bun.spawnSync(['rustc', '-vV'], { stdout: 'pipe' });
 const target = version.stdout.toString().match(/^host: (.+)$/m)?.[1];
 if (!target) throw new Error('Install the Rust toolchain before building the desktop app');
 const suffix = process.platform === 'win32' ? '.exe' : '';
+await run([process.platform === 'win32' ? 'python' : 'python3', path.join(root, 'scripts/release_version.py'), 'check']);
 await run(['cargo', 'build', '--release', '--locked', '--workspace', '--target-dir', path.join(root, 'target')]);
 await mkdir(path.join(tauri, 'binaries'), { recursive: true });
 for (const binary of ['guerrilla-worker', 'guerrilla-pipeline']) {

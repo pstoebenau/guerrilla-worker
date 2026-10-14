@@ -1,6 +1,6 @@
 {
   "name": "guerrilla-worker-desktop",
-  "version": "0.3.0",
+  "version": "0.3.4",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,7 +10,10 @@
     "test": "bun test tests",
     "tauri": "tauri"
   },
-  "dependencies": { "@tauri-apps/api": "2.12.3", "svelte": "5.57.2" },
+  "dependencies": {
+    "@tauri-apps/api": "2.12.3",
+    "svelte": "5.57.2"
+  },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "7.3.1",
     "@tauri-apps/cli": "2.12.2",

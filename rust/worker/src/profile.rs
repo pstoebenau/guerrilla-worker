@@ -286,12 +286,20 @@ impl ContextPaths {
             }
         }
         Ok(Registration {
-            protocol_version: 2,
-            build: env!("CARGO_PKG_VERSION").into(),
-            runtime: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
             healthy: !engines.is_empty(),
             engines,
             gpus,
+            ..Self::enrollment_identity()
         })
+    }
+    pub fn enrollment_identity() -> Registration {
+        Registration {
+            protocol_version: 2,
+            build: env!("CARGO_PKG_VERSION").into(),
+            runtime: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+            healthy: false,
+            engines: Default::default(),
+            gpus: vec![],
+        }
     }
 }

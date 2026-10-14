@@ -106,6 +106,7 @@ class ReleaseAutomationTests(unittest.TestCase):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(release_version.ROOT / name, target)
             release_version.apply_version(root, '0.3.11')
+            self.assertEqual(release_version.check_versions(root, '0.3.11'), '0.3.11')
             for name in files[:3]:
                 self.assertEqual(json.loads((root / name).read_text())['version'], '0.3.11')
             for name in files[3:5]:
@@ -113,6 +114,10 @@ class ReleaseAutomationTests(unittest.TestCase):
             for name, package in zip(files[5:], ('guerrilla-worker', 'guerrilla-worker-desktop')):
                 records = tomllib.loads((root / name).read_text())['package']
                 self.assertEqual(next(row['version'] for row in records if row['name'] == package), '0.3.11')
+            desktop = root / 'desktop/src-tauri/Cargo.toml'
+            desktop.write_text(desktop.read_text().replace('version = "0.3.11"', 'version = "0.3.0"', 1))
+            with self.assertRaisesRegex(ValueError, 'Release versions differ'):
+                release_version.check_versions(root, '0.3.11')
 
     def test_split_package_restores_exact_bytes_and_refuses_corruption(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Guerrilla Worker",
-  "version": "0.3.0",
+  "version": "0.3.4",
   "identifier": "dad.guerrilla.worker",
   "build": {
     "beforeDevCommand": "bun run dev",
@@ -10,7 +10,17 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{ "label": "main", "title": "Guerrilla Worker", "width": 820, "height": 620, "minWidth": 660, "minHeight": 480, "visible": false }],
+    "windows": [
+      {
+        "label": "main",
+        "title": "Guerrilla Worker",
+        "width": 820,
+        "height": 620,
+        "minWidth": 660,
+        "minHeight": 480,
+        "visible": false
+      }
+    ],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data:; connect-src ipc: http://ipc.localhost"
     }
@@ -20,7 +30,16 @@
     "targets": "all",
     "category": "DeveloperTool",
     "shortDescription": "Guerrilla GPU worker management",
-    "macOS": { "minimumSystemVersion": "14.0", "signingIdentity": "-" },
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
+    "macOS": {
+      "minimumSystemVersion": "14.0",
+      "signingIdentity": "-"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
   }
 }

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { ENGINES, PROTOCOL_VERSION, type Engine, type Registration } from '@guerrilla/worker-protocol';
 import { gpuInventory } from './gpu';
+import packageInfo from '../package.json';
 
 type PreflightReport = {
   backends?: Partial<Record<Engine, { available: boolean; runtimeVersions?: Record<string, string> }>>;
@@ -18,11 +19,20 @@ export function registrationFromReport(report: PreflightReport): Registration {
     engines[engine] = createHash('sha256').update(versions).digest('hex');
   }
   return {
-    protocolVersion: PROTOCOL_VERSION,
-    build: '0.2.0',
-    runtime: `${process.platform}-${process.arch}`,
+    ...enrollmentIdentity(),
     engines,
     gpus: gpuInventory(report),
     healthy: Object.keys(engines).length > 0,
+  };
+}
+
+export function enrollmentIdentity(): Registration {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    build: packageInfo.version,
+    runtime: `${process.platform}-${process.arch}`,
+    engines: {},
+    gpus: [],
+    healthy: false,
   };
 }

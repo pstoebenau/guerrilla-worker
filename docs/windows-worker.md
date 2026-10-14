@@ -27,8 +27,10 @@ opening the GUI after installation is optional and initially unchecked.
    25 GiB free; your GPU drivers come from your existing installation. Run **Save and check
    dependencies** and resolve reported hardware or engine compatibility issues.
 3. Paste an enrollment token from the server's Workers page and choose **Enroll
-   and start**. Tokens travel through stdin, never through command arguments or
-   saved settings. Jobs and training settings are assigned by the server.
+   worker**. You can enroll before setting up engines or GPU dependencies; the
+   worker stays stopped. Tokens travel through stdin, never through command
+   arguments or saved settings. Once dependencies pass, choose **Start worker**
+   in Overview. Jobs and training settings are assigned by the server.
 4. Closing the window keeps the tray and background worker running. Quitting the
    interface also leaves the worker running. **Stop worker** shuts execution down
    and retains verified checkpoints. **Finish job, then pause** finishes the

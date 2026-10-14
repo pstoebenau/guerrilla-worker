@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use guerrilla_worker::{daemon, profile::ContextPaths, protocol::redact};
+use guerrilla_worker::{
+    daemon, enrollment::EnrollmentError, profile::ContextPaths, protocol::redact,
+};
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
@@ -34,10 +36,11 @@ enum Command {
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
-        eprintln!(
-            "{}",
-            serde_json::json!({"error":redact(&error.to_string())})
-        );
+        let mut report = serde_json::json!({"error":redact(&error.to_string())});
+        if let Some(EnrollmentError(code)) = error.downcast_ref::<EnrollmentError>() {
+            report["errorCode"] = (*code).into();
+        }
+        eprintln!("{}", report);
         std::process::exit(1);
     }
 }

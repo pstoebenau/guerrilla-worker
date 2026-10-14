@@ -23,8 +23,10 @@ survive app updates/uninstall. GPU drivers and engine installations are supplied
 by the owner. Desktop build and setup commands do not build or download engines.
 The Linux Docker image has a separate, fully bundled engine policy described below.
 
-Open **Guerrilla Worker**, check dependencies, create an enrollment token on your
-server's Workers page, and enroll in Setup. The main window shows actual worker
+Open **Guerrilla Worker**, create an enrollment token on your server's Workers
+page, and enroll in Setup. Enrollment saves credentials and leaves the worker
+stopped; configure engines and check dependencies before choosing **Start worker**.
+The main window shows actual worker
 state, GPU/engine availability, current job progress, and bounded logs. It manages
 server-assigned work only; it has no local scan creation flow.
 
@@ -84,10 +86,10 @@ it does not install engines. Then use the management CLI:
 
 ```sh
 bun scripts/setup.ts
+WORKER_CONTROL_URL=https://guerrilla.dad bun scripts/worker.ts enroll --token-stdin
 # Windows/Linux NVIDIA dependencies (one-time verified download):
 bun scripts/worker.ts setup-runtime
 bun scripts/worker.ts preflight
-WORKER_CONTROL_URL=https://guerrilla.dad bun scripts/worker.ts enroll --token-stdin
 bun scripts/worker.ts run
 ```
 
@@ -131,7 +133,7 @@ using a persistent credential/state directory; paste the token into stdin and
 press Enter:
 
 ```sh
-docker run --rm -i --gpus device=GPU_UUID \
+docker run --rm -i \
   -v /host/worker-state:/state \
   -e WORKER_CREDENTIAL_FILE=/state/credentials.json \
   -e WORKER_CONTROL_URL=https://guerrilla.dad \
@@ -151,8 +153,9 @@ docker run --rm --gpus device=GPU_UUID \
   guerrilla-worker:local run
 ```
 
-Use the same server URL for enrollment and execution. Enrollment also performs
-GPU preflight, so expose the same single GPU in both commands. Make these host
+Use the same server URL for enrollment and execution. Enrollment does not run
+engine or GPU checks. Execution requires a passing preflight with one usable GPU.
+Make these host
 directories writable by the container's worker account. Share the
 same host `/gpu` bind directory across all workers/worktrees using a GPU; separate
 container volumes cannot provide host exclusion. Both supervisor and pipeline

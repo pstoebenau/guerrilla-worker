@@ -1,5 +1,12 @@
 # Worker protocol 2
 
+Enrollment exchanges a one-time token for a worker identity and credential. Its
+initial registration may have empty engines and GPUs with `healthy: false`;
+engine discovery and dependency checks are not enrollment prerequisites.
+Workers send verified capabilities when polling for jobs. Managed cloud
+enrollment checks the expected worker build and platform; polling additionally
+requires the expected engine identity before work can be assigned.
+
 Licensed under MIT; see [LICENSE](LICENSE). The worker application is separately GPL-3.0-only.
 
 Outbound JSON over HTTPS under `/api/worker/`. Only enrollment is unauthenticated;

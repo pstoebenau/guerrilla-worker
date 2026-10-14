@@ -1,3 +1,4 @@
+mod enrollment;
 mod profile;
 mod updates;
 
@@ -207,9 +208,9 @@ async fn cli(state: &DesktopState, action: &str, token: Option<String>) -> Resul
         return Err("Worker command returned too much output".into());
     }
     if !output.status.success() {
-        // Enrollment errors never echo process output: third-party errors can include tokens.
+        // Only allowlisted error codes are displayed; process output can contain tokens.
         if action == "enroll" {
-            return Err("Enrollment failed. Check the server address, token and dependency check, then try again.".into());
+            return Err(enrollment::failure(&output.stderr, &output.status));
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(if stderr.trim().is_empty() {
@@ -367,7 +368,12 @@ async fn save_profile(
 async fn enroll_worker(
     state: tauri::State<'_, DesktopState>,
     token: String,
+    control_url: String,
 ) -> Result<Value, String> {
+    enroll(&state, token, control_url).await
+}
+
+async fn enroll(state: &DesktopState, token: String, control_url: String) -> Result<Value, String> {
     let _guard = state.gate.lock().await;
     if state.quitting.load(Ordering::SeqCst) {
         return Err("Worker is quitting.".into());
@@ -375,9 +381,15 @@ async fn enroll_worker(
     if token.trim().is_empty() || token.len() > 4096 {
         return Err("Paste an enrollment token from the server's Workers page.".into());
     }
-    cli(&state, "enroll", Some(token.trim().to_owned())).await?;
-    cli(&state, "start", None).await?;
-    cli(&state, "status", None).await
+    if profile::bound_server(&state.directory)?.is_some() {
+        return Err("Worker already enrolled; disconnect before enrolling again.".into());
+    }
+    let mut p = read_profile(state)?;
+    p.control_url = profile::normalize_server(&control_url)?;
+    // Only enrollment settings are saved here. Engine paths, scratch storage,
+    // and login startup are validated separately when saving worker settings.
+    profile::atomic_save(&state.directory.join("config.json"), &p)?;
+    cli(state, "enroll", Some(token.trim().to_owned())).await
 }
 
 async fn action(state: &DesktopState, action: &str) -> Result<Value, String> {
@@ -790,7 +802,9 @@ mod integration_tests {
             gate: Mutex::new(()),
             quitting: AtomicBool::new(false),
         };
-        let profile = read_profile(&state).unwrap();
+        let mut profile = read_profile(&state).unwrap();
+        profile.control_url = "http://127.0.0.1:9".into();
+        profile.spirula_path = "/missing-engine".into();
         profile::atomic_save(&directory.join("config.json"), &profile).unwrap();
         tauri::async_runtime::block_on(async {
             let status = cli(&state, "status", None).await.unwrap();
@@ -814,6 +828,69 @@ mod integration_tests {
             assert!(failure.contains("Enrollment failed"));
             assert!(!failure.contains("private-enrollment-token"));
             assert!(!directory.join("credentials.json").exists());
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let origin = format!("http://{}", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let mut bytes = vec![];
+                let mut buffer = [0u8; 4096];
+                let (header_end, size) = loop {
+                    let count = socket.read(&mut buffer).unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&buffer[..count]);
+                    if let Some(index) = bytes.windows(4).position(|block| block == b"\r\n\r\n") {
+                        let header_end = index + 4;
+                        let header = String::from_utf8_lossy(&bytes[..header_end]);
+                        assert!(header.starts_with("POST /api/worker/enroll "));
+                        let size: usize = header
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length: ")
+                                    .map(|size| size.parse().unwrap())
+                            })
+                            .unwrap();
+                        break (header_end, size);
+                    }
+                };
+                while bytes.len() < header_end + size {
+                    let count = socket.read(&mut buffer).unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&buffer[..count]);
+                }
+                let request: Value =
+                    serde_json::from_slice(&bytes[header_end..header_end + size]).unwrap();
+                let body = r#"{"workerId":"enrolled-worker","credential":"fixture-credential"}"#;
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                request
+            });
+            // The desktop enrolls even with invalid engine paths and no runtime,
+            // saves only the server setting, and never starts a worker process.
+            let enrolled = enroll(&state, "private-enrollment-token".into(), origin)
+                .await
+                .unwrap();
+            assert_eq!(enrolled["workerId"], "enrolled-worker");
+            assert_eq!(enrolled["state"], "stopped");
+            assert_eq!(enrolled["running"], false);
+            let request = server.join().unwrap();
+            assert_eq!(request["registration"]["healthy"], false);
+            assert_eq!(request["registration"]["engines"], json!({}));
+            assert_eq!(request["registration"]["gpus"], json!([]));
+            assert!(directory.join("credentials.json").exists());
+            assert!(
+                enroll(
+                    &state,
+                    "unused-token".into(),
+                    "https://other-server.example".into()
+                )
+                .await
+                .unwrap_err()
+                .contains("already enrolled")
+            );
         });
         std::fs::remove_dir_all(directory).unwrap();
     }

@@ -9,7 +9,12 @@ complete the current assignment before stopping.
 
 The desktop distribution supplies Python, Node, FFmpeg, and the export converter.
 LichtFeld and Spirula must be installed by the user. The app detects their
-existing installations and supports manual executable selection. Desktop builds
+existing installations, including Spirula installed by Guerrilla's CLI setup under
+`~/.local/share/guerrilla-worker/runtimes`, and supports manual executable selection.
+Enrollment only requires the server address and a valid enrollment token, and
+leaves the worker stopped. Starting the worker requires a passing engine
+dependency check that reports one usable GPU; macOS workers use Spirula.
+Desktop builds
 do not build, download, or bundle engines. The separate
 [Linux Docker image](../README.md#linux-docker-image) includes both engines, the
 densification plugin, and models without host engine installations.

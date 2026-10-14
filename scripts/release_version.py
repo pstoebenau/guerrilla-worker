@@ -5,8 +5,25 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def check_versions(root, expected=None):
+    expected = expected or json.loads((root / 'package.json').read_text())['version']
+    numeric_version(expected)
+    versions = {relative: json.loads((root / relative).read_text())['version']
+                for relative in ('package.json', 'desktop/package.json', 'desktop/src-tauri/tauri.conf.json')}
+    for relative in ('rust/worker/Cargo.toml', 'desktop/src-tauri/Cargo.toml'):
+        versions[relative] = tomllib.loads((root / relative).read_text())['package']['version']
+    for relative, name in (('Cargo.lock', 'guerrilla-worker'), ('desktop/src-tauri/Cargo.lock', 'guerrilla-worker-desktop')):
+        packages = tomllib.loads((root / relative).read_text())['package']
+        versions[relative] = next(package['version'] for package in packages if package['name'] == name)
+    mismatches = {file: version for file, version in versions.items() if version != expected}
+    if mismatches:
+        raise ValueError(f'Release versions differ from {expected}: {mismatches}. Run scripts/release_version.py apply --version {expected}')
+    return expected
 
 
 def numeric_version(value):
@@ -57,11 +74,15 @@ def apply_version(root, version):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('select', 'apply'))
+    parser.add_argument('command', choices=('select', 'apply', 'check'))
     parser.add_argument('--version')
     args = parser.parse_args()
     if args.command == 'apply':
         apply_version(ROOT, args.version)
+        check_versions(ROOT, args.version)
+        return
+    if args.command == 'check':
+        print(f'All worker and desktop versions match {check_versions(ROOT, args.version)}')
         return
     releases = json.loads(subprocess.check_output([
         'gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/releases', '--paginate', '--slurp'

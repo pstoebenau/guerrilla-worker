@@ -1,7 +1,11 @@
 import { expect, test } from 'bun:test';
-import { registrationFromReport } from '../agent/registration';
+import { enrollmentIdentity, registrationFromReport } from '../agent/registration';
 
 const gpus = [{ id: 'gpu-test', name: 'Test hardware', memoryBytes: 1024 }];
+
+test('enrollment identity does not claim GPU or engine readiness', () => {
+  expect(enrollmentIdentity()).toMatchObject({ protocolVersion: 2, engines: {}, gpus: [], healthy: false });
+});
 
 test('upgrading one engine preserves the other engine registration identity', () => {
   const before = registrationFromReport({ gpus, backends: {

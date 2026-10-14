@@ -696,6 +696,99 @@ print(json.dumps({'gpus':[{'id':'fixture-GPU','name':'Fixture GPU','memoryBytes'
     assert!(gui.get("protocolVersion").is_none());
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enrollment_without_engines_or_pipeline_saves_credentials_and_stays_stopped() {
+    let (url, requests, task) = server(|_, _| {
+        (
+            200,
+            br#"{"workerId":"enrolled-worker","credential":"fixture-credential"}"#.to_vec(),
+        )
+    })
+    .await;
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("profile.json");
+    std::fs::write(&config, serde_json::to_vec(&json!({"controlUrl":url,"spirulaPath":"/missing-engine","scratchDirectory":temp.path().join("scratch")})).unwrap()).unwrap();
+    let paths = ContextPaths::load(config).unwrap();
+    let missing_pipeline = temp.path().join("absent-pipeline");
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_guerrilla-worker"))
+        .args([
+            "--config",
+            paths.config.to_str().unwrap(),
+            "enroll",
+            "--token-stdin",
+        ])
+        .env_remove("WORKER_ENROLLMENT_TOKEN")
+        .env("WORKER_PIPELINE_BIN", &missing_pipeline)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"private-enrollment-token\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("private-enrollment-token"));
+    let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(status["state"], "stopped");
+    assert_eq!(status["running"], false);
+    assert_eq!(status["workerId"], "enrolled-worker");
+    assert!(paths.credential_path().exists());
+    let registration = requests.lock().unwrap()[0].1["registration"].clone();
+    assert_eq!(registration["healthy"], false);
+    assert_eq!(registration["gpus"], json!([]));
+    assert_eq!(registration["engines"], json!({}));
+    assert_eq!(registration["build"], env!("CARGO_PKG_VERSION"));
+    // Starting still needs engine/GPU readiness; enrollment cannot claim work.
+    let mut paths = paths;
+    paths.pipeline = temp.path().join("absent-pipeline");
+    assert!(daemon::run(paths.clone()).await.is_err());
+    assert_eq!(daemon::status(&paths).unwrap().state, "error");
+    assert!(paths.credential_path().exists());
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    task.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enrollment_preserves_authentication_failures_as_safe_codes() {
+    let (url, requests, task) =
+        server(|_, _| (401, br#"{"error":"private-enrollment-token"}"#.to_vec())).await;
+    let temp = tempfile::tempdir().unwrap();
+    let mut paths = pipeline_fixture(
+        &temp,
+        r#"
+import json
+print(json.dumps({'gpus':[{'id':'fixture-GPU','name':'Fixture GPU','memoryBytes':1024}],'backends':{'spirula':{'available':True,'runtimeVersions':{'fixture':'1'}}}}))
+"#,
+    );
+    paths.profile.control_url = url;
+    let error = daemon::enroll(&paths, "private-enrollment-token")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error
+            .downcast_ref::<guerrilla_worker::enrollment::EnrollmentError>()
+            .unwrap()
+            .0,
+        "invalid_token"
+    );
+    assert!(!error.to_string().contains("private-enrollment-token"));
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    assert!(!paths.credential_path().exists());
+    task.abort();
+}
+
 #[test]
 fn pipeline_commands_explicitly_isolate_python_and_node_import_overrides() {
     let temp = tempfile::tempdir().unwrap();

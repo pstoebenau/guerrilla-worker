@@ -16,7 +16,7 @@ import { archiveFile } from './archive';
 import { BackgroundArchive } from './background-archive';
 import { agentLockPath } from './paths';
 import { readEnrollmentToken } from './enrollment';
-import { registrationFromReport } from './registration';
+import { enrollmentIdentity, registrationFromReport } from './registration';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const pipelineRoot = process.env.PIPELINE_ROOT ?? (process.platform === 'linux' && root === '/opt' ? '/opt/pipeline' : path.join(root,'pipeline'));
@@ -174,9 +174,7 @@ export async function main(shutdown = new AbortController()) {
   const enrollmentToken = process.env.WORKER_ENROLLMENT_TOKEN;
   delete process.env.WORKER_ENROLLMENT_TOKEN;
   const explicitEnrollment = process.argv.includes('enroll');
-  if (explicitEnrollment) console.error('Checking worker GPU and engine dependencies...');
-  const info = registration();
-  if (process.argv.includes('--preflight')) { console.log(JSON.stringify(info)); return; }
+  if (process.argv.includes('--preflight')) { console.log(JSON.stringify(registration())); return; }
   let credentialExists = true;
   try {await readFile(credentialFile);} catch(error) {if((error as NodeJS.ErrnoException).code==='ENOENT')credentialExists=false;else throw error;}
   if (explicitEnrollment || !credentialExists && enrollmentToken) {
@@ -190,12 +188,13 @@ export async function main(shutdown = new AbortController()) {
     }
     if (!token) throw new Error('Run enroll --token-stdin and paste a token from Workers.');
     console.error('Enrolling worker with the server...');
-    const enrolled = await new Client(origin,'').post<EnrollmentResponse>('enroll',{token,registration:info});
+    const enrolled = await new Client(origin,'').post<EnrollmentResponse>('enroll',{token,registration:enrollmentIdentity()});
     await mkdir(path.dirname(credentialFile),{recursive:true,mode:0o700});
     await writeFile(credentialFile,JSON.stringify({origin,...enrolled}),{flag:'wx',mode:0o600});
     await chmod(credentialFile,0o600); delete process.env.WORKER_ENROLLMENT_TOKEN;
     console.log('Worker enrolled; credential saved outside checkout.'); if(explicitEnrollment)return;
   }
+  const info = registration();
   process.once('SIGINT',()=>shutdown.abort()); process.once('SIGTERM',()=>shutdown.abort());
   process.on('message',message=> {if (message === 'local-shutdown' || (message as {type?:string})?.type === 'local-shutdown') shutdown.abort();});
   shutdown.signal.addEventListener('abort',()=> {if(process.connected) process.disconnect?.();},{once:true});

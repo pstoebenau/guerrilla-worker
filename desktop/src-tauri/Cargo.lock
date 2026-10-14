@@ -1470,7 +1470,7 @@ dependencies = [
 
 [[package]]
 name = "guerrilla-worker-desktop"
-version = "0.3.0"
+version = "0.3.4"
 dependencies = [
  "guerrilla-runtime",
  "reqwest 0.12.28",

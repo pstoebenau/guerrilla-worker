@@ -264,6 +264,29 @@ pub fn validate_paths(profile: &Profile) -> Result<(), String> {
     Ok(())
 }
 
+fn installed_spirula_candidates(home: &Path) -> Vec<PathBuf> {
+    let mut candidates = vec![home.join("Applications/Spirula Studio.app/Contents/MacOS/spirula")];
+    // The CLI setup installs official engines here rather than in /Applications.
+    let mut runtimes: Vec<PathBuf> =
+        fs::read_dir(home.join(".local/share/guerrilla-worker/runtimes"))
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("spirula-"))
+            .map(|entry| entry.path())
+            .collect();
+    runtimes.sort();
+    for runtime in runtimes.into_iter().rev() {
+        candidates.push(runtime.join("Spirula Studio.app/Contents/MacOS/spirula"));
+        candidates.push(runtime.join(if cfg!(windows) {
+            "spirula.exe"
+        } else {
+            "spirula"
+        }));
+    }
+    candidates
+}
+
 pub fn detect_engines(profile: &mut Profile) {
     fn first(value: &mut String, candidates: Vec<PathBuf>) {
         if value.is_empty()
@@ -287,6 +310,7 @@ pub fn detect_engines(profile: &mut Profile) {
         lichtfeld.push(path.join("Programs/LichtFeld Studio/bin/LichtFeld-Studio.exe"));
     }
     if let Some(home) = &home {
+        spirula.extend(installed_spirula_candidates(home));
         lichtfeld.extend([
             home.join("Applications/LichtFeld Studio.app/Contents/MacOS/LichtFeld-Studio"),
             home.join(".local/bin/LichtFeld-Studio"),
@@ -321,6 +345,21 @@ pub fn detect_engines(profile: &mut Profile) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn detects_cli_installed_spirula_without_a_shell_path() {
+        let home = std::env::temp_dir().join(format!(
+            "guerrilla-spirula-detection-{}",
+            std::process::id()
+        ));
+        let binary = home.join(".local/share/guerrilla-worker/runtimes/spirula-2026.9.30/Spirula Studio.app/Contents/MacOS/spirula");
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        fs::write(&binary, "engine fixture").unwrap();
+        let detected = installed_spirula_candidates(&home)
+            .into_iter()
+            .find(|path| path.is_file());
+        assert_eq!(detected, Some(binary));
+        fs::remove_dir_all(home).unwrap();
+    }
     #[test]
     fn isolated_data_directory_rejects_relative_root_and_parent_traversal() {
         for path in ["", "relative/worker", "/", "/tmp/..", "/tmp/../worker"] {
