@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -56,7 +57,8 @@ class ReleaseAutomationTests(unittest.TestCase):
             manifest = destination / (source.name + '.parts.json')
             restored = reassemble_release.reassemble(manifest)
             self.assertEqual(restored.read_bytes(), payload)
-            self.assertTrue(restored.stat().st_mode & 0o111)
+            if os.name != 'nt':
+                self.assertTrue(restored.stat().st_mode & 0o111)
             with self.assertRaisesRegex(ValueError, 'overwrite'):
                 reassemble_release.reassemble(manifest)
             restored.unlink()

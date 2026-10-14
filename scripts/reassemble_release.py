@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 
 
@@ -31,7 +32,7 @@ def reassemble(manifest):
             if output.tell() != package['file']['size'] or whole.hexdigest() != package['file']['sha256']:
                 raise ValueError('Reassembled package checksum differs')
         temporary.rename(target)
-        if target.suffix == '.AppImage':
+        if target.suffix == '.AppImage' and os.name != 'nt':
             target.chmod(target.stat().st_mode | 0o111)
         print(f'Checksum verified: {target}')
         return target
