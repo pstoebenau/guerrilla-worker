@@ -5,7 +5,8 @@
 Desktop runtime assets and package jobs cover Windows x64, Linux x64, and macOS
 14 or later on Apple Silicon and Intel. CI runs checks on Windows Server 2022,
 Ubuntu 24.04, and macOS 15 on both architectures. The desktop package workflow
-builds four distributions with the same app and protocol.
+builds four distributions with the same app and protocol and publishes them in
+one GitHub Release after every push to `main` succeeds on all platforms.
 
 GPU job support depends on the engine and hardware. Windows/Linux workers require
 compatible installed engines and GPU drivers; LichtFeld requires NVIDIA CUDA.

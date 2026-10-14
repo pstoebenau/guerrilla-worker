@@ -32,8 +32,8 @@ and shared GPU lock directories are mounted; see [build and run examples](../REA
 GPU preflight and complete scan/resume validation remain necessary on the target
 hardware. A source/CPU build does not establish GPU acceptance.
 
-The checks workflow does not build LichtFeld or download Spirula; its optional
-**desktop** packages are uploaded as CI artifacts. Existing license,
+The release workflow does not build LichtFeld or download Spirula. It builds
+**desktop** packages and publishes them together in one GitHub Release. Existing license,
 dependency-source, and model-term review remains applicable before public
 distribution, including the engines bundled into Docker. See
 [cross-platform architecture](cross-platform-worker.md).
@@ -41,72 +41,63 @@ distribution, including the engines bundled into Docker. See
 ## Desktop release
 
 The cross-platform workflow is `.github/workflows/worker.yml`, displayed as
-**Worker checks and desktop packages**. Pushes to `main` run checks only.
-To build desktop distributions, select **Run workflow** on `main` and enable
-`packages`, or run from this repository:
+**Build and release worker**. Every push to `main` checks and builds Windows x64,
+Linux x64, macOS Apple Silicon and macOS Intel, then automatically publishes all
+four into **one** stable GitHub Release. No manual publication step or Windows-only
+release path is required. Manual dispatch on `main` uses the same complete matrix:
 
 ```sh
-gh workflow run worker.yml --ref main -f packages=true
-gh run list --workflow worker.yml --branch main --event workflow_dispatch --limit 1
+gh workflow run worker.yml --ref main
 ```
 
-For Windows-only checks and packaging, add `-f windows_only=true` to the dispatch command.
-Push-triggered checks and manual package runs have separate concurrency groups, so
-pushing a fix does not cancel an active package run.
+The workflow selects a shared numeric version before packaging. It uses the
+version in `package.json` as a minimum, then increments the latest cross-platform
+release's patch version when necessary. CI applies that version to both desktop
+manifests, the worker/desktop Cargo packages and their lockfiles without creating
+an extra commit or push. Reruns reuse a release already allocated to the same
+commit. Bump the source version to start a new minor or major series.
 
-Use the returned run ID for `gh run watch RUN_ID --exit-status`. Once it passes,
-download its Windows x64, Linux x64, and macOS Apple Silicon/Intel artifacts:
+Runs on `main` are serialized so version allocation and publication do not race.
+A release job waits for **every** native package job, verifies matching versions,
+commits and SHA-256 inventories, then creates a draft, uploads every asset,
+verifies the completed uploads and publishes it as Latest. A failed platform or
+upload leaves the previous public release intact. Rerun failed jobs after a
+transient failure; push a fix for code/build failures.
+
+Formats are Windows setup plus all `.bin` payload slices, Linux AppImage/DEB/RPM,
+and macOS DMG and `.app.tar.gz` for both architectures. Linux RPM creation uses
+system `rpmbuild` to stream the same filesystem Tauri prepares for the DEB;
+this avoids keeping the full CUDA runtime in the Tauri RPM builder's memory.
+Linux native builds need `rpm` alongside Tauri's normal system dependencies.
+
+GitHub requires each release asset to be under 2 GiB. Windows installer slices
+already meet that limit. Other oversized packages are split into files of at
+most 2,000,000,000 bytes. Download **every** matching `.partNNN` file, its
+`.parts.json` manifest and `reassemble_release.py` into one directory, then run:
 
 ```sh
-gh run download RUN_ID --dir dist/release
+python3 reassemble_release.py "PACKAGE.parts.json"
 ```
+
+The helper verifies each part and the restored file, refuses to overwrite an
+existing package, and marks restored AppImages executable. Install the restored
+DEB/RPM/DMG or run the AppImage normally. Windows setup data slices are consumed
+directly by Inno Setup and do not use this helper.
+
+The release includes a global `SHA256SUMS.txt`, platform runtime manifests/notices,
+the original-code license, third-party notices and the tagged worker source.
+Apply the release version with `scripts/release_version.py` when reproducing a
+build from the source archive. Engine installations and Docker images remain
+separate from desktop publication. The app's manual update notice recognizes
+both complete native packages and split-package manifests from stable releases.
 
 Windows and Linux package runners require at least 70 GiB free; macOS requires
-12 GiB. Use `windows_package_runner`, `linux_package_runner`,
-`macos_package_runner`, and `macos_intel_package_runner` to choose larger or
-dedicated runner labels when needed.
-Each label must select the correct OS with its native build tools. The Windows
-installer smoke test also requires a fresh worker account. macOS packages have
-separate Apple Silicon (`macos-15`) and Intel (`macos-15-intel`) jobs.
-
-Package builds upload Actions artifacts, not GitHub Releases. Artifacts expire
-after 14 days. To publish them:
-
-1. Choose a version and commit it on `main` before dispatching the package build.
-   Keep `package.json`, `desktop/package.json`, `desktop/src-tauri/tauri.conf.json`,
-   and `desktop/src-tauri/Cargo.toml` in sync, and refresh the desktop Cargo lockfile.
-2. Create one cross-platform release tag, such as `v0.3.0`, targeting the exact
-   commit from the successful package run. A draft lets you upload and review all
-   packages before publishing:
-
-   ```sh
-   gh release create v0.3.0 --target BUILD_COMMIT_SHA --draft \
-     --title 'Guerrilla Worker 0.3.0' --generate-notes
-   gh release upload v0.3.0 /absolute/path/to/package /absolute/path/to/checksums
-   ```
-
-3. Upload the platform packages and their checksums, notices, and matching source
-   evidence. Upload every Windows `.bin` payload slice with its setup executable;
-   a setup executable alone is incomplete. Repeat the upload command for the
-   remaining assets. GitHub provides worker source archives for the release tag;
-   preserve the bundled dependencies' corresponding source and notices too.
-4. Review the assets and release notes, then publish:
-
-   ```sh
-   gh release edit v0.3.0 --draft=false --latest
-   ```
-
-GitHub limits each release asset to [under 2 GiB](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases).
-The Windows installer already spans files below this limit. Check Linux/macOS
-package sizes before uploading; oversized packages need another download host or
-split files with reassembly instructions. The desktop update notice currently
-recognizes complete `.AppImage`, `.deb`, `.rpm`, `.dmg`, `.app.tar.gz`, and Windows
-installer assets, not split-only packages or external download links.
-
-The app's update notice requires a published stable release with a higher version
-and a desktop asset matching the user's OS and architecture. Drafts, prereleases,
-Actions artifacts, and source-only releases do not trigger it. Installation is
-manual. Docker image publication remains separate from desktop releases.
+12 GiB. Manual dispatch accepts `windows_package_runner`, `linux_package_runner`,
+`macos_package_runner`, and `macos_intel_package_runner` for larger or dedicated
+runner labels. Labels must select the correct OS/architecture and native tools.
+The Windows installer smoke test requires a fresh worker account. Package Actions
+artifacts remain available for 14 days as build evidence; GitHub Release assets
+provide the persistent downloads.
 
 ## What CI verifies
 
@@ -116,7 +107,7 @@ fail even when the binaries build successfully. Python checks cover helpers that
 Rust compilation does not validate. The Linux CPU image job checks the container
 build and its tests.
 
-The Windows installer smoke test runs only for manual package builds. It installs
+The Windows installer smoke test runs for every release build. It installs
 the distribution, checks bundled files, runs the installed worker's status and
 preflight commands, and uninstalls while verifying that the isolated profile and
 checkpoint survive. Installer compilation alone cannot establish those behaviors.

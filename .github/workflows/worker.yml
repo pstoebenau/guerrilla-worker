@@ -1,17 +1,9 @@
-name: Worker checks and desktop packages
+name: Build and release worker
 on:
   push:
     branches: [main]
   workflow_dispatch:
     inputs:
-      packages:
-        description: Build self-contained desktop packages (large CUDA dependencies on Windows/Linux)
-        type: boolean
-        default: false
-      windows_only:
-        description: Run only Windows checks and desktop packaging
-        type: boolean
-        default: false
       linux_package_runner:
         description: Linux package runner label (use a larger or dedicated self-hosted runner with 70 GiB free)
         type: string
@@ -31,16 +23,35 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: worker-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
-  cancel-in-progress: true
+  group: worker-release-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    name: Select shared release version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Select next stable version for this commit
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/release_version.py select
   checks:
     if: github.ref == 'refs/heads/main'
     name: Check ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.windows_only && '["windows-2022"]' || '["ubuntu-24.04","windows-2022","macos-15","macos-15-intel"]') }}
+        os: [ubuntu-24.04, windows-2022, macos-15, macos-15-intel]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -114,13 +125,13 @@ jobs:
         run: |
           cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
   packages:
-    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.packages
-    needs: checks
+    if: github.ref == 'refs/heads/main'
+    needs: [checks, prepare]
     name: Desktop package ${{ matrix.platform }}
     strategy:
       fail-fast: false
       matrix:
-        platform: ${{ fromJSON(inputs.windows_only && '["Windows x64"]' || '["Linux x64","Windows x64","macOS Apple Silicon","macOS Intel"]') }}
+        platform: [Linux x64, Windows x64, macOS Apple Silicon, macOS Intel]
     runs-on: >-
       ${{ matrix.platform == 'Windows x64' && (inputs.windows_package_runner || 'windows-2022') ||
           matrix.platform == 'Linux x64' && (inputs.linux_package_runner || 'ubuntu-24.04') ||
@@ -136,6 +147,13 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: 1.4.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Apply the shared release version
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: python scripts/release_version.py apply --version "$RELEASE_VERSION"
       - name: Free Linux runner space for complete GPU runtimes
         if: runner.os == 'Linux' && runner.environment == 'github-hosted'
         run: |
@@ -163,7 +181,7 @@ jobs:
           [IO.File]::AppendAllText($env:GITHUB_ENV, "WORKER_BUILD_CACHE=$runtimeCache`n", [Text.UTF8Encoding]::new($false))
       - name: Install Linux desktop build dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev patchelf
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev patchelf libfuse2 rpm
       - name: Install Rust
         run: |
           rustup toolchain install 1.99.0 --profile minimal
@@ -171,7 +189,7 @@ jobs:
       - name: Build desktop with vendored dependencies
         run: |
           bun install --frozen-lockfile
-          bun run build
+          bun run build --verbose
       - name: Smoke test Windows installer without enrollment or worker launch
         if: runner.os == 'Windows'
         shell: pwsh
@@ -286,14 +304,42 @@ jobs:
             foreach ($name in $trackedEnvironment) { [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process') }
             foreach ($log in @($installLog, $uninstallLog)) { if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 60 | Write-Host } }
           }
-      - name: Upload desktop packages
+      - name: Prepare complete release assets and checksums
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_PLATFORM: ${{ runner.os }}-${{ runner.arch }}
+        run: python scripts/release_assets.py --bundle desktop/src-tauri/target/release/bundle --destination "$RUNNER_TEMP/release-assets" --platform "$RELEASE_PLATFORM" --version "$RELEASE_VERSION"
+      - name: Upload desktop packages for the combined release
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: guerrilla-worker-${{ runner.os }}-${{ runner.arch }}
-          path: desktop/src-tauri/target/release/bundle/
+          path: ${{ runner.temp }}/release-assets/
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
-# Desktop engine binaries are owner-installed. This desktop/check workflow neither
-# builds LichtFeld nor downloads Spirula, and publishes no releases or registry images.
-# The separate build:docker helper bundles engines into the local Linux image.
+  release:
+    name: Publish one release containing every OS
+    needs: [prepare, packages]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Download all four native package artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: guerrilla-worker-*
+          path: dist/release-artifacts
+      - name: Verify every platform, upload all assets, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: python scripts/publish_release.py --artifacts dist/release-artifacts --destination dist/release --version "$RELEASE_VERSION"
+# Engine binaries remain owner-installed. Releases contain desktop packages and
+# their bundled supporting runtimes; Docker images are built separately.

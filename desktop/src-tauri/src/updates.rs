@@ -34,6 +34,8 @@ fn release_version(tag: &str, platform: &str) -> Option<Version> {
 
 fn desktop_asset(name: &str, platform: &str, arch: &str) -> bool {
     let name = name.to_ascii_lowercase().replace([' ', '_'], "-");
+    // Published large packages include a checksummed reassembly manifest.
+    let name = name.strip_suffix(".parts.json").unwrap_or(&name);
     if !name.starts_with("guerrilla-worker") {
         return false;
     }
@@ -187,12 +189,23 @@ mod tests {
             "Guerrilla Worker_0.3.1_amd64.AppImage",
             "Guerrilla Worker_0.3.1_amd64.deb",
             "Guerrilla Worker-0.3.1-1.x86_64.rpm",
+            "Guerrilla Worker_0.3.1_amd64.AppImage.parts.json",
         ] {
             assert!(desktop_asset(name, "linux", "x86_64"));
         }
         assert!(desktop_asset(
             "Guerrilla Worker.app.tar.gz",
             "macos",
+            "aarch64"
+        ));
+        assert!(!desktop_asset(
+            "Guerrilla Worker_0.3.1_amd64.AppImage.part001",
+            "linux",
+            "x86_64"
+        ));
+        assert!(!desktop_asset(
+            "Guerrilla Worker_0.3.1_amd64.AppImage.parts.json",
+            "linux",
             "aarch64"
         ));
         assert!(valid_release_url(&format!("{RELEASES_URL}windows-v0.3.1")));

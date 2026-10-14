@@ -66,12 +66,13 @@ and licensed Visual Studio/Build Tools with the x64 C++ tools installed.
 
 Use a build disk with at least 70 GiB free. CUDA/PyTorch dependencies can make
 GPU distributions about 20 GiB; download caches, staging, installer data, and
-installed-app smoke testing need additional copies. The optional package CI job
+installed-app smoke testing need additional copies. The package CI job
 checks capacity and requires a larger or self-hosted runner when standard hosted
 runner storage is insufficient. Runtime dependencies are never removed to make
 a package fit.
 
-When manually dispatching package CI, enable `packages` and use
+Every push to `main` builds all platforms and publishes one combined release.
+When manually dispatching release CI, use
 `linux_package_runner`, `windows_package_runner`, `macos_package_runner`, and
 `macos_intel_package_runner` to
 select suitable larger or dedicated self-hosted runner labels. Defaults use the

@@ -32,7 +32,12 @@ for (const file of await readdir(path.join(root, 'pipeline'))) {
 await run([process.execPath, 'install', '--frozen-lockfile'], app);
 await run([process.execPath, 'run', 'check'], app);
 const buildArguments = process.argv.slice(2);
-await run([process.execPath, 'run', 'tauri', 'build', '--config', 'src-tauri/tauri.bundle.conf.json', ...(process.platform === 'win32' && !buildArguments.includes('--no-bundle') ? ['--no-bundle'] : []), ...buildArguments], app, { ...process.env, CARGO_TARGET_DIR: path.join(tauri, 'target') });
+const nativeLinuxRpm = process.platform === 'linux' && !buildArguments.includes('--no-bundle') && !buildArguments.some(argument => argument === '--bundles' || argument.startsWith('--bundles='));
+await run([process.execPath, 'run', 'tauri', 'build', '--config', 'src-tauri/tauri.bundle.conf.json', ...(process.platform === 'win32' && !buildArguments.includes('--no-bundle') ? ['--no-bundle'] : []), ...(nativeLinuxRpm ? ['--bundles', 'deb,appimage'] : []), ...buildArguments], app, { ...process.env, CARGO_TARGET_DIR: path.join(tauri, 'target') });
+if (nativeLinuxRpm) {
+  const version = (JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')) as {version: string}).version;
+  await run(['python3', path.join(root, 'scripts/build_linux_rpm.py'), '--bundle', path.join(tauri, 'target/release/bundle'), '--version', version]);
+}
 if (process.platform === 'win32') {
   // CUDA bindings can exceed a single NSIS/MSI payload. Inno's spanned data
   // files package the complete native app without trimming runtime dependencies.

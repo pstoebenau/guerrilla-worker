@@ -184,18 +184,19 @@ bun --cwd desktop run build
 docker build --target test -t guerrilla-worker:test .
 ```
 
-The [worker workflow](.github/workflows/worker.yml) checks Windows x64, Linux x64,
-and macOS on Apple Silicon and Intel on each push to `main`.
-Native desktop packages are built by the manual
-`packages` workflow input and uploaded as artifacts. The workflow does not publish
-releases or bundle engines into desktop packages. The separate `build:docker`
+The [worker workflow](.github/workflows/worker.yml) checks and builds Windows x64,
+Linux x64, and macOS on Apple Silicon and Intel on each push to `main`, then
+automatically publishes all four builds into one GitHub Release. It allocates
+one shared stable version and publishes only after every platform succeeds.
+Desktop packages use owner-installed engines. The separate `build:docker`
 command bundles engines into the Linux image. CPU/mock checks are not GPU scan
 acceptance; validate complete engine workflows and resume on the target GPU before
 claiming a release's GPU acceptance.
 
-To build downloadable packages, open **Actions → Worker checks and desktop packages
-→ Run workflow**, select `main`, and enable `packages`. Publishing a GitHub Release
-is a separate step; see [release instructions](docs/release-process.md#desktop-release).
+Push to `main` to create a release. **Actions → Build and release worker → Run
+workflow** on `main` can also build and publish all platforms. See
+[release instructions](docs/release-process.md#desktop-release) for package formats
+and large-file reassembly.
 
 ## License
 
