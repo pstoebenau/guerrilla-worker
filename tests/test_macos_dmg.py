@@ -23,6 +23,11 @@ class MacDmgTests(unittest.TestCase):
             info = plistlib.loads(subprocess.check_output(['hdiutil', 'imageinfo', '-plist', str(output)]))
             self.assertEqual(info['Format'], 'UDZO')
             self.assertEqual(executable.read_text(), 'fixture bytes\n')
+            # A normal second build of the same version replaces only the
+            # generated image after the new image has passed verification.
+            executable.write_text('updated fixture bytes\n')
+            self.assertEqual(build_macos_dmg.build(bundle, '0.3.0'), output)
+            self.assertEqual(len(list(output.parent.glob('*.dmg'))), 1)
 
 
 if __name__ == '__main__':

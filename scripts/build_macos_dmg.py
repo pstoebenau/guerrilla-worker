@@ -19,8 +19,6 @@ def build(bundle, version):
     destination = (bundle / 'dmg').resolve()
     destination.mkdir(parents=True, exist_ok=True)
     output = destination / f'Guerrilla Worker_{version}_{architecture}.dmg'
-    if output.exists():
-        raise ValueError('DMG destination already exists')
     with tempfile.TemporaryDirectory(prefix='guerrilla-dmg-', dir=destination) as folder:
         temporary = Path(folder)
         staging = temporary / 'contents'
@@ -28,13 +26,15 @@ def build(bundle, version):
         subprocess.run(['ditto', str(apps[0].resolve()), str(staging / apps[0].name)], check=True)
         (staging / 'Applications').symlink_to('/Applications', target_is_directory=True)
         hybrid = temporary / 'filesystem.dmg'
+        compressed = temporary / output.name
         # makehybrid writes HFS+ directly. Neither command attaches an image,
         # avoiding hosted Intel Mac DiskArbitration detach timeouts.
         subprocess.run(['hdiutil', 'makehybrid', '-hfs', '-hfs-volume-name', 'Guerrilla Worker',
                         '-o', str(hybrid), str(staging)], check=True)
         subprocess.run(['hdiutil', 'convert', str(hybrid), '-format', 'UDZO',
-                        '-imagekey', 'zlib-level=6', '-o', str(output)], check=True)
-    subprocess.run(['hdiutil', 'verify', str(output)], check=True)
+                        '-imagekey', 'zlib-level=6', '-o', str(compressed)], check=True)
+        subprocess.run(['hdiutil', 'verify', str(compressed)], check=True)
+        compressed.replace(output)
     print(f'Native macOS DMG prepared: {output}')
     return output
 
