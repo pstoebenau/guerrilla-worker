@@ -1,9 +1,8 @@
 # Windows desktop worker
 
-Install Guerrilla Worker for Windows x64 from the prepared installer package.
-Keep the setup executable and **every matching `.bin` payload file** together in
-one folder, then run setup. CUDA, PyTorch, and reconstruction libraries make this
-a large package; splitting payloads avoids single-executable installer limits.
+Install Guerrilla Worker for Windows x64 by running the single setup executable.
+GPU libraries and reconstruction models are downloaded and verified from
+**Setup → GPU dependencies** after installation.
 No terminal, Python, Node, or separate WebView2 installation is required.
 
 The separate [Linux Docker image](../README.md#linux-docker-image) includes its
@@ -23,8 +22,9 @@ opening the GUI after installation is optional and initially unchecked.
    **Setup**, or browse to the existing engine executable. If using LichtFeld densification, select the
    installed plugin folder too.
 2. Choose your Guerrilla server and scratch folder. The app supplies its own
-   pinned Python, Node, FFmpeg, export converter, and integration dependencies;
-   your GPU drivers come from your existing installation. Run **Save and check
+   pinned Python, Node, FFmpeg, export converter, and base integration dependencies.
+   Use **Install GPU dependencies** once with internet access and at least
+   25 GiB free; your GPU drivers come from your existing installation. Run **Save and check
    dependencies** and resolve reported hardware or engine compatibility issues.
 3. Paste an enrollment token from the server's Workers page and choose **Enroll
    and start**. Tokens travel through stdin, never through command arguments or
@@ -64,12 +64,11 @@ its standard unsigned-app prompt. No release is automatically published.
 On a Windows x64 machine with the repository's pinned Bun and Rust toolchain,
 and licensed Visual Studio/Build Tools with the x64 C++ tools installed.
 
-Use a build disk with at least 70 GiB free. CUDA/PyTorch dependencies can make
-GPU distributions about 20 GiB; download caches, staging, installer data, and
-installed-app smoke testing need additional copies. The package CI job
-checks capacity and requires a larger or self-hosted runner when standard hosted
-runner storage is insufficient. Runtime dependencies are never removed to make
-a package fit.
+Use a build disk with at least 40 GiB free. The desktop installer contains the
+base runtime; CI separately downloads and installs the full GPU runtime to
+verify Setup and offline reuse. Those dependencies and their download caches
+need additional storage. The package job checks capacity and requires a larger
+or self-hosted runner when standard hosted runner storage is insufficient.
 
 Every push to `main` builds all platforms and publishes one combined release.
 When manually dispatching release CI, use
@@ -77,8 +76,8 @@ When manually dispatching release CI, use
 `macos_intel_package_runner` to
 select suitable larger or dedicated self-hosted runner labels. Defaults use the
 standard hosted labels; change them when their disks fail the capacity check.
-The smaller macOS base runtime needs 12 GiB free; Windows and Linux CUDA package
-jobs require 70 GiB.
+The smaller macOS base runtime needs 12 GiB free; Windows and Linux package
+jobs require 40 GiB for GPU setup verification.
 Custom labels must identify runners with the matching OS, native build tools,
 and a clean test account. Each native build job tests its compiled release and packaged integrations.
 
@@ -90,7 +89,7 @@ bun run build
 ```
 
 The prepared app is `dist/windows-app`. Installer artifacts are under
-`desktop/src-tauri/target/release/bundle/installer`: the setup executable, all payload slices, SHA-256 checksums,
+`desktop/src-tauri/target/release/bundle/installer`: one self-contained setup executable, SHA-256 checksums,
 and the embedded WebView2 payload's source/version/signature manifest.
 
 To package an already prepared, self-contained app folder:
@@ -106,7 +105,7 @@ executables, obtains and checks Microsoft's signed x64 standalone WebView2
 payload at build time, and uses the pinned, signature-verified Inno Setup 6.4.3
 compiler cache. A cached WebView2 installer remains the build's recorded payload;
 remove `%LOCALAPPDATA%\Guerrilla\build-tools\MicrosoftEdgeWebView2RuntimeInstallerX64.exe`
-to refresh it for a later build. All installer parts must travel together.
+to refresh it for a later build. The installer is one executable. GPU libraries/models are downloaded and verified from Setup after installation.
 
 The Windows build discovers the licensed x64 MSVC CRT/OpenMP redistributable
 through `VCToolsRedistDir` or `vswhere`, verifies Microsoft's signatures, and

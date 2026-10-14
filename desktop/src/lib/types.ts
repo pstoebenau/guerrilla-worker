@@ -33,6 +33,7 @@ export interface DesktopInfo {
   profileDirectory: string;
   enrolled: boolean;
   runtimeAvailable: boolean;
+  gpuRuntime: { supported: boolean; installed: boolean };
   version: string;
 }
 export interface AvailableUpdate { version: string; releaseUrl: string }

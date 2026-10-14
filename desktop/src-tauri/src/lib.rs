@@ -18,7 +18,10 @@ use tauri::{
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
-use tokio::{io::AsyncWriteExt, sync::Mutex};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    sync::Mutex,
+};
 
 struct DesktopState {
     directory: PathBuf,
@@ -34,6 +37,7 @@ struct DesktopInfo {
     profile_directory: String,
     enrolled: bool,
     runtime_available: bool,
+    gpu_runtime: guerrilla_runtime::SetupStatus,
     version: &'static str,
 }
 
@@ -42,12 +46,7 @@ fn read_profile(state: &DesktopState) -> Result<Profile, String> {
     let mut p = profile::load_profile(&path, &state.directory)?;
     let runtime = state.resources.join("runtime");
     // Runtime paths are supplied by the distribution, not a user Python environment.
-    p.python_path = runtime
-        .join(if cfg!(windows) {
-            "python/python.exe"
-        } else {
-            "python/bin/python3"
-        })
+    p.python_path = guerrilla_runtime::selected_python(&runtime, &state.directory)
         .to_string_lossy()
         .into_owned();
     p.node_path = runtime
@@ -86,11 +85,16 @@ fn info(state: &DesktopState) -> Result<DesktopInfo, String> {
         profile_directory: state.directory.to_string_lossy().into_owned(),
         enrolled: state.directory.join("credentials.json").exists(),
         runtime_available,
+        gpu_runtime: guerrilla_runtime::status(&state.resources.join("runtime"), &state.directory),
         version: env!("CARGO_PKG_VERSION"),
     })
 }
 
-async fn cli(state: &DesktopState, action: &str, token: Option<String>) -> Result<Value, String> {
+fn owned_command(
+    state: &DesktopState,
+    action: &str,
+    enrollment: bool,
+) -> Result<tokio::process::Command, String> {
     if !state.worker.is_file() {
         return Err("The bundled worker executable is missing. Reinstall Guerrilla Worker or prepare desktop resources for development.".into());
     }
@@ -152,7 +156,7 @@ async fn cli(state: &DesktopState, action: &str, token: Option<String>) -> Resul
                     .replacen("guerrilla-worker", "guerrilla-pipeline", 1),
             ),
         )
-        .stdin(if token.is_some() {
+        .stdin(if enrollment {
             Stdio::piped()
         } else {
             Stdio::null()
@@ -162,9 +166,14 @@ async fn cli(state: &DesktopState, action: &str, token: Option<String>) -> Resul
         .kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(0x08000000); // CREATE_NO_WINDOW for management calls
-    if token.is_some() {
+    if enrollment {
         command.arg("--token-stdin");
     }
+    Ok(command)
+}
+
+async fn cli(state: &DesktopState, action: &str, token: Option<String>) -> Result<Value, String> {
+    let mut command = owned_command(state, action, token.is_some())?;
     let mut child = command
         .spawn()
         .map_err(|e| format!("Cannot run bundled worker: {e}"))?;
@@ -225,6 +234,81 @@ async fn worker_status(state: tauri::State<'_, DesktopState>) -> Result<Value, S
 async fn worker_preflight(state: tauri::State<'_, DesktopState>) -> Result<Value, String> {
     let _guard = state.gate.lock().await;
     cli(&state, "preflight", None).await
+}
+
+#[tauri::command]
+async fn install_gpu_runtime(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<DesktopInfo, String> {
+    let _guard = state.gate.lock().await;
+    if state.quitting.load(Ordering::SeqCst) {
+        return Err("Worker is quitting.".into());
+    }
+    let mut command = owned_command(&state, "setup-runtime", false)?;
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Cannot start GPU setup: {error}"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or("Missing GPU setup error output")?;
+    let errors = tauri::async_runtime::spawn(async move {
+        let mut reader = stderr;
+        let mut tail = Vec::new();
+        let mut block = [0_u8; 4096];
+        while let Ok(size) = reader.read(&mut block).await {
+            if size == 0 {
+                break;
+            }
+            tail.extend_from_slice(&block[..size]);
+            if tail.len() > 8192 {
+                tail.drain(..tail.len() - 8192);
+            }
+        }
+        String::from_utf8_lossy(&tail).into_owned()
+    });
+    let mut lines =
+        BufReader::new(child.stdout.take().ok_or("Missing GPU setup progress")?).lines();
+    let mut completed = false;
+    loop {
+        let line = tokio::select! {
+            line = lines.next_line() => line.map_err(|error| error.to_string())?,
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                if state.quitting.load(Ordering::SeqCst) {
+                    let _ = child.kill().await;
+                    return Err("GPU setup canceled; verified downloads remain cached.".into());
+                }
+                continue;
+            }
+        };
+        let Some(line) = line else { break };
+        if line.len() > 16_384 {
+            return Err("Invalid GPU setup response".into());
+        }
+        let event: Value = serde_json::from_str(&line).map_err(|_| "Invalid GPU setup response")?;
+        match event["type"].as_str() {
+            Some("runtime-setup-progress") => {
+                let _ = app.emit("runtime-setup-progress", event);
+            }
+            Some("runtime-setup-complete") => completed = event["installed"] == true,
+            _ => return Err("Unexpected GPU setup response".into()),
+        }
+    }
+    let success = child
+        .wait()
+        .await
+        .map_err(|error| error.to_string())?
+        .success();
+    let error = errors.await.map_err(|error| error.to_string())?;
+    if !success || !completed {
+        return Err(if error.trim().is_empty() {
+            "GPU setup did not finish. Retry from Setup.".into()
+        } else {
+            error.chars().take(3000).collect()
+        });
+    }
+    info(&state)
 }
 
 #[tauri::command]
@@ -474,6 +558,7 @@ pub fn run() {
             desktop_info,
             worker_status,
             worker_preflight,
+            install_gpu_runtime,
             save_profile,
             enroll_worker,
             worker_action,

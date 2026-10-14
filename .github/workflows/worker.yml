@@ -5,11 +5,11 @@ on:
   workflow_dispatch:
     inputs:
       linux_package_runner:
-        description: Linux package runner label (use a larger or dedicated self-hosted runner with 70 GiB free)
+        description: Linux package runner label (use a larger or dedicated self-hosted runner with 40 GiB free)
         type: string
         default: ubuntu-24.04
       windows_package_runner:
-        description: Windows package runner label (use a larger or dedicated self-hosted runner with 70 GiB free)
+        description: Windows package runner label (use a larger or dedicated self-hosted runner with 40 GiB free)
         type: string
         default: windows-2022
       macos_package_runner:
@@ -75,7 +75,7 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: python scripts/release_version.py apply --version "$RELEASE_VERSION"
-      - name: Free Linux runner space for complete GPU runtimes
+      - name: Free Linux runner space for setup verification
         if: runner.os == 'Linux' && runner.environment == 'github-hosted'
         run: |
           # Dedicated hosted runner only. None of these tools participates in
@@ -84,18 +84,18 @@ jobs:
             if [ -d "$directory" ]; then sudo rm -rf -- "$directory"; fi
           done
           df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
-      - name: Require capacity for complete runtime bundles and installer smoke
+      - name: Require capacity for app bundles and runtime setup verification
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $minimumGiB = if ($env:RUNNER_OS -eq 'macOS') { 12 } else { 70 }
+          $minimumGiB = if ($env:RUNNER_OS -eq 'macOS') { 12 } else { 40 }
           $minimumBytes = $minimumGiB * 1GB
           $volumes = @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP) | ForEach-Object { [IO.Path]::GetPathRoot($_) } | Sort-Object -Unique
           foreach ($volume in $volumes) {
             $drive = [IO.DriveInfo]::new($volume)
             if ($drive.AvailableFreeSpace -lt $minimumBytes) {
               $available = [Math]::Round($drive.AvailableFreeSpace / 1GB, 1)
-              throw "Complete $($env:RUNNER_OS) runtime packaging requires at least $minimumGiB GiB free on $volume; only $available GiB is available. Use a larger GitHub runner or a dedicated self-hosted runner with a larger disk. Dependencies are not trimmed to fit a small runner."
+              throw "$($env:RUNNER_OS) packaging and runtime setup verification requires at least $minimumGiB GiB free on $volume; only $available GiB is available. Use a larger GitHub runner or a dedicated self-hosted runner with a larger disk."
             }
           }
           $runtimeCache = Join-Path $env:RUNNER_TEMP 'guerrilla-build-cache'
@@ -134,6 +134,44 @@ jobs:
           environment['SPLAT_TRANSFORM_BIN'] = str(runtime / 'converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs')
           environment['PATH'] = os.pathsep.join([str(Path(environment['NODE_BIN']).parent), str(runtime / 'ffmpeg'), environment.get('PATH', '')])
           subprocess.run([str(executable), '-m', 'unittest', 'discover', '-s', 'pipeline/tests'], env=environment, check=True)
+          subprocess.run([str(executable), '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_runtime_setup.py'], env=environment, check=True)
+          PYTHON
+      - name: Verify optional GPU runtime setup and offline reuse
+        if: runner.os != 'macOS'
+        run: |
+          python - <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          root = Path.cwd()
+          profile = Path(os.environ['RUNNER_TEMP']) / 'gpu-setup-profile/config.json'
+          environment = os.environ.copy()
+          environment['WORKER_RUNTIME_ROOT'] = str(root / 'desktop/src-tauri/resources/runtime')
+          worker = root / 'target/release' / ('guerrilla-worker.exe' if os.name == 'nt' else 'guerrilla-worker')
+          command = [str(worker), '--config', str(profile), 'setup-runtime']
+          subprocess.run(command, env=environment, check=True)
+          # Completed, verified setup must reuse the same runtime without downloading.
+          environment['HTTPS_PROXY'] = 'http://127.0.0.1:1'
+          environment['HTTP_PROXY'] = 'http://127.0.0.1:1'
+          output = subprocess.check_output(command, env=environment, text=True)
+          result = json.loads(output.splitlines()[-1])
+          assert result['installed'] is True
+          assert 'Downloading' not in output
+          # Exercise the relocated GPU Python and actual bindings, while the
+          # desktop continues to ship only its base runtime.
+          runtime = Path(result['directory'])
+          python = runtime / 'python' / ('python.exe' if os.name == 'nt' else 'bin/python3')
+          environment.pop('HTTPS_PROXY', None)
+          environment.pop('HTTP_PROXY', None)
+          environment['PYTHONPATH'] = str(root / 'pipeline')
+          base = root / 'desktop/src-tauri/resources/runtime'
+          environment['NODE_BIN'] = str(base / 'node' / ('node.exe' if os.name == 'nt' else 'bin/node'))
+          environment['SPLAT_TRANSFORM_BIN'] = str(base / 'converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs')
+          subprocess.run([str(python), '-m', 'unittest', 'discover', '-s', 'pipeline/tests'], env=environment, check=True)
+          assert not profile.exists()
+          assert not profile.with_name('credentials.json').exists()
+          assert not profile.parent.joinpath('scratch').exists()
           PYTHON
       - name: Smoke test Windows installer without enrollment or worker launch
         if: runner.os == 'Windows'
@@ -161,7 +199,7 @@ jobs:
           $installers = @(Get-ChildItem -LiteralPath $installerFolder -Filter '*-windows-x64-setup.exe' -File)
           if ($installers.Count -ne 1) { throw 'Expected exactly one generated Windows installer.' }
           $installer = $installers[0]
-          if (@(Get-ChildItem -LiteralPath $installerFolder -Filter ($installer.BaseName + '-*.bin') -File).Count -eq 0) { throw 'Installer data slices are missing.' }
+          if (@(Get-ChildItem -LiteralPath $installerFolder -Filter ($installer.BaseName + '-*.bin') -File).Count -ne 0) { throw 'Expected a single-file installer without data slices.' }
           $qaRoot = Join-Path $env:RUNNER_TEMP ('guerrilla-installer-' + [Guid]::NewGuid().ToString('N'))
           $installed = Join-Path $qaRoot 'app'
           $profileDirectory = Join-Path $qaRoot 'profile'
@@ -181,10 +219,17 @@ jobs:
           try {
             $setup = Start-Process -FilePath $installer.FullName -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$installed`"", "/LOG=`"$installLog`"") -Wait -PassThru
             if ($setup.ExitCode -ne 0) { throw "Installer failed ($($setup.ExitCode)); inspect $installLog" }
+            # Reinstall must remove obsolete app-owned GPU files, rather than
+            # mixing the base runtime with dependencies from older releases.
+            $obsolete = Join-Path $installed 'resources/runtime/python/obsolete-gpu-runtime.fixture'
+            [IO.File]::WriteAllText($obsolete, 'obsolete app-owned dependency')
+            $upgrade = Start-Process -FilePath $installer.FullName -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$installed`"", "/LOG=`"$installLog`"") -Wait -PassThru
+            if ($upgrade.ExitCode -ne 0 -or (Test-Path -LiteralPath $obsolete)) { throw 'Upgrade failed to replace the app-owned runtime cleanly.' }
             $requiredFiles = @(
               'guerrilla-worker-desktop.exe', 'guerrilla-worker.exe', 'guerrilla-pipeline.exe',
               'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll', 'LICENSE', 'README.md',
               'resources/runtime/manifest.json', 'resources/runtime/windows-crt/manifest.json',
+              'resources/runtime/setup/manifest.json', 'resources/runtime/setup/runtime_setup.py',
               'resources/runtime/python/python.exe', 'resources/runtime/node/node.exe',
               'resources/runtime/ffmpeg/ffmpeg.exe', 'resources/runtime/ffmpeg/ffprobe.exe',
               'resources/runtime/converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs',

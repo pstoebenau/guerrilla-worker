@@ -14,4 +14,4 @@ await mkdir(path.join(destination, 'pipeline'), { recursive: true });
 for (const file of await readdir(path.join(root, 'pipeline'))) {
   if (file.endsWith('.py') || file.endsWith('.json') || file.endsWith('.pyi')) await cp(path.join(root, 'pipeline', file), path.join(destination, 'pipeline', file));
 }
-console.log('Worker dependencies ready. Install your engines, then run bun scripts/worker.ts preflight. No engine binaries were downloaded or built.');
+console.log('Base worker dependencies ready. On Windows/Linux, run bun scripts/worker.ts setup-runtime for GPU dependencies. Install your engines, then run bun scripts/worker.ts preflight. No engine binaries were downloaded or built.');

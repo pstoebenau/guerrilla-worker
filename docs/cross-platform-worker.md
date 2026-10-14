@@ -10,8 +10,9 @@ one GitHub Release after every push to `main` succeeds on all platforms.
 
 GPU job support depends on the engine and hardware. Windows/Linux workers require
 compatible installed engines and GPU drivers; LichtFeld requires NVIDIA CUDA.
-Linux AppImages bundle CUDA runtime libraries while leaving `libcuda.so.1` to the
-user's installed NVIDIA driver. Packaging still rejects missing runtime libraries.
+Windows/Linux GPU libraries and model weights are downloaded and verified from
+Setup instead of included in the app. The owner supplies the NVIDIA driver;
+`libcuda.so.1` remains external to the managed GPU runtime.
 Apple Silicon uses Spirula. Intel Mac distributions support worker management;
 the pinned engine distribution does not provide Intel Mac GPU execution.
 The Linux NVIDIA Docker image is x64 only.
@@ -57,13 +58,14 @@ files:
 - `runtime/ffmpeg`: pinned FFmpeg/FFprobe with build configuration and notices.
 - `runtime/node`: pinned Node runtime, including its upstream license.
 - `runtime/converter`: lockfile-pinned PlayCanvas splat-transform and dependencies.
-- `runtime/models`: pinned reconstruction model/source cache on Windows/Linux.
+- `runtime/setup`: pinned GPU setup recipe, requirements and installer helper.
+- Worker data `runtimes/cuda-<identity>`: verified GPU Python libraries and models, installed on demand on Windows/Linux.
 - `pipeline`: Python helper sources and settings schema.
 
 `packaging/runtime-lock.json` records exact asset hashes. Python lock files are
 platform-specific where CUDA bindings require different wheels. Build preparation
 verifies archives before extracting and verifies executables before final staging.
-Python/Node/FFmpeg are automatically selected from the bundle; advanced overrides
+Python/Node/FFmpeg are automatically selected from the bundle. A compatible, complete GPU installation supplies Python/model paths after setup. Incomplete or mismatched installs are not selected; previous runtime identities remain available and profiles/checkpoints are preserved. Advanced overrides
 are possible. Neither shell PATH nor an ambient Python environment is required in
 an installed desktop app. The GPU driver remains an operating-system prerequisite.
 

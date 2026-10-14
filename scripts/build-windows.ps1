@@ -23,6 +23,7 @@ if ($output -eq $source -or $output.StartsWith($source + '\', [StringComparison]
 foreach ($required in @(
     'guerrilla-worker-desktop.exe', 'guerrilla-worker.exe', 'guerrilla-pipeline.exe', 'LICENSE', 'README.md',
     'resources/runtime/manifest.json', 'resources/runtime/python/python.exe',
+    'resources/runtime/setup/manifest.json', 'resources/runtime/setup/runtime_setup.py',
     'resources/runtime/node/node.exe', 'resources/runtime/ffmpeg/ffmpeg.exe',
     'resources/runtime/ffmpeg/ffprobe.exe', 'resources/runtime/converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs',
     'resources/pipeline/native_bindings.py', 'resources/pipeline/scan-settings.schema.json'
@@ -102,10 +103,10 @@ Get-ChildItem -LiteralPath $output -File | Where-Object {
 if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed.' }
 $setupFile = Join-Path $output ($baseName + '.exe')
 $slices = @(Get-ChildItem -LiteralPath $output -File | Where-Object { $_.Name -like ($baseName + '-*.bin') })
-if (!(Test-Path -LiteralPath $setupFile -PathType Leaf) -or $slices.Count -eq 0) { throw 'Disk-spanned installer output is incomplete.' }
+if (!(Test-Path -LiteralPath $setupFile -PathType Leaf) -or $slices.Count -ne 0) { throw 'Expected one self-contained installer executable without data slices.' }
 $artifacts = @((Get-Item -LiteralPath $setupFile)) + $slices
 $checksumLines = @($artifacts | Sort-Object Name | ForEach-Object { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + $_.Name })
 [IO.File]::WriteAllLines((Join-Path $output ($baseName + '-SHA256SUMS.txt')), $checksumLines, [Text.UTF8Encoding]::new($false))
 $webViewManifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $output ($baseName + '-WebView2.json')) -Encoding UTF8
 Write-Output "Windows installer prepared: $setupFile"
-Write-Output "Keep setup.exe and every matching .bin file together ($($slices.Count) payload slices). No release was published."
+Write-Output "Single-file setup.exe is ready. GPU dependencies are downloaded and verified during app setup. No release was published."

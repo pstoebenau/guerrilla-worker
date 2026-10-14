@@ -556,6 +556,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "guerrilla-runtime"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "guerrilla-worker"
 version = "0.3.0"
 dependencies = [
@@ -564,6 +573,7 @@ dependencies = [
  "clap",
  "dirs",
  "fs2",
+ "guerrilla-runtime",
  "hex",
  "libc",
  "regex",

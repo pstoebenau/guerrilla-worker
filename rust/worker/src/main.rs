@@ -16,6 +16,8 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Download and verify GPU libraries and models into this profile's runtime directory.
+    SetupRuntime,
     Status,
     Preflight,
     Enroll {
@@ -58,6 +60,7 @@ async fn run() -> Result<()> {
         cli.command.unwrap_or(Command::Run)
     };
     let value = match command {
+        Command::SetupRuntime => guerrilla_worker::runtime_setup::install(&paths).await?,
         Command::Status => serde_json::to_value(daemon::status(&paths)?)?,
         Command::Preflight => {
             let report = paths.preflight().await?;

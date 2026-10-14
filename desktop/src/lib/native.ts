@@ -11,6 +11,7 @@ export const api = {
   info: () => native<DesktopInfo>('desktop_info'),
   status: async (): Promise<WorkerStatus> => parseStatus(await native<unknown>('worker_status')),
   preflight: async (): Promise<Preflight> => parsePreflight(await native<unknown>('worker_preflight')),
+  installGpuRuntime: () => native<DesktopInfo>('install_gpu_runtime'),
   save: (profile: Profile) => native<DesktopInfo>('save_profile', { profile }),
   enroll: async (token: string): Promise<WorkerStatus> => parseStatus(await native<unknown>('enroll_worker', { token })),
   action: async (action: WorkerAction): Promise<WorkerStatus> => parseStatus(await native<unknown>('worker_action', { action })),

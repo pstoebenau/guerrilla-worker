@@ -15,7 +15,11 @@ execution uses Spirula. Available engines are advertised only after their own
 preflight passes; an unavailable engine never silently falls back to another.
 
 Python, FFmpeg/FFprobe, Node, the export converter, and supporting Python libraries
-are included in desktop packages. GPU drivers and engine installations are supplied
+are included in desktop packages. Windows/Linux GPU libraries and reconstruction
+models are installed from **Setup → GPU dependencies** on first use. Setup needs
+internet and 25 GiB free, verifies pinned downloads and package hashes, and stores
+the runtime in your worker data folder. Installed dependencies work offline and
+survive app updates/uninstall. GPU drivers and engine installations are supplied
 by the owner. Desktop build and setup commands do not build or download engines.
 The Linux Docker image has a separate, fully bundled engine policy described below.
 
@@ -45,11 +49,11 @@ bun run build
 
 The build compiles both Rust executables, stages Tauri sidecars and Python helpers,
 then prepares checksum-pinned runtime assets and hash-locked Python dependencies.
-Runtime preparation is host-native. Windows packages use a disk-spanned Inno
-installer with offline WebView2 and app-local Microsoft runtime libraries. Keep
-the setup executable and every payload slice together. Windows/Linux CUDA bundles
-are large because they include reconstruction libraries. Desktop packages do not
-include engine binaries.
+Runtime preparation is host-native. Windows packages contain one self-contained
+Inno setup executable with offline WebView2 and app-local Microsoft libraries;
+Linux offers single-file AppImage, DEB and RPM downloads, and macOS offers DMGs.
+Large GPU libraries and model weights are downloaded during setup instead of
+being copied into the app. Desktop packages do not include engine binaries.
 
 To work on the interface after staging the resources:
 
@@ -77,13 +81,15 @@ it does not install engines. Then use the management CLI:
 
 ```sh
 bun scripts/setup.ts
+# Windows/Linux NVIDIA dependencies (one-time verified download):
+bun scripts/worker.ts setup-runtime
 bun scripts/worker.ts preflight
 WORKER_CONTROL_URL=https://guerrilla.dad bun scripts/worker.ts enroll --token-stdin
 bun scripts/worker.ts run
 ```
 
 `dist/guerrilla-worker` and `dist/guerrilla-pipeline` are native binaries. The
-CLI also supports `start`, `status`, `stop`, `drain`, and `disconnect` for a
+CLI also supports `setup-runtime`, `start`, `status`, `stop`, `drain`, and `disconnect` for a
 background worker, with `--config /absolute/path/profile.json` to select a profile.
 Set `SPIRULA_BIN`, `LICHTFELD_BIN`, and `LICHTFELD_DENSIFICATION_PLUGIN` to your
 installed engines/plugin when using environment-based configuration.

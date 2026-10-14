@@ -303,6 +303,9 @@ impl Engine {
                     json!(hash(&runtime.join("manifest.json"))?);
             }
         }
+        if let Some(runtime) = std::env::var_os("WORKER_GPU_RUNTIME_ROOT").map(PathBuf::from) {
+            versions["gpuRuntimeManifestSha256"] = json!(hash(&runtime.join("manifest.json"))?);
+        }
         if self == Self::Lichtfeld {
             let plugin = crate::densification_plugin();
             let mut sources = walkdir::WalkDir::new(&plugin)

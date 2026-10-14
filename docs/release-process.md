@@ -64,31 +64,30 @@ verifies the completed uploads and publishes it as Latest. A failed platform or
 upload leaves the previous public release intact. Rerun failed jobs after a
 transient failure; push a fix for code/build failures.
 
-Formats are Windows setup plus all `.bin` payload slices, Linux AppImage/DEB/RPM,
+Formats are one self-contained Windows setup `.exe`, Linux AppImage/DEB/RPM,
 and macOS DMG and `.app.tar.gz` for both architectures. Linux RPM creation uses
 system `rpmbuild` to stream the same filesystem Tauri prepares for the DEB;
-this avoids keeping the full CUDA runtime in the Tauri RPM builder's memory.
+this avoids buffering the package filesystem in the Tauri RPM builder's memory.
 Linux native builds need `rpm` alongside Tauri's normal system dependencies.
-The AppImage bundler receives the vendored wheel/CUDA library directories in its
+The AppImage bundler receives the base runtime's private wheel library directories in its
 build-only library search path so individual ELF files resolve private wheel
 dependencies. Driver stubs are excluded from that search path.
 macOS DMGs are generated from Tauri's app bundle with `hdiutil makehybrid` and
 `hdiutil convert`, without mounting temporary images. This avoids hosted Intel
 Mac DiskArbitration detach timeouts while retaining the app and Applications link.
 
-GitHub requires each release asset to be under 2 GiB. Windows installer slices
-already meet that limit. Other oversized packages are split into files of at
-most 2,000,000,000 bytes. Download **every** matching `.partNNN` file, its
-`.parts.json` manifest and `reassemble_release.py` into one directory, then run:
+Every new native package is a single file below GitHub's 2 GiB asset limit.
+Publication fails if a package grows beyond this limit; new releases never split
+packages or Windows installer payloads. GPU libraries and model weights are not
+included in the app. **Setup → GPU dependencies** downloads pinned Python, installs
+hash-locked binary wheels, verifies library imports and model checksums, then
+activates the runtime under the owner's worker data directory. Windows/Linux
+first setup needs internet and 25 GiB free. macOS uses its included base runtime.
+Engine installations and the NVIDIA driver remain owner-installed.
 
-```sh
-python3 reassemble_release.py "PACKAGE.parts.json"
-```
-
-The helper verifies each part and the restored file, refuses to overwrite an
-existing package, and marks restored AppImages executable. Install the restored
-DEB/RPM/DMG or run the AppImage normally. Windows setup data slices are consumed
-directly by Inno Setup and do not use this helper.
+Archived v0.3.0/v0.3.1 releases contain split Linux packages and Windows slices.
+For those older releases, download all matching parts and use the reassembly
+helper shipped with that release. New releases need no reassembly.
 
 The release includes a global `SHA256SUMS.txt`, platform runtime manifests/notices,
 the original-code license, third-party notices and the tagged worker source.
@@ -97,7 +96,7 @@ build from the source archive. Engine installations and Docker images remain
 separate from desktop publication. The app's manual update notice recognizes
 both complete native packages and split-package manifests from stable releases.
 
-Windows and Linux package runners require at least 70 GiB free; macOS requires
+Windows and Linux package runners require at least 40 GiB free for real GPU setup verification; macOS requires
 12 GiB. Manual dispatch accepts `windows_package_runner`, `linux_package_runner`,
 `macos_package_runner`, and `macos_intel_package_runner` for larger or dedicated
 runner labels. Labels must select the correct OS/architecture and native tools.
@@ -110,7 +109,7 @@ provide the persistent downloads.
 Compilation verifies code and linking. Behavioral tests verify checkpoint retention,
 resume, leases, cancellation, profile isolation, and update selection; these can
 fail even when the binaries build successfully. Python checks cover helpers that
-Rust compilation does not validate. Tests run inside each native release-build job, using release Cargo artifacts and
+Rust compilation does not validate. Windows/Linux jobs additionally install the optional GPU runtime in an isolated profile and verify that subsequent setup reuses it offline without creating enrollment or scratch. Tests run inside each native release-build job, using release Cargo artifacts and
 the packaged Python/Node/converter runtimes. There is no separate check matrix,
 repeated frontend build, debug-profile compile, or Docker image publication gate.
 The Docker image can be checked independently with the documented local command.

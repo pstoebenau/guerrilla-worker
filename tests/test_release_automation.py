@@ -53,7 +53,17 @@ class ReleaseAutomationTests(unittest.TestCase):
             source.write_bytes(payload)
             destination = root / 'assets'
             destination.mkdir()
-            package = release_assets.stage_file(source, destination, limit=100)
+            # Archived v0.3.x split packages remain recoverable. New desktop
+            # releases require one file and must reject oversized bundles.
+            with self.assertRaisesRegex(ValueError, 'single-file'):
+                release_assets.stage_file(source, destination, limit=100)
+            package = {'file': {'name': 'Guerrilla.Worker_0.3.0_amd64.AppImage', 'size': len(payload),
+                                'sha256': hashlib.sha256(payload).hexdigest()}, 'assets': []}
+            for start in range(0, len(payload), 100):
+                part = destination / f"{package['file']['name']}.part{len(package['assets']) + 1:03}"
+                part.write_bytes(payload[start:start + 100])
+                package['assets'].append(release_assets.record(part))
+            (destination / (package['file']['name'] + '.parts.json')).write_text(json.dumps(package))
             self.assertTrue(all(item['size'] <= 100 for item in package['assets']))
             self.assertEqual(package['file']['name'], 'Guerrilla.Worker_0.3.0_amd64.AppImage')
             manifest = destination / (package['file']['name'] + '.parts.json')

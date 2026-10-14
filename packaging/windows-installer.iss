@@ -26,10 +26,8 @@ ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.17763
 OutputDir={#InstallerOutput}
 OutputBaseFilename=Guerrilla-Worker-{#AppVersion}-windows-x64-setup
-; CUDA libraries can exceed single-executable installer limits. Ship ALL slices.
-DiskSpanning=yes
-DiskSliceSize=2000000000
-SlicesPerDisk=1
+; GPU libraries and model weights are installed separately during app setup.
+DiskSpanning=no
 Compression=lzma2/fast
 SolidCompression=no
 LZMAUseSeparateProcess=yes
@@ -43,7 +41,7 @@ DisableProgramGroupPage=yes
 SetupLogging=yes
 
 [Files]
-; First, so prerequisite extraction doesn't scan the large CUDA payloads.
+; First, so prerequisite extraction doesn't scan the application payload.
 Source: "{#AppSource}\prerequisites\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; Flags: dontcopy
 Source: "{#AppSource}\guerrilla-worker-desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#AppSource}\guerrilla-worker.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -53,6 +51,11 @@ Source: "{#AppSource}\resources\*"; DestDir: "{app}\resources"; Flags: ignorever
 Source: "{#AppSource}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#AppSource}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#AppSource}\prerequisites\WebView2Runtime-manifest.json"; DestDir: "{app}\resources\runtime\notices"; Flags: ignoreversion
+
+[InstallDelete]
+; Remove this app's previous bundled runtime, including obsolete CUDA wheels.
+; Per-user GPU runtimes, profiles and checkpoints live outside {app} and remain.
+Type: filesandordirs; Name: "{app}\resources\runtime"
 
 [Icons]
 Name: "{autoprograms}\Guerrilla Worker"; Filename: "{app}\guerrilla-worker-desktop.exe"

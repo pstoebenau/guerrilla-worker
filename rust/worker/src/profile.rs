@@ -102,6 +102,16 @@ impl ContextPaths {
             Err(e) => Err(e.into()),
         }
     }
+    pub fn runtime_root(&self) -> PathBuf {
+        std::env::var_os("WORKER_RUNTIME_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                self.pipeline
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .join("runtime")
+            })
+    }
     pub fn command(&self) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(&self.pipeline);
         command
@@ -126,18 +136,27 @@ impl ContextPaths {
         ] {
             command.env_remove(key);
         }
-        let runtime = std::env::var_os("WORKER_RUNTIME_ROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                self.pipeline
-                    .parent()
-                    .unwrap_or(Path::new("."))
-                    .join("runtime")
+        let runtime = self.runtime_root();
+        let installed = guerrilla_runtime::installed(&runtime, &self.state);
+        let managed_python = self.profile.python_path
+            == guerrilla_runtime::python(&runtime).to_string_lossy()
+            || self.profile.python_path.is_empty() && std::env::var_os("PYTHON").is_none()
+            || installed.as_ref().is_some_and(|gpu| {
+                self.profile.python_path == guerrilla_runtime::python(gpu).to_string_lossy()
             });
+        let gpu = installed.filter(|_| managed_python);
+        let selected_python = gpu
+            .as_ref()
+            .map(|root| {
+                guerrilla_runtime::python(root)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .unwrap_or_else(|| self.profile.python_path.clone());
         let configs = [
             (
                 "PYTHON",
-                &self.profile.python_path,
+                &selected_python,
                 if cfg!(windows) {
                     "python/python.exe"
                 } else {
@@ -187,8 +206,13 @@ impl ContextPaths {
                 command.env(key, value);
             }
         }
-        if runtime.join("models").exists() && std::env::var_os("TORCH_HOME").is_none() {
-            command.env("TORCH_HOME", runtime.join("models"));
+        command.env_remove("WORKER_GPU_RUNTIME_ROOT");
+        let model_runtime = gpu.as_ref().unwrap_or(&runtime);
+        if let Some(gpu) = &gpu {
+            command.env("WORKER_GPU_RUNTIME_ROOT", gpu);
+        }
+        if model_runtime.join("models").exists() && std::env::var_os("TORCH_HOME").is_none() {
+            command.env("TORCH_HOME", model_runtime.join("models"));
         }
         if runtime.join("windows-crt").is_dir() {
             command.env("WORKER_CRT_ROOT", runtime.join("windows-crt"));

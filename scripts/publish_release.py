@@ -39,7 +39,6 @@ def collect(artifacts, destination, version, commit):
             os.link(source, target)
     for name in ('LICENSE', 'THIRD_PARTY_NOTICES'):
         shutil.copy2(ROOT / name, destination / name)
-    shutil.copy2(ROOT / 'scripts/reassemble_release.py', destination / 'reassemble_release.py')
     source_archive = destination / f'guerrilla-worker-{version}-source.tar.gz'
     subprocess.run(['git', 'archive', '--format=tar.gz', f'--prefix=guerrilla-worker-{version}/',
                     f'--output={source_archive.resolve()}', commit], cwd=ROOT, check=True)
@@ -95,12 +94,12 @@ def publish(destination, assets, version, commit, repository):
         f'Guerrilla Worker {version}, built from `{commit}`.\n\n'
         'This release contains Windows x64, Linux x64, macOS Apple Silicon and macOS Intel builds. '
         'All native builds and the Windows installation/uninstallation test passed before publication.\n\n'
-        '- Windows: download the setup `.exe` and every matching `.bin` slice into the same folder, then run setup.\n'
-        '- Linux: choose AppImage, DEB or RPM. Large packages are split into `.partNNN` files. '
-        'Download every part, its `.parts.json`, and `reassemble_release.py`, then run '
-        '`python3 reassemble_release.py "PACKAGE.parts.json"`. The script verifies every part and the restored package.\n'
+        '- Windows: download and run the single setup `.exe`.\n'
+        '- Linux: download one AppImage, DEB or RPM and open or install it normally.\n'
         '- macOS: choose the `aarch64`/`ARM64` package for Apple Silicon or `x64`/`X64` for Intel. '
         'DMG and app archives are included.\n\n'
+        'Windows/Linux GPU libraries and reconstruction models are downloaded and checksum-verified from Setup > GPU dependencies. '
+        'The app includes its base Python/Node/FFmpeg runtime and can be managed offline; first GPU setup needs internet and 25 GiB free. '
         'LichtFeld and Spirula remain user-installed. Intel Mac supports worker management; '
         'the current scan engines target NVIDIA Windows/Linux or Apple Silicon. '
         'GPU scan acceptance is separate from these package checks.\n\n'

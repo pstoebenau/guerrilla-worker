@@ -26,6 +26,7 @@
   let error = $state('');
   let notice = $state('');
   let busy = $state('');
+  let installingRuntime = $state(false);
   let token = $state('');
   let logs = $state<string[]>([]);
   let logsLoaded = $state(false);
@@ -83,6 +84,17 @@
     await perform('Selecting path…', async () => { const selected = await api.browse(field); if (selected && profile) profile[field] = selected; });
   }
   async function selectPage(next: Page) { page = next; token = ''; document.getElementById('main-content')?.scrollTo({ top: 0 }); if (next === 'logs') await refresh(); }
+  async function installRuntime() {
+    await perform('Installing GPU dependencies…', async () => {
+      installingRuntime = true;
+      try {
+        info = await api.installGpuRuntime();
+        if (profile) profile.pythonPath = info.profile.pythonPath;
+        check = null;
+        notice = 'GPU dependencies are installed and verified. Save and check dependencies to test your selected engine.';
+      } finally { installingRuntime = false; }
+    });
+  }
   function showDialog(node: HTMLDialogElement) { node.showModal(); return { destroy: () => node.close() }; }
   function engineName(name: string) { return name.toLowerCase() === 'lichtfeld' ? 'LichtFeld' : name.toLowerCase() === 'spirula' ? 'Spirula' : name; }
   function stageName(stage?: string) { return stage ? stage.replace(/[_-]/g, ' ').replace(/^./, c => c.toUpperCase()) : 'Waiting for a job'; }
@@ -103,6 +115,11 @@
       void perform('Loading worker…', async () => { await reloadInfo(); status = await api.status(); if (!info?.enrolled) page = 'setup'; });
       void listen<unknown>('worker-status', event => { try { status = parseStatus(event.payload); } catch (e) { error = String(e); } }).then(unlisten => alive ? unlisteners.push(unlisten) : unlisten());
       void listen<string>('worker-error', event => { error = event.payload; }).then(unlisten => alive ? unlisteners.push(unlisten) : unlisten());
+      void listen<{ message: string; downloadedBytes?: number; totalBytes?: number }>('runtime-setup-progress', event => {
+        if (!installingRuntime || typeof event.payload.message !== 'string') return;
+        const downloaded = event.payload.downloadedBytes ?? 0, total = event.payload.totalBytes ?? 0;
+        busy = event.payload.message.slice(0, 300) + (total > 0 ? ` (${Math.min(100, Math.round(downloaded / total * 100))}%)` : '…');
+      }).then(unlisten => alive ? unlisteners.push(unlisten) : unlisten());
       void listen('window-hidden', () => { token = ''; }).then(unlisten => alive ? unlisteners.push(unlisten) : unlisten());
     }
     const timer = setInterval(() => { void refresh(); }, 3000);
@@ -169,6 +186,10 @@
           {#if profile}
             <section class="settings-section enrollment"><div class="section-heading"><h3>Enrollment</h3>{#if info?.enrolled}<span class="ready">Enrolled</span>{/if}</div><p class="field-help">Server: {profile.controlUrl}</p>{#if info?.enrolled}<p class="muted">Worker {status?.workerId ?? 'identity saved'}. Disconnect removes this computer’s enrollment and keeps checkpoints.</p><button disabled={!!busy || running} onclick={() => disconnectOpen = true}>Disconnect worker…</button>{:else}<label for="token">Enrollment token</label><input id="token" type="password" autocomplete="off" spellcheck="false" maxlength="4096" bind:value={token} disabled={!!busy || unavailable} placeholder="Paste a token from the server’s Workers page"/><p class="field-help">The token is used once for enrollment and is never saved in settings.</p><div class="actions"><button class="primary" disabled={!!busy || unavailable || !token.trim()} onclick={() => { const secret = token; token = ''; void perform('Enrolling worker…', async () => { await save(); status = await api.enroll(secret); await reloadInfo(); await selectPage('overview'); }); }}>Enroll and start</button><button disabled={!!busy || !nativeAvailable} onclick={() => perform('Opening server…', api.openServer)}>Open server ↗</button></div>{/if}</section>
             <form onsubmit={(e) => { e.preventDefault(); void perform('Saving settings…', async () => { await save(); notice = 'Settings saved.'; }); }}>
+
+              {#if info?.gpuRuntime.supported}
+                <section class="settings-section"><div class="section-heading"><div><h3>GPU dependencies</h3><p>{info.gpuRuntime.installed ? 'GPU libraries and reconstruction models are installed on this computer.' : 'Install GPU libraries and reconstruction models for NVIDIA scanning. Downloads need internet and at least 27 GB of free disk space.'}</p></div></div><div class="actions"><button type="button" disabled={!!busy || running || unavailable} onclick={installRuntime}>{info.gpuRuntime.installed ? 'Verify installation' : 'Install GPU dependencies'}</button><span class="muted">{info.gpuRuntime.installed ? 'Installed and verified' : 'One-time setup · several GB'}</span></div></section>
+              {/if}
 
               <section class="settings-section"><div class="section-heading"><div><h3>Installed engines</h3><p>Select an installed engine or detect it automatically.</p></div><button type="button" class="text-button" disabled={!!busy || running} onclick={() => perform('Detecting engines…', async () => { const found = await api.detect(); if (profile) { for (const key of ['lichtfeldPath', 'spirulaPath', 'densificationPluginPath'] as const) if (found[key]) profile[key] = found[key]; } notice = 'Detection complete. Review the engine paths below.'; })}>Detect</button></div>
                 {#each [{ field: 'lichtfeldPath', label: 'LichtFeld executable', optional: false }, { field: 'spirulaPath', label: 'Spirula executable', optional: false }, { field: 'densificationPluginPath', label: 'LichtFeld densification folder', optional: true }] as setting}

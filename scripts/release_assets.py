@@ -1,4 +1,4 @@
-"""Stage native desktop distributions, splitting files below GitHub's asset limit."""
+"""Stage single-file native desktop distributions below GitHub's asset limit."""
 import argparse
 import hashlib
 import json
@@ -26,30 +26,18 @@ def record(file):
 def stage_file(file, destination, limit=ASSET_LIMIT):
     original = record(file)
     # GitHub normalizes spaces and other special characters in uploaded names.
-    # Use that name before making manifests, checksums, and split-file records.
+    # Use that name before making manifests and checksums.
     original['name'] = re.sub(r'[^A-Za-z0-9_.-]', '.', original['name'])
-    if original['size'] <= limit:
-        target = destination / original['name']
-        if target.exists():
-            raise ValueError(f'Release asset name collision: {target.name}')
-        try:
-            os.link(file, target)
-        except OSError:
-            shutil.copy2(file, target)
-        return {'file': original, 'assets': [record(target)]}
-    parts = []
-    with file.open('rb') as source:
-        while source.tell() < original['size']:
-            target = destination / f'{original["name"]}.part{len(parts) + 1:03}'
-            with target.open('wb') as output:
-                remaining = limit
-                while remaining and (chunk := source.read(min(8 * 1024 * 1024, remaining))):
-                    output.write(chunk)
-                    remaining -= len(chunk)
-            parts.append(record(target))
-    package = {'file': original, 'assets': parts}
-    (destination / (original['name'] + '.parts.json')).write_text(json.dumps(package, indent=2) + '\n')
-    return package
+    if original['size'] > limit:
+        raise ValueError('Desktop package exceeds the single-file release limit; GPU dependencies must be installed during setup')
+    target = destination / original['name']
+    if target.exists():
+        raise ValueError(f'Release asset name collision: {target.name}')
+    try:
+        os.link(file, target)
+    except OSError:
+        shutil.copy2(file, target)
+    return {'file': original, 'assets': [record(target)]}
 
 
 def prepare(bundle, destination, platform, version, commit):
@@ -61,8 +49,8 @@ def prepare(bundle, destination, platform, version, commit):
     if platform == 'Windows-X64':
         files = list(bundle.glob('installer/*'))
         setups = [file for file in files if file.name.endswith('-setup.exe')]
-        if len(setups) != 1 or not any(file.suffix == '.bin' for file in files):
-            raise ValueError('Windows setup and its data slices are required')
+        if len(setups) != 1 or any(file.suffix == '.bin' for file in files):
+            raise ValueError('Windows requires one self-contained setup executable without data slices')
         checksum = bundle / 'installer' / (setups[0].stem + '-SHA256SUMS.txt')
         listed = {}
         for line in checksum.read_text().splitlines():
@@ -90,7 +78,7 @@ def prepare(bundle, destination, platform, version, commit):
         if file.is_file():
             packages.append(stage_file(file, destination))
             # Staged assets now own these generated files. Reclaim the original
-            # large package after splitting so all formats fit on the runner.
+            # package after staging so all formats fit on the runner.
             file.unlink()
     notices = destination / f'Guerrilla-Worker-{version}-{platform}-notices.tar.gz'
     with tarfile.open(notices, 'w:gz') as archive:
