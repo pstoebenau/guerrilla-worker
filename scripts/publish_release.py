@@ -50,8 +50,8 @@ def collect(artifacts, destination, version, commit):
     return [record(file) for file in sorted(destination.iterdir())]
 
 
-def gh(*args, optional=False):
-    result = subprocess.run(['gh', *args], text=True, capture_output=True)
+def gh(*args, optional=False, input=None):
+    result = subprocess.run(['gh', *args], input=input, text=True, capture_output=True)
     if result.returncode:
         if optional and 'HTTP 404' in result.stderr:
             return None
@@ -109,9 +109,11 @@ def publish(destination, assets, version, commit, repository):
         f'`python scripts/release_version.py apply --version {version}` before compilation.\n'
     )
     if not release:
-        gh('release', 'create', tag, '--repo', repository, '--target', commit, '--draft',
-           '--title', f'Guerrilla Worker {version}', '--notes-file', str(notes))
-        release = find_release(repository, tag)
+        # Use the create response itself: a newly created draft may not yet
+        # appear in a subsequent list request from the Actions token.
+        release = json.loads(gh('api', f'repos/{repository}/releases', '--method', 'POST', '--input', '-',
+            input=json.dumps({'tag_name': tag, 'target_commitish': commit, 'draft': True,
+                              'name': f'Guerrilla Worker {version}', 'body': notes.read_text()})))
         if not release or release['target_commitish'] != commit or not release['draft']:
             raise ValueError('The newly created draft release does not match this build')
     gh('release', 'upload', tag, '--repo', repository, '--clobber',

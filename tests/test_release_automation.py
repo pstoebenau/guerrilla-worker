@@ -130,19 +130,26 @@ class ReleaseAutomationTests(unittest.TestCase):
                     nonlocal created
                     calls.append(args)
                     if args[:2] == ('api', 'repos/owner/repo/releases'):
+                        if '--method' in args:
+                            request = json.loads(kwargs['input'])
+                            self.assertEqual(request['target_commitish'], 'a' * 40)
+                            self.assertEqual(request['tag_name'], 'v0.3.0')
+                            self.assertTrue(request['draft'])
+                            created = True
+                            return json.dumps(release)
+                        # Simulate a list endpoint that does not expose a newly
+                        # created draft. Its create response must provide the ID.
+                        self.assertFalse(created and not existing)
                         return json.dumps([[{'id': 99, 'tag_name': 'v0.2.0'}], [release] if created else []])
                     if args[:2] == ('api', 'repos/owner/repo/releases/123'):
                         return json.dumps(release)
-                    if args[:2] == ('release', 'create'):
-                        created = True
-                        return ''
                     if args[:2] in (('release', 'upload'), ('release', 'edit')):
                         return ''
                     raise AssertionError(f'Unexpected GitHub request (drafts cannot be found by tag): {args}')
 
                 with patch.object(publish_release, 'gh', side_effect=transport):
                     publish_release.publish(destination, [asset], '0.3.0', 'a' * 40, 'owner/repo')
-                self.assertEqual(sum(call[:2] == ('release', 'create') for call in calls), int(not existing))
+                self.assertEqual(sum('--method' in call for call in calls), int(not existing))
                 verified = calls.index(('api', 'repos/owner/repo/releases/123'))
                 published = next(i for i, call in enumerate(calls) if call[:2] == ('release', 'edit'))
                 self.assertLess(verified, published)
