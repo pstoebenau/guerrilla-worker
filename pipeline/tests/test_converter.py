@@ -30,6 +30,16 @@ def scene(path, count=512):
 
 
 class ConverterTests(unittest.TestCase):
+    def test_mac_development_uses_applications_spirula_before_legacy_runtime(self):
+        application = Path('/Applications/Spirula Studio.app/Contents/MacOS/spirula')
+        with patch.dict(os.environ, {'SPIRULA_BIN': ''}), \
+                patch.object(common.sys, 'platform', 'darwin'), \
+                patch.object(Path, 'is_file', return_value=True):
+            self.assertEqual(common.spirula_path(), application)
+        with patch.dict(os.environ, {'SPIRULA_BIN': '/explicit/spirula'}), \
+                patch.object(common.sys, 'platform', 'darwin'):
+            self.assertEqual(common.spirula_path(), Path('/explicit/spirula'))
+
     def test_spirula_runtime_does_not_probe_lichtfeld(self):
         with tempfile.TemporaryDirectory() as temporary:
             executable = Path(temporary) / 'spirula'

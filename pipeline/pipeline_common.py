@@ -20,6 +20,10 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
 def spirula_path():
     if override := os.environ.get('SPIRULA_BIN'):
         return Path(override)
+    if sys.platform == 'darwin':
+        application = Path('/Applications/Spirula Studio.app/Contents/MacOS/spirula')
+        if application.is_file():
+            return application
     installed = Path.home() / '.local/share/guerrilla-worker/runtimes/spirula-2026.9.30' / ('spirula.exe' if os.name == 'nt' else 'spirula')
     if installed.is_file():
         return installed
