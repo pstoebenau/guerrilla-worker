@@ -54,6 +54,9 @@ Inno setup executable with offline WebView2 and app-local Microsoft libraries;
 Linux offers single-file AppImage, DEB and RPM downloads, and macOS offers DMGs.
 Large GPU libraries and model weights are downloaded during setup instead of
 being copied into the app. Desktop packages do not include engine binaries.
+Release downloads contain app packages, one combined checksum file and the source
+archive. Licenses and notices are included inside the packages; build manifests
+and additional evidence remain in the workflow artifacts.
 
 To work on the interface after staging the resources:
 

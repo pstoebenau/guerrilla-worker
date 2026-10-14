@@ -89,8 +89,11 @@ Archived v0.3.0/v0.3.1 releases contain split Linux packages and Windows slices.
 For those older releases, download all matching parts and use the reassembly
 helper shipped with that release. New releases need no reassembly.
 
-The release includes a global `SHA256SUMS.txt`, platform runtime manifests/notices,
-the original-code license, third-party notices and the tagged worker source.
+Public downloads contain only native app packages, one global `SHA256SUMS.txt`
+and the tagged worker source archive. Licenses and third-party notices stay inside
+every native package and the source archive. Platform manifests, runtime/notice
+archives, Windows metadata and Windows-specific checksums stay in the CI artifacts;
+the publisher verifies all of that evidence before selecting public downloads.
 Apply the release version with `scripts/release_version.py` when reproducing a
 build from the source archive. Engine installations and Docker images remain
 separate from desktop publication. The app's manual update notice recognizes

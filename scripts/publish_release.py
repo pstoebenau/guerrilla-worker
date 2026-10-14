@@ -3,10 +3,30 @@ import argparse
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 
 from release_assets import ASSET_LIMIT, PLATFORMS, ROOT, record
+
+
+def public_packages(report):
+    formats = {
+        'Windows-X64': ('-setup.exe',),
+        'Linux-X64': ('.AppImage', '.deb', '.rpm'),
+        'macOS-ARM64': ('.dmg', '.app.tar.gz'),
+        'macOS-X64': ('.dmg', '.app.tar.gz'),
+    }[report['platform']]
+    selected = []
+    for suffix in formats:
+        packages = [package for package in report.get('packages', [])
+                    if package['file']['name'].endswith(suffix)]
+        if len(packages) != 1:
+            raise ValueError(f"Publication requires exactly one {report['platform']} {suffix} package")
+        package = packages[0]
+        file = package['file']
+        if package['assets'] != [file] or file not in report['assets']:
+            raise ValueError('Public packages must match the verified single-file inventory')
+        selected.append(file)
+    return selected
 
 
 def collect(artifacts, destination, version, commit):
@@ -14,12 +34,12 @@ def collect(artifacts, destination, version, commit):
     reports = [json.loads(file.read_text()) for file in manifests]
     if len(reports) != len(PLATFORMS) or {report['platform'] for report in reports} != PLATFORMS:
         raise ValueError('Publication requires Windows, Linux, Apple Silicon macOS and Intel macOS')
+    if any(report['version'] != version or report['commit'] != commit for report in reports):
+        raise ValueError('All release packages must have the same version and commit')
     destination.mkdir(parents=True, exist_ok=True)
     if any(destination.iterdir()):
         raise ValueError('Combined release directory must be empty')
     for manifest, report in zip(manifests, reports):
-        if report['version'] != version or report['commit'] != commit:
-            raise ValueError('All release packages must have the same version and commit')
         names = set()
         for expected in report['assets']:
             name = expected['name']
@@ -31,14 +51,16 @@ def collect(artifacts, destination, version, commit):
                 raise ValueError(f'Release artifact checksum differs: {name}')
         if {file.name for file in manifest.parent.iterdir()} != names | {manifest.name}:
             raise ValueError('Release artifact contains unrecorded files')
-        for source in manifest.parent.iterdir():
+        # Verify all build evidence above, but publish only installable packages.
+        # Manifests, runtime notices and Windows metadata stay in CI artifacts;
+        # license/notice texts are also included inside the native packages.
+        for package in public_packages(report):
+            source = manifest.parent / package['name']
             target = destination / source.name
             if target.exists():
                 raise ValueError(f'Platforms have colliding asset names: {target.name}')
             # Both directories are on the release runner's workspace volume.
             os.link(source, target)
-    for name in ('LICENSE', 'THIRD_PARTY_NOTICES'):
-        shutil.copy2(ROOT / name, destination / name)
     source_archive = destination / f'guerrilla-worker-{version}-source.tar.gz'
     subprocess.run(['git', 'archive', '--format=tar.gz', f'--prefix=guerrilla-worker-{version}/',
                     f'--output={source_archive.resolve()}', commit], cwd=ROOT, check=True)
@@ -103,7 +125,8 @@ def publish(destination, assets, version, commit, repository):
         'LichtFeld and Spirula remain user-installed. Intel Mac supports worker management; '
         'the current scan engines target NVIDIA Windows/Linux or Apple Silicon. '
         'GPU scan acceptance is separate from these package checks.\n\n'
-        'See `SHA256SUMS.txt`, platform runtime/notice archives, and the source archive for checksums and build evidence. '
+        'See `SHA256SUMS.txt` for download checksums. Licenses and third-party notices are included inside the packages '
+        'and source archive; platform manifests and additional build evidence remain in the workflow artifacts. '
         'The source archive is the tagged checkout; CI applies the shared release version with '
         f'`python scripts/release_version.py apply --version {version}` before compilation.\n'
     )

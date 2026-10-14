@@ -3,7 +3,9 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
+import tarfile
 import tempfile
 import tomllib
 import unittest
@@ -17,6 +19,73 @@ import release_version
 
 
 class ReleaseAutomationTests(unittest.TestCase):
+    def release_fixture(self, root):
+        commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=publish_release.ROOT, text=True).strip()
+        artifacts = root / 'artifacts'
+        public = set()
+        for platform, suffixes in {
+            'Windows-X64': ('-setup.exe',),
+            'Linux-X64': ('.AppImage', '.deb', '.rpm'),
+            'macOS-ARM64': ('.dmg', '.app.tar.gz'),
+            'macOS-X64': ('.dmg', '.app.tar.gz'),
+        }.items():
+            directory = artifacts / platform
+            directory.mkdir(parents=True)
+            packages = []
+            for suffix in suffixes:
+                file = directory / (platform + suffix)
+                file.write_bytes(('native package ' + file.name).encode())
+                item = release_assets.record(file)
+                packages.append({'file': item, 'assets': [item]})
+                public.add(file.name)
+            (directory / (platform + '-notices.tar.gz')).write_bytes(b'bundled licenses and runtime evidence')
+            if platform == 'Windows-X64':
+                for suffix in ('-SHA256SUMS.txt', '-WebView2.json'):
+                    file = directory / (platform + suffix)
+                    file.write_bytes(b'Windows build evidence')
+                    item = release_assets.record(file)
+                    packages.append({'file': item, 'assets': [item]})
+            report = {'platform': platform, 'version': '0.3.0', 'commit': commit, 'packages': packages,
+                      'assets': [release_assets.record(file) for file in sorted(directory.iterdir())]}
+            (directory / f'release-{platform}.json').write_text(json.dumps(report))
+        return artifacts, commit, public
+
+    def test_public_downloads_include_only_all_native_packages_source_and_one_checksum_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            artifacts, commit, packages = self.release_fixture(root)
+            evidence = {file.relative_to(artifacts): release_assets.record(file)
+                        for file in artifacts.rglob('*') if file.is_file()}
+            destination = root / 'public'
+            assets = publish_release.collect(artifacts, destination, '0.3.0', commit)
+            self.assertEqual({asset['name'] for asset in assets},
+                             packages | {'guerrilla-worker-0.3.0-source.tar.gz', 'SHA256SUMS.txt'})
+            checksums = {name: digest for digest, name in
+                         (line.split('  ', 1) for line in (destination / 'SHA256SUMS.txt').read_text().splitlines())}
+            self.assertEqual(checksums, {asset['name']: asset['sha256'] for asset in assets if asset['name'] != 'SHA256SUMS.txt'})
+            with tarfile.open(destination / 'guerrilla-worker-0.3.0-source.tar.gz') as source:
+                self.assertTrue({'guerrilla-worker-0.3.0/LICENSE', 'guerrilla-worker-0.3.0/THIRD_PARTY_NOTICES'} <= set(source.getnames()))
+            self.assertEqual(evidence, {file.relative_to(artifacts): release_assets.record(file)
+                                       for file in artifacts.rglob('*') if file.is_file()})
+
+    def test_unpublished_evidence_is_still_verified_and_missing_native_formats_are_refused(self):
+        for failure in ('corrupt evidence', 'missing format'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                artifacts, commit, _ = self.release_fixture(root)
+                if failure == 'corrupt evidence':
+                    (artifacts / 'Windows-X64/Windows-X64-WebView2.json').write_bytes(b'changed')
+                    message = 'checksum differs'
+                else:
+                    manifest = artifacts / 'Linux-X64/release-Linux-X64.json'
+                    report = json.loads(manifest.read_text())
+                    report['packages'] = [package for package in report['packages']
+                                          if not package['file']['name'].endswith('.rpm')]
+                    manifest.write_text(json.dumps(report))
+                    message = 'exactly one Linux-X64 .rpm'
+                with self.assertRaisesRegex(ValueError, message):
+                    publish_release.collect(artifacts, root / 'public', '0.3.0', commit)
+
     def test_one_numeric_version_is_allocated_and_reruns_reuse_it(self):
         releases = [{'tag_name': 'v0.3.9', 'prerelease': False, 'target_commitish': 'old'},
                     {'tag_name': 'v0.3.10', 'prerelease': False, 'target_commitish': 'old'},
