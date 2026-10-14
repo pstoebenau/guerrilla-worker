@@ -5,6 +5,7 @@ param(
 )
 # Packaging only. build-desktop.ts supplies the tested app and vendored runtime.
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 if ($env:OS -ne 'Windows_NT') { throw 'Build the Windows installer on Windows.' }
 if ($Version -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') { throw 'Version must have three or four numeric components.' }
@@ -88,8 +89,8 @@ if (!(Test-Path -LiteralPath $compiler -PathType Leaf)) {
     $install = Start-Process -FilePath $innoSetup -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', "/DIR=`"$installDirectory`"") -WindowStyle Hidden -Wait -PassThru
     if ($install.ExitCode -ne 0 -or !(Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'Could not install the build-only Inno Setup compiler.' }
 }
-$compilerVersion = (Get-Item -LiteralPath $compiler).VersionInfo.FileVersion
-if ($compilerVersion -notmatch '^6\.4\.3(?:\.0)?(?:\s|$)') { throw 'Unexpected Inno Setup compiler version; expected 6.4.3.' }
+# ISCC's launcher PE metadata does not identify the compiler engine version.
+# windows-installer.iss enforces the pin using Inno's actual version constant.
 $baseName = "Guerrilla-Worker-$Version-windows-x64-setup"
 # Remove only artifacts from this exact version so older extra slices cannot be
 # mistaken for part of a smaller rebuilt package. Other releases remain intact.

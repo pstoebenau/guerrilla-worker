@@ -1,3 +1,7 @@
+#if VER != EncodeVer(6, 4, 3)
+  #error This installer requires the pinned Inno Setup compiler version 6.4.3
+#endif
+
 #ifndef AppVersion
   #error AppVersion must be supplied by scripts/build-windows.ps1
 #endif
