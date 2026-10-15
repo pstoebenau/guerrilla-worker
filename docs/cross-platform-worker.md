@@ -2,10 +2,10 @@
 
 ## Supported platforms
 
-Desktop runtime assets and package jobs cover Windows x64, Linux x64, and macOS
-14 or later on Apple Silicon and Intel. CI runs checks on Windows Server 2022,
-Ubuntu 24.04, and macOS 15 on both architectures. The desktop package workflow
-builds four distributions with the same app and protocol and publishes them in
+Desktop runtime assets and package jobs cover Windows x86_64, Ubuntu x86_64, and macOS
+14 or later on Apple Silicon (arm64). CI runs checks on Windows Server 2022,
+Ubuntu 24.04, and macOS 15 on arm64. The desktop package workflow
+builds three distributions with the same app and protocol and publishes them in
 one GitHub Release after every push to `main` succeeds on all platforms.
 
 GPU job support depends on the engine and hardware. Windows/Linux workers require
@@ -13,8 +13,7 @@ compatible installed engines and GPU drivers; LichtFeld requires NVIDIA CUDA.
 Windows/Linux GPU libraries and model weights are downloaded and verified from
 Setup instead of included in the app. The owner supplies the NVIDIA driver;
 `libcuda.so.1` remains external to the managed GPU runtime.
-Apple Silicon uses Spirula. Intel Mac distributions support worker management;
-the pinned engine distribution does not provide Intel Mac GPU execution.
+Apple Silicon uses Spirula. Intel Mac releases are no longer built.
 The Linux NVIDIA Docker image is x64 only.
 
 Windows ARM and Linux ARM do not have bundled runtime targets. Other Linux

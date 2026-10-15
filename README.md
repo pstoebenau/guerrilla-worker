@@ -7,8 +7,7 @@ and engine APIs. The outbound worker protocol remains version 2.
 
 ## Desktop
 
-The desktop app runs on Windows x64, Linux x64, and macOS 14 or later (Apple Silicon and
-Intel management builds). Install LichtFeld and/or Spirula through their own
+The desktop app runs on Windows x86_64, Ubuntu x86_64, and macOS 14 or later on Apple Silicon (arm64). Install LichtFeld and/or Spirula through their own
 upstream distribution, then select their executable paths in **Setup**. LichtFeld
 requires an NVIDIA CUDA GPU and the compatible densification plugin. Apple Silicon
 execution uses Spirula. Available engines are advertised only after their own
@@ -205,9 +204,9 @@ bun --cwd desktop run build
 docker build --target test -t guerrilla-worker:test .
 ```
 
-The [worker workflow](.github/workflows/worker.yml) checks and builds Windows x64,
-Linux x64, and macOS on Apple Silicon and Intel on each push to `main`, then
-automatically publishes all four builds into one GitHub Release. It allocates
+The [worker workflow](.github/workflows/worker.yml) checks and builds Windows x86_64,
+Ubuntu x86_64, and macOS arm64 on each push to `main`, then
+automatically publishes all three builds into one GitHub Release. It allocates
 one shared stable version and publishes only after every platform builds and tests
 successfully and the matching Linux Docker image has been pushed. Tests reuse
 release artifacts inside each OS build job; there is no separate check matrix.

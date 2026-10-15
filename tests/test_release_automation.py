@@ -16,6 +16,7 @@ import publish_release
 import reassemble_release
 import release_assets
 import release_version
+import release_image
 
 
 class ReleaseAutomationTests(unittest.TestCase):
@@ -27,7 +28,6 @@ class ReleaseAutomationTests(unittest.TestCase):
             'Windows-X64': ('-setup.exe',),
             'Linux-X64': ('.AppImage', '.deb', '.rpm'),
             'macOS-ARM64': ('.dmg', '.app.tar.gz'),
-            'macOS-X64': ('.dmg', '.app.tar.gz'),
         }.items():
             directory = artifacts / platform
             directory.mkdir(parents=True)
@@ -127,6 +127,67 @@ class ReleaseAutomationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'another commit'):
             release_version.existing_release('0.3.5', [release], 'b' * 40)
 
+    def test_registry_reuse_requires_exact_identity_without_a_github_release(self):
+        digest = 'sha256:' + 'a' * 64
+        config = {'os': 'linux', 'architecture': 'amd64', 'config': {'Labels': {
+            'org.opencontainers.image.version': '0.3.5',
+            'org.opencontainers.image.revision': 'b' * 40,
+            'org.opencontainers.image.source': 'https://github.com/owner/repo'}}}
+        for response in (config, {'linux/amd64': config}):
+            with patch.object(release_image, 'inspect', side_effect=[digest, json.dumps(response)]) as inspect:
+                self.assertEqual(release_image.existing_image('owner/repo', '0.3.5', 'b' * 40), digest)
+                self.assertEqual(inspect.call_args.args[0], 'ghcr.io/owner/repo@' + digest)
+        for field in ('version', 'revision', 'source'):
+            changed = json.loads(json.dumps(config))
+            changed['config']['Labels']['org.opencontainers.image.' + field] = 'wrong'
+            with patch.object(release_image, 'inspect', side_effect=[digest, json.dumps(changed)]):
+                with self.assertRaisesRegex(ValueError, 'refusing reuse or overwrite'):
+                    release_image.existing_image('owner/repo', '0.3.5', 'b' * 40)
+        config['architecture'] = 'arm64'
+        with patch.object(release_image, 'inspect', side_effect=[digest, json.dumps(config)]):
+            with self.assertRaisesRegex(ValueError, 'platform'):
+                release_image.existing_image('owner/repo', '0.3.5', 'b' * 40)
+        with patch.object(release_image, 'inspect', return_value=None):
+            self.assertIsNone(release_image.existing_image('owner/repo', '0.3.5', 'b' * 40))
+
+    def test_version_allocation_skips_images_owned_by_other_commits(self):
+        with patch.object(release_image, 'existing_image', side_effect=[release_image.ImageConflict(), None]) as inspect:
+            self.assertEqual(release_image.select_version('owner/repo', '0.3.5', 'commit'), '0.3.6')
+            self.assertEqual(inspect.call_args.args, ('owner/repo', '0.3.6', 'commit'))
+        with patch.object(release_image, 'existing_image', return_value='sha256:existing'):
+            self.assertEqual(release_image.select_version('owner/repo', '0.3.5', 'commit'), '0.3.5')
+        with patch.object(release_image, 'existing_image', side_effect=RuntimeError('unauthorized')):
+            with self.assertRaises(RuntimeError):
+                release_image.select_version('owner/repo', '0.3.5', 'commit')
+
+    def test_registry_errors_do_not_trigger_rebuilds(self):
+        for error in ('unauthorized', 'timeout', 'too many requests', 'manifest unknown'):
+            result = subprocess.CompletedProcess([], 1, '', error)
+            with patch.object(release_image.subprocess, 'run', return_value=result):
+                if error == 'manifest unknown':
+                    self.assertIsNone(release_image.inspect('image:v1', 'template', optional=True))
+                else:
+                    with self.assertRaises(RuntimeError):
+                        release_image.inspect('image:v1', 'template', optional=True)
+
+    def test_canonical_names_preserve_formats_and_staged_checksums(self):
+        cases = [('macOS-ARM64', 'macos-arm64', '.dmg'),
+                 ('macOS-ARM64', 'macos-arm64', '.app.tar.gz'),
+                 ('Windows-X64', 'windows-x86_64', '-setup.exe'),
+                 *[('Linux-X64', 'ubuntu-x86_64', suffix) for suffix in ('.AppImage', '.deb', '.rpm')]]
+        for platform, target, suffix in cases:
+            with self.subTest(platform=platform, suffix=suffix), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                source = root / ('Old_aarch64' + suffix)
+                source.write_bytes(b'package bytes')
+                destination = root / 'assets'
+                destination.mkdir()
+                name = release_assets.package_name(source, platform, '0.3.5')
+                self.assertEqual(name, f'guerrilla-worker-0.3.5-{target}{suffix}')
+                package = release_assets.stage_file(source, destination, name=name)
+                self.assertEqual(package['file'], release_assets.record(destination / name))
+                self.assertEqual(package['assets'], [package['file']])
+
     def test_split_package_restores_exact_bytes_and_refuses_corruption(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -181,17 +242,17 @@ class ReleaseAutomationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             artifacts = root / 'artifacts'
-            for platform in ('Windows-X64', 'Linux-X64', 'macOS-ARM64'):
+            for platform in ('Windows-X64', 'Linux-X64'):
                 directory = artifacts / platform
                 directory.mkdir(parents=True)
                 (directory / f'release-{platform}.json').write_text(json.dumps({
                     'platform': platform, 'version': '0.3.0', 'commit': 'a' * 40, 'assets': []}))
             with self.assertRaisesRegex(ValueError, 'Publication requires'):
                 publish_release.collect(artifacts, root / 'output', '0.3.0', 'a' * 40)
-            directory = artifacts / 'macOS-X64'
+            directory = artifacts / 'macOS-ARM64'
             directory.mkdir()
-            (directory / 'release-macOS-X64.json').write_text(json.dumps({
-                'platform': 'macOS-X64', 'version': '0.3.0', 'commit': 'b' * 40, 'assets': []}))
+            (directory / 'release-macOS-ARM64.json').write_text(json.dumps({
+                'platform': 'macOS-ARM64', 'version': '0.3.0', 'commit': 'b' * 40, 'assets': []}))
             with self.assertRaisesRegex(ValueError, 'same version and commit'):
                 publish_release.collect(artifacts, root / 'output', '0.3.0', 'a' * 40)
 

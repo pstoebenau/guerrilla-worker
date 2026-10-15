@@ -135,6 +135,22 @@ mod tests {
     }
 
     #[test]
+    fn canonical_release_names_match_supported_platforms() {
+        for (name, platform, arch) in [
+            ("guerrilla-worker-0.3.5-macos-arm64.dmg", "macos", "aarch64"),
+            ("guerrilla-worker-0.3.5-macos-arm64.app.tar.gz", "macos", "aarch64"),
+            ("guerrilla-worker-0.3.5-ubuntu-x86_64.AppImage", "linux", "x86_64"),
+            ("guerrilla-worker-0.3.5-ubuntu-x86_64.deb", "linux", "x86_64"),
+            ("guerrilla-worker-0.3.5-ubuntu-x86_64.rpm", "linux", "x86_64"),
+            ("guerrilla-worker-0.3.5-windows-x86_64-setup.exe", "windows", "x86_64"),
+        ] {
+            assert!(desktop_asset(name, platform, arch));
+            let other_arch = if arch == "aarch64" { "x86_64" } else { "aarch64" };
+            assert!(!desktop_asset(name, platform, other_arch));
+        }
+    }
+
+    #[test]
     fn selects_newest_version_numerically_and_ignores_current_or_older() {
         let releases = [
             release(

@@ -10,7 +10,7 @@ import subprocess
 import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
-PLATFORMS = {'Windows-X64', 'Linux-X64', 'macOS-ARM64', 'macOS-X64'}
+PLATFORMS = {'Windows-X64', 'Linux-X64', 'macOS-ARM64'}
 ASSET_LIMIT = 2_000_000_000
 
 
@@ -23,11 +23,20 @@ def record(file):
     return {'name': file.name, 'size': file.stat().st_size, 'sha256': digest(file)}
 
 
-def stage_file(file, destination, limit=ASSET_LIMIT):
+def package_name(file, platform, version):
+    target = {'Windows-X64': 'windows-x86_64', 'Linux-X64': 'ubuntu-x86_64',
+              'macOS-ARM64': 'macos-arm64'}[platform]
+    for suffix in ('-setup.exe', '.app.tar.gz', '.AppImage', '.deb', '.rpm', '.dmg'):
+        if file.name.endswith(suffix):
+            return f'guerrilla-worker-{version}-{target}{suffix}'
+    return file.name  # Private installer evidence retains its original name.
+
+
+def stage_file(file, destination, limit=ASSET_LIMIT, name=None):
     original = record(file)
     # GitHub normalizes spaces and other special characters in uploaded names.
     # Use that name before making manifests and checksums.
-    original['name'] = re.sub(r'[^A-Za-z0-9_.-]', '.', original['name'])
+    original['name'] = re.sub(r'[^A-Za-z0-9_.-]', '.', name or original['name'])
     if original['size'] > limit:
         raise ValueError('Desktop package exceeds the single-file release limit; GPU dependencies must be installed during setup')
     target = destination / original['name']
@@ -76,7 +85,7 @@ def prepare(bundle, destination, platform, version, commit):
     packages = []
     for file in sorted(files):
         if file.is_file():
-            packages.append(stage_file(file, destination))
+            packages.append(stage_file(file, destination, name=package_name(file, platform, version)))
             # Staged assets now own these generated files. Reclaim the original
             # package after staging so all formats fit on the runner.
             file.unlink()

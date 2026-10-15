@@ -14,7 +14,6 @@ def public_packages(report):
         'Windows-X64': ('-setup.exe',),
         'Linux-X64': ('.AppImage', '.deb', '.rpm'),
         'macOS-ARM64': ('.dmg', '.app.tar.gz'),
-        'macOS-X64': ('.dmg', '.app.tar.gz'),
     }[report['platform']]
     selected = []
     for suffix in formats:
@@ -34,7 +33,7 @@ def collect(artifacts, destination, version, commit):
     manifests = list(artifacts.glob('*/release-*.json'))
     reports = [json.loads(file.read_text()) for file in manifests]
     if len(reports) != len(PLATFORMS) or {report['platform'] for report in reports} != PLATFORMS:
-        raise ValueError('Publication requires Windows, Linux, Apple Silicon macOS and Intel macOS')
+        raise ValueError('Publication requires Windows x86_64, Ubuntu x86_64 and macOS arm64')
     if any(report['version'] != version or report['commit'] != commit for report in reports):
         raise ValueError('All release packages must have the same version and commit')
     destination.mkdir(parents=True, exist_ok=True)
@@ -120,18 +119,18 @@ def publish(destination, assets, version, commit, repository, image=None):
                    f'Immutable image: `{image}`.\n' if image else '')
     notes.write_text(
         f'Guerrilla Worker {version}, built from `{commit}`.\n\n'
-        'This release contains Windows x64, Linux x64, macOS Apple Silicon and macOS Intel builds. '
+        'This release contains Windows x86_64, Ubuntu x86_64 and macOS arm64 builds. '
         'All native builds and the Windows installation/uninstallation test passed before publication.\n\n'
         '- Windows: download and run the single setup `.exe`.\n'
-        '- Linux: download one AppImage, DEB or RPM and open or install it normally.\n'
+        '- Ubuntu: download one AppImage, DEB or RPM and open or install it normally.\n'
         f'{docker_note}'
-        '- macOS: choose the `aarch64`/`ARM64` package for Apple Silicon or `x64`/`X64` for Intel. '
+        '- macOS: choose the `arm64` package for Apple Silicon. '
         'Copy the app from its DMG to Applications before opening it; app archives are also included. '
         'Builds use ad-hoc signing; after the first launch attempt, '
         'macOS may require System Settings > Privacy & Security > Open Anyway. Apple Developer ID notarization is not configured.\n\n'
         'Windows/Linux GPU libraries and reconstruction models are downloaded and checksum-verified from Setup > GPU dependencies. '
         'The app includes its base Python/Node/FFmpeg runtime and can be managed offline; first GPU setup needs internet and 25 GiB free. '
-        'Desktop LichtFeld and Spirula remain user-installed. Intel Mac supports worker management; '
+        'Desktop LichtFeld and Spirula remain user-installed; '
         'the current scan engines target NVIDIA Windows/Linux or Apple Silicon. '
         'GPU scan acceptance is separate from these package checks.\n\n'
         'See `SHA256SUMS.txt` for download checksums. Licenses and third-party notices are included inside the packages '

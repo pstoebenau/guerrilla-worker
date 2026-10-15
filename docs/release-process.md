@@ -48,9 +48,9 @@ distribution, including the engines bundled into Docker. See
 ## Desktop release
 
 The cross-platform workflow is `.github/workflows/worker.yml`, displayed as
-**Build and release worker**. Every push to `main` builds and tests Windows x64,
-Linux x64, macOS Apple Silicon and macOS Intel, plus the Linux amd64 Docker image.
-It automatically publishes all four desktop builds into **one** stable GitHub
+**Build and release worker**. Every push to `main` builds and tests Windows x86_64,
+Ubuntu x86_64 and macOS arm64, plus the Linux amd64 Docker image.
+It automatically publishes all three desktop builds into **one** stable GitHub
 Release only after the Docker image has also built and pushed successfully. No
 manual publication step or Windows-only release path is required. Manual dispatch
 on `main` uses the same complete matrix:
@@ -75,12 +75,38 @@ upload leaves the previous public release intact. The Docker job publishes
 version as the desktop packages. Release notes record its immutable digest.
 After GitHub publication, `:latest` is pointed at that digest; retry the release
 job if this promotion fails. Retrying an older published release does not roll
-`:latest` back. Image retries reuse the existing release image and refuse a
-version already claimed by another commit. Rerun failed jobs after a transient
-failure; push a fix for code/build failures.
+`:latest` back. Image retries inspect GHCR directly, even when desktop failure prevented a
+GitHub Release. Reuse requires matching version, source commit, repository and
+Linux amd64 labels; the verified immutable digest is passed to publication.
+Authentication/network errors fail the job instead of triggering a rebuild.
+Version allocation skips image tags already claimed by a different commit, so a
+fix can receive the next patch version without overwriting a previous image.
+Cross-commit image reuse is intentionally unsupported; unchanged Docker layers
+can still use the registry build cache.
+
+After a transient failure, use **Re-run failed jobs**, not a new workflow dispatch:
+
+```sh
+gh run rerun <run-id> --failed --repo pstoebenau/guerrilla-worker
+```
+
+Successful package jobs and the Docker job are preserved; publication resumes
+when its dependencies succeed. If only publication failed, retry that job.
+Artifacts expire after 14 days, so retry before then. A code/build fix needs a new
+commit and build. Reruns use the original workflow revision.
+
+Public filenames use `guerrilla-worker-<version>-<os>-<arch>` with `windows`,
+`ubuntu`, or `macos` and `x86_64` or `arm64`. For example:
+
+- `guerrilla-worker-0.3.5-windows-x86_64-setup.exe`
+- `guerrilla-worker-0.3.5-ubuntu-x86_64.AppImage` (also `.deb` and `.rpm`)
+- `guerrilla-worker-0.3.5-macos-arm64.dmg` (also `.app.tar.gz`)
+
+Versions remain numeric `vX.Y.Z`; Intel macOS is no longer part of releases.
+Internal build target identifiers and historical downloads retain their names.
 
 Formats are one self-contained Windows setup `.exe`, Linux AppImage/DEB/RPM,
-and macOS DMG and `.app.tar.gz` for both architectures. Linux RPM creation uses
+and macOS DMG and `.app.tar.gz` for Apple Silicon. Linux RPM creation uses
 system `rpmbuild` to stream the same filesystem Tauri prepares for the DEB;
 this avoids buffering the package filesystem in the Tauri RPM builder's memory.
 Linux native builds need `rpm` alongside Tauri's normal system dependencies.
@@ -120,7 +146,7 @@ and split-package manifests from stable releases.
 
 Windows and Linux package runners require at least 40 GiB free for real GPU setup verification; macOS requires
 12 GiB. Manual dispatch accepts `windows_package_runner`, `linux_package_runner`,
-`macos_package_runner`, and `macos_intel_package_runner` for larger or dedicated
+and `macos_package_runner` for larger or dedicated
 runner labels. Labels must select the correct OS/architecture and native tools.
 The separate `linux_image_runner` input selects the Linux amd64 Docker runner,
 which needs Docker and at least 40 GiB free. The Windows installer smoke test

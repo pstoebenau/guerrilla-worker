@@ -84,6 +84,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=('select', 'apply', 'check', 'existing'))
     parser.add_argument('--version')
+    parser.add_argument('--check-images', action='store_true')
     args = parser.parse_args()
     if args.command == 'apply':
         apply_version(ROOT, args.version)
@@ -103,6 +104,9 @@ def main():
         return
     version = next_version(json.loads((ROOT / 'package.json').read_text())['version'],
                            releases, os.environ['GITHUB_SHA'])
+    if args.check_images and not existing_release(version, releases, os.environ['GITHUB_SHA']):
+        from release_image import select_version
+        version = select_version(os.environ['GITHUB_REPOSITORY'], version, os.environ['GITHUB_SHA'])
     with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
         output.write(f'version={version}\ntag=v{version}\n')
     print(f'All platforms will build Guerrilla Worker {version}')
