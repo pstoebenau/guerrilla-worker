@@ -50,6 +50,14 @@ def next_version(base, releases, commit):
     return '.'.join(map(str, chosen))
 
 
+def existing_release(version, releases, commit):
+    numeric_version(version)
+    matches = [release for release in releases if release['tag_name'] == f'v{version}']
+    if any(release['target_commitish'] != commit for release in matches):
+        raise ValueError('Refusing to overwrite images for a release belonging to another commit')
+    return bool(matches)
+
+
 def apply_version(root, version):
     numeric_version(version)
     for relative in ('package.json', 'desktop/package.json', 'desktop/src-tauri/tauri.conf.json'):
@@ -74,7 +82,7 @@ def apply_version(root, version):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('select', 'apply', 'check'))
+    parser.add_argument('command', choices=('select', 'apply', 'check', 'existing'))
     parser.add_argument('--version')
     args = parser.parse_args()
     if args.command == 'apply':
@@ -87,8 +95,14 @@ def main():
     releases = json.loads(subprocess.check_output([
         'gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/releases', '--paginate', '--slurp'
     ], text=True))
+    releases = [release for page in releases for release in page]
+    if args.command == 'existing':
+        exists = existing_release(args.version, releases, os.environ['GITHUB_SHA'])
+        with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+            output.write(f'exists={str(exists).lower()}\n')
+        return
     version = next_version(json.loads((ROOT / 'package.json').read_text())['version'],
-                           [release for page in releases for release in page], os.environ['GITHUB_SHA'])
+                           releases, os.environ['GITHUB_SHA'])
     with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
         output.write(f'version={version}\ntag=v{version}\n')
     print(f'All platforms will build Guerrilla Worker {version}')

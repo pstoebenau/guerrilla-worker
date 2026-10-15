@@ -23,7 +23,12 @@ named artifact context to `Dockerfile.runtime`. The runtime also downloads its
 checksum-pinned upstream Spirula release, compatible plugin, and model assets at
 build time. `Dockerfile` adds the Rust worker and pipeline without recompiling
 engines. Runtime and worker image defaults are `guerrilla-runtime:local` and
-`guerrilla-worker:local`; the helper never publishes images or releases.
+`guerrilla-worker:local`; the helper keeps images local unless `--push` is supplied.
+It never creates GitHub Releases.
+
+With `--push`, explicit registry image names and an authenticated Buildx builder,
+the helper publishes both images and exports registry build caches. The release
+workflow uses this mode; ordinary local builds do not publish.
 
 The Docker host needs a compatible NVIDIA driver and NVIDIA Container Toolkit,
 plus an x86-64-v3-capable CPU for the bundled LichtFeld artifact. No host engine
@@ -32,8 +37,10 @@ and shared GPU lock directories are mounted; see [build and run examples](../REA
 GPU preflight and complete scan/resume validation remain necessary on the target
 hardware. A source/CPU build does not establish GPU acceptance.
 
-The release workflow does not build LichtFeld or download Spirula. It builds
-**desktop** packages and publishes them together in one GitHub Release. Existing license,
+The release workflow builds desktop packages and a matching Linux Docker image.
+Its Docker job reuses the pinned LichtFeld artifact and downloads the pinned
+Spirula release; it does not compile either engine. Desktop packages publish
+together in one GitHub Release, with the image in GHCR. Existing license,
 dependency-source, and model-term review remains applicable before public
 distribution, including the engines bundled into Docker. See
 [cross-platform architecture](cross-platform-worker.md).
@@ -42,9 +49,11 @@ distribution, including the engines bundled into Docker. See
 
 The cross-platform workflow is `.github/workflows/worker.yml`, displayed as
 **Build and release worker**. Every push to `main` builds and tests Windows x64,
-Linux x64, macOS Apple Silicon and macOS Intel, then automatically publishes all
-four into **one** stable GitHub Release. No manual publication step or Windows-only
-release path is required. Manual dispatch on `main` uses the same complete matrix:
+Linux x64, macOS Apple Silicon and macOS Intel, plus the Linux amd64 Docker image.
+It automatically publishes all four desktop builds into **one** stable GitHub
+Release only after the Docker image has also built and pushed successfully. No
+manual publication step or Windows-only release path is required. Manual dispatch
+on `main` uses the same complete matrix:
 
 ```sh
 gh workflow run worker.yml --ref main
@@ -52,17 +61,23 @@ gh workflow run worker.yml --ref main
 
 The workflow selects a shared numeric version before packaging. It uses the
 version in `package.json` as a minimum, then increments the latest cross-platform
-release's patch version when necessary. CI applies that version to both desktop
-manifests, the worker/desktop Cargo packages and their lockfiles without creating
+release's patch version when necessary. Both desktop and Docker jobs apply that
+version to the desktop manifests, worker/desktop Cargo packages and lockfiles without creating
 an extra commit or push. Reruns reuse a release already allocated to the same
 commit. Bump the source version to start a new minor or major series.
 
 Runs on `main` are serialized so version allocation and publication do not race.
-A release job waits for **every** native package job, verifies matching versions,
-commits and SHA-256 inventories, then creates a draft, uploads every asset,
+A release job waits for **every** native package job and the Docker job, verifies
+matching versions, commits and SHA-256 inventories, then creates a draft, uploads every asset,
 verifies the completed uploads and publishes it as Latest. A failed platform or
-upload leaves the previous public release intact. Rerun failed jobs after a
-transient failure; push a fix for code/build failures.
+upload leaves the previous public release intact. The Docker job publishes
+`ghcr.io/pstoebenau/guerrilla-worker:vX.Y.Z` from the same commit and selected
+version as the desktop packages. Release notes record its immutable digest.
+After GitHub publication, `:latest` is pointed at that digest; retry the release
+job if this promotion fails. Retrying an older published release does not roll
+`:latest` back. Image retries reuse the existing release image and refuse a
+version already claimed by another commit. Rerun failed jobs after a transient
+failure; push a fix for code/build failures.
 
 Formats are one self-contained Windows setup `.exe`, Linux AppImage/DEB/RPM,
 and macOS DMG and `.app.tar.gz` for both architectures. Linux RPM creation uses
@@ -98,16 +113,19 @@ every native package and the source archive. Platform manifests, runtime/notice
 archives, Windows metadata and Windows-specific checksums stay in the CI artifacts;
 the publisher verifies all of that evidence before selecting public downloads.
 Apply the release version with `scripts/release_version.py` when reproducing a
-build from the source archive. Engine installations and Docker images remain
-separate from desktop publication. The app's manual update notice recognizes
-both complete native packages and split-package manifests from stable releases.
+build from the source archive. Desktop engine installations remain owner-managed.
+The matching Docker image includes the engines and is required by the release
+workflow. The app's manual update notice recognizes both complete native packages
+and split-package manifests from stable releases.
 
 Windows and Linux package runners require at least 40 GiB free for real GPU setup verification; macOS requires
 12 GiB. Manual dispatch accepts `windows_package_runner`, `linux_package_runner`,
 `macos_package_runner`, and `macos_intel_package_runner` for larger or dedicated
 runner labels. Labels must select the correct OS/architecture and native tools.
-The Windows installer smoke test requires a fresh worker account. Package Actions
-artifacts remain available for 14 days as build evidence; GitHub Release assets
+The separate `linux_image_runner` input selects the Linux amd64 Docker runner,
+which needs Docker and at least 40 GiB free. The Windows installer smoke test
+requires a fresh worker account. Package Actions artifacts remain available for
+14 days as build evidence; GitHub Release assets
 provide the persistent downloads.
 
 ## What CI verifies
@@ -117,8 +135,11 @@ resume, leases, cancellation, profile isolation, and update selection; these can
 fail even when the binaries build successfully. Python checks cover helpers that
 Rust compilation does not validate. Windows/Linux jobs additionally install the optional GPU runtime in an isolated profile and verify that subsequent setup reuses it offline without creating enrollment or scratch. Tests run inside each native release-build job, using release Cargo artifacts and
 the packaged Python/Node/converter runtimes. There is no separate check matrix,
-repeated frontend build, debug-profile compile, or Docker image publication gate.
-The Docker image can be checked independently with the documented local command.
+repeated frontend build, or debug-profile compile. The Docker job builds the
+self-contained image, verifies its compiled
+worker version, and gates publication alongside the native packages. Full GPU
+scan acceptance still requires target hardware. The Docker image can also be
+built independently with the documented local command.
 
 The Windows installer smoke test runs for every release build. It installs
 the distribution, checks bundled files, runs the installed worker's status and
@@ -248,14 +269,18 @@ Python file, notice or documentation change invalidates that artifact.
 Registry BuildKit caching preserves unchanged engine branches when a runtime
 input changes. The previous release recorded `runtime-image.txt` alongside
 `engine-artifact-reference.json` and consumed the runtime's immutable digest.
-The current helper builds a local runtime tag and reuses Docker build caching.
+The current helper uses local Docker caching by default. In release `--push`
+mode it exports `mode=max` BuildKit caches to each image repository's
+`:buildcache` tag, reuses unchanged runtime branches and Rust build layers,
+and builds the worker from the newly published runtime's immutable digest.
 
 `Dockerfile` compiles the Rust worker and pipeline independently, then copies
 them, Python helper sources, and notices onto the prepared runtime. Worker and
 pipeline changes can reuse cached engine/runtime layers. Engines, models, and
 runtime dependencies are prepared when building `Dockerfile.runtime`; executing
 `Dockerfile` with an existing runtime tag does not download or compile engines.
-The current checks workflow does not publish versioned worker images.
+The release workflow publishes versioned worker images using the shared
+desktop release version.
 
 For a Spirula-only worker, skip the LichtFeld build entirely:
 

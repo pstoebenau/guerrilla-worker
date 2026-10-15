@@ -119,6 +119,14 @@ class ReleaseAutomationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'Release versions differ'):
                 release_version.check_versions(root, '0.3.11')
 
+    def test_image_retries_reuse_existing_releases_and_refuse_conflicting_commits(self):
+        release = {'tag_name': 'v0.3.5', 'target_commitish': 'a' * 40}
+        self.assertFalse(release_version.existing_release('0.3.5', [], 'a' * 40))
+        self.assertFalse(release_version.existing_release('0.3.6', [release], 'b' * 40))
+        self.assertTrue(release_version.existing_release('0.3.5', [release], 'a' * 40))
+        with self.assertRaisesRegex(ValueError, 'another commit'):
+            release_version.existing_release('0.3.5', [release], 'b' * 40)
+
     def test_split_package_restores_exact_bytes_and_refuses_corruption(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -232,7 +240,11 @@ class ReleaseAutomationTests(unittest.TestCase):
                     raise AssertionError(f'Unexpected GitHub request (drafts cannot be found by tag): {args}')
 
                 with patch.object(publish_release, 'gh', side_effect=transport):
-                    publish_release.publish(destination, [asset], '0.3.0', 'a' * 40, 'owner/repo')
+                    publish_release.publish(destination, [asset], '0.3.0', 'a' * 40, 'owner/repo',
+                                            'ghcr.io/owner/repo@sha256:' + 'b' * 64)
+                notes = (root / 'release-notes.md').read_text()
+                self.assertIn('docker pull ghcr.io/owner/repo:v0.3.0', notes)
+                self.assertIn('ghcr.io/owner/repo@sha256:' + 'b' * 64, notes)
                 self.assertEqual(sum('--method' in call for call in calls), int(not existing))
                 verified = calls.index(('api', 'repos/owner/repo/releases/123'))
                 published = next(i for i, call in enumerate(calls) if call[:2] == ('release', 'edit'))

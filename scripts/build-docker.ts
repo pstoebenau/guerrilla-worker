@@ -43,14 +43,61 @@ async function run(args: string[]): Promise<void> {
   if (await child.exited !== 0) throw new Error('Docker build failed; inspect the build output above');
 }
 
+type ImageBuild = {
+  runtimeImage: string;
+  workerImage: string;
+  version: string;
+  push: boolean;
+  metadataFile?: string;
+};
+
+// Keep registry publication in the same builder as local builds, including the
+// verified engine context. Published workers consume the exact runtime digest.
+export async function buildImages(options: ImageBuild, lock: EngineLock, context: string, execute = run): Promise<void> {
+  const repository = (tag: string) => tag.replace(/:[^/:]+$/, '');
+  const build = (tag: string) => options.push
+    ? ['docker', 'buildx', 'build', '--push', '--cache-from', `type=registry,ref=${repository(tag)}:buildcache`,
+      '--cache-to', `type=registry,ref=${repository(tag)}:buildcache,mode=max`]
+    : ['docker', 'build'];
+  const runtimeMetadata = path.join(context, 'runtime-build.json');
+  const workerMetadata = options.metadataFile ?? path.join(context, 'worker-build.json');
+  const labels = ['--label', `org.opencontainers.image.version=${options.version}`];
+  if (process.env.GITHUB_SHA) labels.push('--label', `org.opencontainers.image.revision=${process.env.GITHUB_SHA}`);
+  if (process.env.GITHUB_REPOSITORY) labels.push('--label', `org.opencontainers.image.source=https://github.com/${process.env.GITHUB_REPOSITORY}`);
+  await execute([...build(options.runtimeImage), '--platform', 'linux/amd64', '--file', 'Dockerfile.runtime', '--target', 'combined-runtime',
+    '--build-context', `lichtfeld-artifact=${context}`, '--build-arg', `LICHTFELD_SHA256=${lock.archive.sha256}`,
+    '--build-arg', `LICHTFELD_METADATA_SHA256=${lock.metadata.sha256}`, '--build-arg', `LICHTFELD_CHECKSUMS_SHA256=${lock.checksums.sha256}`,
+    '--build-arg', `LICHTFELD_RECIPE=${lock.recipe}`, '--build-arg', `LICHTFELD_RELEASE_URL=${lock.releaseUrl}`,
+    ...labels, ...(options.push ? ['--metadata-file', runtimeMetadata] : []), '--tag', options.runtimeImage, '.']);
+  let runtime = options.runtimeImage;
+  if (options.push) {
+    const metadata = JSON.parse(await readFile(runtimeMetadata, 'utf8')) as Record<string, unknown>;
+    const digest = metadata['containerimage.digest'];
+    if (typeof digest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(digest)) throw new Error('Missing published runtime digest');
+    runtime = `${repository(options.runtimeImage)}@${digest}`;
+  }
+  await execute([...build(options.workerImage), '--platform', 'linux/amd64', '--target', 'worker',
+    '--build-arg', `WORKER_RUNTIME_IMAGE=${runtime}`, '--build-arg', `WORKER_VERSION=${options.version}`,
+    ...labels, ...(options.push ? ['--metadata-file', workerMetadata] : []), '--tag', options.workerImage, '.']);
+}
+
 export async function buildDocker(args: string[]): Promise<void> {
   let runtimeImage = 'guerrilla-runtime:local';
   let workerImage = 'guerrilla-worker:local';
+  let push = false;
+  let metadataFile: string | undefined;
   for (let index = 0; index < args.length; index++) {
     const flag = args[index];
     if (flag === '--help') {
-      console.log('Build the Linux amd64 worker with bundled LichtFeld, Spirula, plugins and dependencies.\nUsage: bun run build:docker [--runtime-image TAG] [--worker-image TAG]\nDocker/BuildKit is required. No engine installation or host Python is required. Images are built locally and never pushed.');
+      console.log('Build the Linux amd64 worker with bundled LichtFeld, Spirula, plugins and dependencies.\nUsage: bun run build:docker [--runtime-image TAG] [--worker-image TAG] [--push] [--metadata-file PATH]\nDocker/BuildKit is required. No engine installation or host Python is required. Builds stay local unless --push is supplied. Registry builds use Buildx and registry caches.');
       return;
+    }
+    if (flag === '--push') { push = true; continue; }
+    if (flag === '--metadata-file') {
+      const value = args[++index];
+      if (!value || value.startsWith('--')) throw new Error('A path is required after --metadata-file');
+      metadataFile = path.resolve(value);
+      continue;
     }
     if (flag !== '--runtime-image' && flag !== '--worker-image') throw new Error(`Unknown Docker build argument: ${flag}`);
     const value = args[++index];
@@ -59,6 +106,10 @@ export async function buildDocker(args: string[]): Promise<void> {
     else workerImage = value;
   }
   if (runtimeImage === workerImage) throw new Error('Runtime and worker image tags must differ');
+  if (metadataFile && !push) throw new Error('--metadata-file requires --push');
+  if (push && (!runtimeImage.includes('/') || !workerImage.includes('/'))) throw new Error('--push requires explicit registry image names');
+  const version = (JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')) as { version: string }).version;
+  if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Invalid worker release version');
   const decoded = JSON.parse(await readFile(path.join(root, 'packaging/docker-engines.lock.json'), 'utf8')) as { version: number; lichtfeld: EngineLock };
   if (decoded.version !== 1 || !decoded.lichtfeld) throw new Error('Unsupported Docker engine lock');
   const lock = decoded.lichtfeld;
@@ -74,13 +125,7 @@ export async function buildDocker(args: string[]): Promise<void> {
       await cp(files[index]!, path.join(context, name));
       if (await sha256(path.join(context, name)) !== [lock.archive, lock.metadata, lock.checksums][index]!.sha256) throw new Error('Linux engine staging checksum mismatch');
     }
-    await run(['docker', 'build', '--platform', 'linux/amd64', '--file', 'Dockerfile.runtime', '--target', 'combined-runtime',
-      '--build-context', `lichtfeld-artifact=${context}`, '--build-arg', `LICHTFELD_SHA256=${lock.archive.sha256}`,
-      '--build-arg', `LICHTFELD_METADATA_SHA256=${lock.metadata.sha256}`, '--build-arg', `LICHTFELD_CHECKSUMS_SHA256=${lock.checksums.sha256}`,
-      '--build-arg', `LICHTFELD_RECIPE=${lock.recipe}`,
-      '--build-arg', `LICHTFELD_RELEASE_URL=${lock.releaseUrl}`, '--tag', runtimeImage, '.']);
-    await run(['docker', 'build', '--platform', 'linux/amd64', '--target', 'worker',
-      '--build-arg', `WORKER_RUNTIME_IMAGE=${runtimeImage}`, '--tag', workerImage, '.']);
+    await buildImages({ runtimeImage, workerImage, version, push, metadataFile }, lock, context);
     console.log(`Self-contained Linux worker ready: ${workerImage}`);
   } finally {
     await rm(context, { recursive: true, force: true });

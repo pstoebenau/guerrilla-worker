@@ -11,11 +11,13 @@ COPY pipeline/tests/ tests/
 RUN python -m unittest discover -s tests -v
 
 FROM rust:1.99.0-bookworm AS worker-bundle
+ARG WORKER_VERSION
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY rust rust
 COPY pipeline/scan-settings.schema.json pipeline/scan-settings.schema.json
-RUN cargo build --release --locked --workspace
+RUN cargo build --release --locked --workspace \
+    && if [ -n "$WORKER_VERSION" ]; then test "$(target/release/guerrilla-worker --version)" = "guerrilla-worker $WORKER_VERSION"; fi
 
 FROM engine-runtime AS legal-bundle
 COPY . /source/

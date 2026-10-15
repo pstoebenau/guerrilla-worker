@@ -1,8 +1,9 @@
-"""Publish one complete, checksummed release after every native package job succeeds."""
+"""Publish a complete, checksummed release after native packages and the Linux image succeed."""
 import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 
 from release_assets import ASSET_LIMIT, PLATFORMS, ROOT, record
@@ -102,8 +103,10 @@ def find_release(repository, tag):
     return matches[0] if matches else None
 
 
-def publish(destination, assets, version, commit, repository):
+def publish(destination, assets, version, commit, repository, image=None):
     tag = f'v{version}'
+    if image and not re.fullmatch(re.escape(f'ghcr.io/{repository.lower()}') + r'@sha256:[a-f0-9]{64}', image):
+        raise ValueError('Release image must be an immutable digest in the worker repository')
     release = find_release(repository, tag)
     if release and release['target_commitish'] != commit:
         raise ValueError('Refusing to replace a release belonging to another commit')
@@ -112,19 +115,23 @@ def publish(destination, assets, version, commit, repository):
         print(f'Complete release already published: {release["html_url"]}')
         return
     notes = destination.parent / 'release-notes.md'
+    docker_note = (f'- Linux NVIDIA Docker: `docker pull ghcr.io/{repository.lower()}:{tag}`. '
+                   'The matching image includes LichtFeld, Spirula, plugins, models and supporting runtimes. '
+                   f'Immutable image: `{image}`.\n' if image else '')
     notes.write_text(
         f'Guerrilla Worker {version}, built from `{commit}`.\n\n'
         'This release contains Windows x64, Linux x64, macOS Apple Silicon and macOS Intel builds. '
         'All native builds and the Windows installation/uninstallation test passed before publication.\n\n'
         '- Windows: download and run the single setup `.exe`.\n'
         '- Linux: download one AppImage, DEB or RPM and open or install it normally.\n'
+        f'{docker_note}'
         '- macOS: choose the `aarch64`/`ARM64` package for Apple Silicon or `x64`/`X64` for Intel. '
         'Copy the app from its DMG to Applications before opening it; app archives are also included. '
         'Builds use ad-hoc signing; after the first launch attempt, '
         'macOS may require System Settings > Privacy & Security > Open Anyway. Apple Developer ID notarization is not configured.\n\n'
         'Windows/Linux GPU libraries and reconstruction models are downloaded and checksum-verified from Setup > GPU dependencies. '
         'The app includes its base Python/Node/FFmpeg runtime and can be managed offline; first GPU setup needs internet and 25 GiB free. '
-        'LichtFeld and Spirula remain user-installed. Intel Mac supports worker management; '
+        'Desktop LichtFeld and Spirula remain user-installed. Intel Mac supports worker management; '
         'the current scan engines target NVIDIA Windows/Linux or Apple Silicon. '
         'GPU scan acceptance is separate from these package checks.\n\n'
         'See `SHA256SUMS.txt` for download checksums. Licenses and third-party notices are included inside the packages '
@@ -154,6 +161,7 @@ if __name__ == '__main__':
     parser.add_argument('--artifacts', type=Path, required=True)
     parser.add_argument('--destination', type=Path, required=True)
     parser.add_argument('--version', required=True)
+    parser.add_argument('--image')
     args = parser.parse_args()
     assets = collect(args.artifacts, args.destination, args.version, os.environ['GITHUB_SHA'])
-    publish(args.destination, assets, args.version, os.environ['GITHUB_SHA'], os.environ['GITHUB_REPOSITORY'])
+    publish(args.destination, assets, args.version, os.environ['GITHUB_SHA'], os.environ['GITHUB_REPOSITORY'], args.image)

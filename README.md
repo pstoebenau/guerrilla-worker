@@ -112,7 +112,15 @@ LichtFeld densification plugin, reconstruction models, and all supporting runtim
 It needs no host engine installation or engine bind mounts. This differs from the
 desktop app, which uses engines installed by the owner.
 
-Build the combined runtime and Rust worker layers using Bun and Docker Buildx:
+Each release publishes a matching Linux amd64 image to GHCR, tagged with the
+same `vX.Y.Z` as the desktop release. `:latest` follows the latest published
+release. Release notes include the immutable image digest for deployments:
+
+```sh
+docker pull ghcr.io/pstoebenau/guerrilla-worker:latest
+```
+
+Build the combined runtime and Rust worker layers locally using Bun and Docker Buildx:
 
 ```sh
 bun install --frozen-lockfile
@@ -165,7 +173,8 @@ scratch checkpoints, and GPU locks are the only required host data mounts.
 `Dockerfile.engine` and its artifact tooling remain source-build references for
 the LichtFeld artifact consumed by the current runtime. See the
 [engine build references](docs/release-process.md#linux-engine-artifact-and-build-references).
-The current helper builds local images without publishing them.
+The helper builds locally by default. Release CI uses its explicit `--push` mode
+with registry caching and the shared release version.
 
 ## Durability and compatibility
 
@@ -200,10 +209,11 @@ The [worker workflow](.github/workflows/worker.yml) checks and builds Windows x6
 Linux x64, and macOS on Apple Silicon and Intel on each push to `main`, then
 automatically publishes all four builds into one GitHub Release. It allocates
 one shared stable version and publishes only after every platform builds and tests
-successfully. Tests reuse release artifacts inside each OS build job; there is no
-separate check matrix or Docker gate for desktop releases.
-Desktop packages use owner-installed engines. The separate `build:docker`
-command bundles engines into the Linux image. CPU/mock checks are not GPU scan
+successfully and the matching Linux Docker image has been pushed. Tests reuse
+release artifacts inside each OS build job; there is no separate check matrix.
+Desktop packages use owner-installed engines. The `build:docker` command bundles
+engines into the Linux image; release CI publishes it with the same version and
+commit, then updates `:latest` after GitHub publication. CPU/mock checks are not GPU scan
 acceptance; validate complete engine workflows and resume on the target GPU before
 claiming a release's GPU acceptance.
 
