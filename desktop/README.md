@@ -1,5 +1,13 @@
 # Desktop worker
 
+[Download the app](https://github.com/pstoebenau/guerrilla-worker/releases/latest)
+for your OS, then follow [Install & connect](../README.md#install--connect).
+In **Setup → Installed engines**, use the upstream download links if needed,
+review automatically detected paths, or choose **Browse…** to select an engine
+executable on this computer. You can also paste a full local path. Choose
+**Save and check dependencies**, paste a token from **My workers** into
+**Enrollment token**, enroll, then **Start worker** in Overview.
+
 The Tauri app manages an independent `guerrilla-worker` process. Closing its
 window hides the interface in the tray and keeps the worker running.
 **Quit and stop all jobs** stops active execution before exiting the app. If

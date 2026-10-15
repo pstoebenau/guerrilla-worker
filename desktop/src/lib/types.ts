@@ -35,6 +35,7 @@ export interface DesktopInfo {
   runtimeAvailable: boolean;
   gpuRuntime: { supported: boolean; installed: boolean };
   version: string;
+  platform: 'windows' | 'linux' | 'macos';
 }
 export interface AvailableUpdate { version: string; releaseUrl: string }
 export interface DependencyCheck { name: string; available: boolean; message?: string; version?: string }

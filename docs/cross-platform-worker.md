@@ -1,5 +1,11 @@
 # Cross-platform worker
 
+For installation, downloads, local engine linking, and account connection, follow
+[Install & connect](../README.md#install--connect). The desktop app provides
+upstream engine links, automatic detection, and **Browse…** for selecting local
+executables. **Save and check dependencies** confirms readiness before you start
+an enrolled worker.
+
 ## Supported platforms
 
 Desktop runtime assets and package jobs cover Windows x86_64, Ubuntu x86_64, and macOS
@@ -61,7 +67,8 @@ binaries and the LichtFeld densification plugin through
 upstream channels. Setup accepts explicit paths, and discovery provides sensible
 installed locations. Availability is checked per engine. LichtFeld is CUDA-only;
 Spirula uses the host Vulkan/MoltenVK hardware implementation. Missing or incompatible
-engines are reported rather than replaced. There is no engine download/build button.
+engines are reported rather than replaced. Setup links to official engine downloads
+and installation instructions in your browser; the worker does not install or build engines.
 
 Desktop supporting runtimes are bundled at build time, outside committed source
 files:

@@ -190,3 +190,5 @@ input[type='checkbox'] { accent-color: var(--ready); height: 15px; width: 15px; 
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
   .progress-track.indeterminate > div { width: 100% !important; opacity: .4; }
 }
+
+.engine-download-links { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-bottom: 12px; }

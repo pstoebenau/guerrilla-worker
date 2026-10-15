@@ -1,6 +1,8 @@
 # Windows desktop worker
 
-Install Guerrilla Worker for Windows x64 by running the single setup executable.
+[Download Guerrilla Worker for Windows x64](https://github.com/pstoebenau/guerrilla-worker/releases/latest)
+and run the single setup executable. See [Install & connect](../README.md#install--connect)
+for the complete guide.
 GPU libraries and reconstruction models are downloaded and verified from
 **Setup → GPU dependencies** after installation.
 No terminal, Python, Node, or separate WebView2 installation is required.
@@ -17,16 +19,17 @@ opening the GUI after installation is optional and initially unchecked.
 
 ## Setup
 
-1. Install LichtFeld or Spirula yourself. The Windows desktop app and installer
-   do not build, download, or bundle either engine. Review detected paths in
-   **Setup**, or browse to the existing engine executable. If using LichtFeld densification, select the
+1. Open **Setup → Installed engines**. Use **Download Spirula** or **Download
+   LichtFeld (paid portal)** if needed, then install the engine on this computer.
+   Review automatically detected paths, choose **Detect** to search again, or
+   use **Browse…** to select the existing executable. You can also paste its full local path. If using LichtFeld densification, select the
    installed plugin folder too.
 2. Choose your Guerrilla server and scratch folder. The app supplies its own
    pinned Python, Node, FFmpeg, export converter, and base integration dependencies.
    Use **Install GPU dependencies** once with internet access and at least
-   25 GiB free; your GPU drivers come from your existing installation. Run **Save and check
+   27 GB free; your GPU drivers come from your existing installation. Run **Save and check
    dependencies** and resolve reported hardware or engine compatibility issues.
-3. Paste an enrollment token from the server's Workers page and choose **Enroll
+3. Paste an enrollment token from the server's **My workers** page and choose **Enroll
    worker**. You can enroll before setting up engines or GPU dependencies; the
    worker stays stopped. Tokens travel through stdin, never through command
    arguments or saved settings. Once dependencies pass, choose **Start worker**

@@ -21,6 +21,7 @@ export const api = {
   openServer: () => native<void>('open_server'),
   checkForUpdates: () => native<AvailableUpdate | null>('check_for_updates'),
   openRelease: (url: string) => native<void>('open_release', { url }),
+  openEngineDownload: (engine: 'spirula' | 'lichtfeld' | 'densification') => native<void>('open_engine_download', { engine }),
   openData: () => native<void>('open_data_directory'),
   quit: () => native<void>('quit_interface'),
 };

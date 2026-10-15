@@ -5,29 +5,44 @@ The Tauri desktop app uses Svelte/TypeScript; the enrolled agent and pipeline
 orchestration use Rust. Focused Python helpers handle COLMAP, image processing,
 and engine APIs. The outbound worker protocol remains version 2.
 
-## Desktop
+## Install & connect
 
-The desktop app runs on Windows x86_64, Ubuntu x86_64, and macOS 14 or later on Apple Silicon (arm64). Install LichtFeld and/or Spirula through their own
-upstream distribution, then select their executable paths in **Setup**. LichtFeld
-requires an NVIDIA CUDA GPU and the compatible densification plugin. Apple Silicon
-execution uses Spirula. Available engines are advertised only after their own
-preflight passes; an unavailable engine never silently falls back to another.
+1. [Download Guerrilla Worker](https://github.com/pstoebenau/guerrilla-worker/releases/latest)
+   for Windows x64, Linux x64, or macOS 14+ on Apple Silicon. Run the Windows setup
+   executable; on Linux make the AppImage executable and open it, or install the
+   DEB/RPM. On Mac, drag the app from its DMG to Applications before opening it.
+   Python, FFmpeg/FFprobe, Node, the export converter, and base libraries are included.
+2. Open **Setup → Installed engines**. Common installation locations are detected
+   automatically. Choose **Detect** to search again. If an engine is missing or the
+   path is wrong, choose **Browse…** next to its executable and select the installed
+   program on this computer, or paste its full local path. On Mac, Spirula is inside
+   `Spirula Studio.app/Contents/MacOS/spirula`. You only need one compatible engine.
+3. Need an engine? Use the upstream links in Setup, or get
+   [Spirula](https://github.com/harry7557558/spirula-studio/releases/latest) for your OS.
+   Spirula uses hardware Vulkan, with MoltenVK on Apple Silicon. For NVIDIA CUDA,
+   get [LichtFeld for Windows](https://portal.lichtfeld.io/) (paid upstream access),
+   or follow the [Linux installation instructions](https://github.com/MrNeRF/LichtFeld-Studio/blob/master/docs/building_and_distribution.md).
+   If using LichtFeld densification, also select the installed
+   [plugin folder](https://github.com/shadygm/lichtfeld-densification-plugin).
+4. On Windows/Linux, choose **Setup → Install GPU dependencies** if shown. This
+   one-time verified download needs internet and at least 27 GB free. Then choose
+   **Save and check dependencies** and resolve any reported issues. GPU drivers
+   come from your OS installation. Engines are advertised only after their checks
+   pass; unavailable engines never silently fall back to another.
+5. With an active Guerrilla subscription, open **My workers** on your server,
+   name the computer, and choose **Create enrollment token**. Paste the token into
+   **Setup → Enrollment token** in the app and choose **Enroll worker**. Set
+   **Advanced → Server URL** before enrolling if using a different server.
+   Keep the single-use token private. Enrollment leaves the worker stopped.
+6. In **Overview**, choose **Start worker**. Confirm it is online with an engine
+   available, then create a scan on the server using **My workers**. Keep the
+   worker running while it processes scans; offline jobs stay queued.
 
-Python, FFmpeg/FFprobe, Node, the export converter, and supporting Python libraries
-are included in desktop packages. Windows/Linux GPU libraries and reconstruction
-models are installed from **Setup → GPU dependencies** on first use. Setup needs
-internet and 25 GiB free, verifies pinned downloads and package hashes, and stores
-the runtime in your worker data folder. Installed dependencies work offline and
-survive app updates/uninstall. GPU drivers and engine installations are supplied
-by the owner. Desktop build and setup commands do not build or download engines.
-The Linux Docker image has a separate, fully bundled engine policy described below.
-
-Open **Guerrilla Worker**, create an enrollment token on your server's Workers
-page, and enroll in Setup. Enrollment saves credentials and leaves the worker
-stopped; configure engines and check dependencies before choosing **Start worker**.
-The main window shows actual worker
-state, GPU/engine availability, current job progress, and bounded logs. It manages
-server-assigned work only; it has no local scan creation flow.
+Installed GPU dependencies work offline and survive app updates/uninstall. Engine
+installations remain on your computer; desktop packages do not include or install
+engines. The Linux Docker image has a separate, fully bundled engine policy below.
+The app manages server-assigned work, with actual worker state, GPU/engine
+availability, job progress, and bounded logs.
 
 Closing the window leaves the tray and worker running. **Quit interface** closes
 the GUI while the independent worker continues. **Stop worker** safely interrupts

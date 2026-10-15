@@ -1,3 +1,4 @@
+mod engine_downloads;
 mod enrollment;
 mod profile;
 mod updates;
@@ -40,6 +41,7 @@ struct DesktopInfo {
     runtime_available: bool,
     gpu_runtime: guerrilla_runtime::SetupStatus,
     version: &'static str,
+    platform: &'static str,
 }
 
 fn read_profile(state: &DesktopState) -> Result<Profile, String> {
@@ -88,6 +90,7 @@ fn info(state: &DesktopState) -> Result<DesktopInfo, String> {
         runtime_available,
         gpu_runtime: guerrilla_runtime::status(&state.resources.join("runtime"), &state.directory),
         version: env!("CARGO_PKG_VERSION"),
+        platform: std::env::consts::OS,
     })
 }
 
@@ -480,6 +483,13 @@ async fn open_release(app: tauri::AppHandle, url: String) -> Result<(), String> 
         .map_err(|e| e.to_string())
 }
 #[tauri::command]
+async fn open_engine_download(app: tauri::AppHandle, engine: String) -> Result<(), String> {
+    let url = engine_downloads::destination(&engine, std::env::consts::OS).await?;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
 async fn open_data_directory(
     app: tauri::AppHandle,
     state: tauri::State<'_, DesktopState>,
@@ -580,6 +590,7 @@ pub fn run() {
             open_server,
             check_for_updates,
             open_release,
+            open_engine_download,
             open_data_directory,
             quit_interface
         ])
