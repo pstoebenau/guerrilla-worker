@@ -22,7 +22,8 @@ export async function sha256(file: string): Promise<string> {
   return hash.digest('hex');
 }
 
-export async function verifiedDownload(asset: Asset, cache: string): Promise<string> {
+export async function verifiedDownload(asset: Asset, cache: string, signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted();
   if (!/^[a-f0-9]{64}$/.test(asset.sha256) || new URL(asset.url).protocol !== 'https:') throw new Error('Invalid runtime asset identity');
   await mkdir(cache, { recursive: true });
   const file = path.join(cache, `${asset.sha256}-${decodeURIComponent(path.basename(new URL(asset.url).pathname))}`);
@@ -34,9 +35,11 @@ export async function verifiedDownload(asset: Asset, cache: string): Promise<str
   try {
     console.log(`Downloading ${path.basename(new URL(asset.url).pathname)}…`);
     for (let attempt = 0; ; attempt++) {
+      signal?.throwIfAborted();
       let response: Response;
-      try { response = await fetch(asset.url, { signal: AbortSignal.timeout(600_000) }); }
+      try { response = await fetch(asset.url, { signal: AbortSignal.any([AbortSignal.timeout(600_000), ...(signal ? [signal] : [])]) }); }
       catch (error) {
+        signal?.throwIfAborted();
         if (attempt === 3) throw error;
         console.log(`Runtime download interrupted; retrying (${attempt + 1}/3)`);
         await Bun.sleep(1000 * 2 ** attempt);

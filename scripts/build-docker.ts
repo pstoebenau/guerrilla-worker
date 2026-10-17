@@ -2,6 +2,7 @@ import { cp, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { sha256, verifiedDownload } from './vendor-runtime';
+import { runDevelopmentCommand, withDevelopmentShutdown } from './development-process';
 
 type Asset = { url: string; sha256: string };
 export type EngineLock = {
@@ -38,9 +39,8 @@ export function validateEngineArtifact(lock: EngineLock, metadata: unknown, chec
   }
 }
 
-async function run(args: string[]): Promise<void> {
-  const child = Bun.spawn(args, { cwd: root, stdin: 'inherit', stdout: 'inherit', stderr: 'inherit' });
-  if (await child.exited !== 0) throw new Error('Docker build failed; inspect the build output above');
+async function run(args: string[], env = process.env, signal?: AbortSignal): Promise<void> {
+  if ((await runDevelopmentCommand(args[0]!, args.slice(1), { cwd: root, env, signal })).code !== 0) throw new Error('Docker build failed; inspect the build output above');
 }
 
 type ImageBuild = {
@@ -81,7 +81,11 @@ export async function buildImages(options: ImageBuild, lock: EngineLock, context
     ...labels, ...(options.push ? ['--metadata-file', workerMetadata] : []), '--tag', options.workerImage, '.']);
 }
 
-export async function buildDocker(args: string[]): Promise<void> {
+export async function buildDocker(args: string[], env = process.env): Promise<void> {
+  await withDevelopmentShutdown(signal => buildDockerWithShutdown(args, env, signal));
+}
+
+async function buildDockerWithShutdown(args: string[], env: NodeJS.ProcessEnv, signal: AbortSignal): Promise<void> {
   let runtimeImage = 'guerrilla-runtime:local';
   let workerImage = 'guerrilla-worker:local';
   let push = false;
@@ -113,10 +117,10 @@ export async function buildDocker(args: string[]): Promise<void> {
   const decoded = JSON.parse(await readFile(path.join(root, 'packaging/docker-engines.lock.json'), 'utf8')) as { version: number; lichtfeld: EngineLock };
   if (decoded.version !== 1 || !decoded.lichtfeld) throw new Error('Unsupported Docker engine lock');
   const lock = decoded.lichtfeld;
-  const cache = path.resolve(process.env.WORKER_BUILD_CACHE ?? path.join(homedir(), '.cache/guerrilla-worker/build'), 'linux-engines');
+  const cache = path.resolve(env.WORKER_BUILD_CACHE ?? path.join(homedir(), '.cache/guerrilla-worker/build'), 'linux-engines');
   // Downloads are pinned and individually hashed before any engine bytes enter
   // Docker. Reuse the existing public Linux build rather than recompiling it.
-  const files = await Promise.all([lock.archive, lock.metadata, lock.checksums].map(asset => verifiedDownload(asset, cache)));
+  const files = await Promise.all([lock.archive, lock.metadata, lock.checksums].map(asset => verifiedDownload(asset, cache, signal)));
   validateEngineArtifact(lock, JSON.parse(await readFile(files[1]!, 'utf8')), await readFile(files[2]!, 'utf8'));
   await mkdir(cache, { recursive: true });
   const context = await mkdtemp(path.join(cache, '.lichtfeld-context-'));
@@ -125,7 +129,11 @@ export async function buildDocker(args: string[]): Promise<void> {
       await cp(files[index]!, path.join(context, name));
       if (await sha256(path.join(context, name)) !== [lock.archive, lock.metadata, lock.checksums][index]!.sha256) throw new Error('Linux engine staging checksum mismatch');
     }
-    await buildImages({ runtimeImage, workerImage, version, push, metadataFile }, lock, context);
+    await buildImages({ runtimeImage, workerImage, version, push, metadataFile }, lock, context, async args => {
+      signal.throwIfAborted();
+      await run(args, env, signal);
+      signal.throwIfAborted();
+    });
     console.log(`Self-contained Linux worker ready: ${workerImage}`);
   } finally {
     await rm(context, { recursive: true, force: true });
