@@ -7,7 +7,7 @@ import { checkpoint } from './archive';
 import { copyStageSnapshot, removeScratchPath } from './retention-files';
 
 type Snapshot = { id: string; sequence: number; root: string; stages:string[] };
-export type UploadStatus = 'queued' | 'uploading' | 'verifying' | 'retrying' | 'saved';
+export type UploadStatus = 'queued' | 'uploading' | 'completing' | 'retrying' | 'saved';
 export type UploadProgress = {checkpointId:string; checkpointSequence:number; stages:string[]; current:number; total:number};
 const checkpointStages = new Set(['selection','reconstruction','densification','training','export']);
 

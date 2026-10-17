@@ -62,18 +62,18 @@ export interface ArtifactAllocation extends Fence {
   size: number;
   sha256: string;
   checkpointId?: string;
-  reuseVerified?: boolean;
+  reuseUploaded?: boolean;
 }
 export interface UploadIntent {
   artifactId: string;
-  method: "put" | "multipart" | "reuse" | "verify";
+  method: "put" | "multipart" | "reuse";
   url?: string;
   partSize?: number;
   parts?: { partNumber: number; url: string }[];
   expiresAt: string;
 }
-export interface ArtifactCompletion extends Fence { artifactId: string; parts?: { partNumber: number; etag: string }[] }
-export interface CheckpointCommit extends Fence { checkpointId: string; artifactIds: string[]; sequence: number; inheritedArtifactIds?: string[] }
+export interface ArtifactCompletion extends Fence { artifactId: string; parts?: { partNumber: number; etag: string }[]; gaussians?: number }
+export interface CheckpointCommit extends Fence { checkpointId: string; artifactIds: string[]; sequence: number; inheritedArtifactIds?: string[]; state: Record<string, unknown> }
 export interface FinishRequest extends Fence { state: "completed" | "failed" | "interrupted"; error?: string }
 
 export function isSafeRelativePath(value: unknown): value is string {

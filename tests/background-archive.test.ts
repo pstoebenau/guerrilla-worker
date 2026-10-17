@@ -69,7 +69,7 @@ test('slow archival freezes bytes, coalesces pending snapshots, retries, and gat
   }
 });
 
-test('stage upload bytes reach verification before saved is published', async()=> {
+test('stage upload bytes reach completion before saved is published', async()=> {
   const root = await mkdtemp(join(tmpdir(),'guerrilla-progress-'));
   await writeFile(join(root,'platform-state.json'),JSON.stringify({completed:{selection:{files:[{path:'frames.bin'}]}}}));
   await writeFile(join(root,'frames.bin'),Buffer.alloc(256*1024));
@@ -93,7 +93,7 @@ test('stage upload bytes reach verification before saved is published', async()=
     expect(updates[0]?.status).toBe('queued');
     expect(updates.every(update=>update.stages.includes('selection'))).toBe(true);
     expect(updates.some(update=>update.status==='uploading' && update.current>0 && update.current<update.total)).toBe(true);
-    expect(updates.at(-1)?.status).toBe('verifying');
+    expect(updates.at(-1)?.status).toBe('completing');
     expect(updates.at(-1)?.current).toBe(updates.at(-1)?.total);
     expect(updates.some(update=>update.status==='saved')).toBe(false);
     release();await queue.drain();

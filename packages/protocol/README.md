@@ -27,9 +27,9 @@ lease is still valid; otherwise the next poll claims work normally. Retrying a
 startup poll cannot create duplicate resumes. Cloud termination barriers remain
 under control-plane ownership.
 
-Assignments carry scan-owned `resumeState` and verified artifact metadata across
+Assignments carry scan-owned `resumeState` and uploaded artifact metadata across
 all attempts. Workers restore only dependencies requested by the next unfinished
-stage. `inheritedArtifactIds` references existing verified scan artifacts in a new
+stage. `inheritedArtifactIds` references existing uploaded scan artifacts in a new
 checkpoint commit without downloading or uploading those bytes again. Completed
 stage manifests are immutable. Native checkpoints are recorded separately for
 unfinished stages.
@@ -40,10 +40,18 @@ also returns outstanding `cleanup` fences, including after restart; `cleanup`
 acknowledges deletion even after the execution lease expires. Old protocol-v1
 workers and attempt-based resume formats are not supported by this protocol.
 
-Artifact allocation uses an idempotent client ID. Upload URLs target staging;
-the service verifies bytes and copies to an immutable canonical object. Workers
-cannot select bucket keys. Multipart completion and abort belong to the service.
-Refresh requires a current lease and existing authorized manifest or intent.
+Artifact allocation uses an idempotent client ID. Upload URLs target exact keys
+allocated by the service. The service authorizes the owner, lease and metadata
+shape, then trusts GPU-reported upload metadata without reading, validating or
+copying artifact contents. Multipart completion and abort belong to the service.
+Completion may include optional worker-reported `gaussians` metadata. Refresh
+requires a current lease and an existing authorized manifest or intent.
+
+Checkpoint requests include inline `state`, the parsed `platform-state.json`
+metadata. The service checks authorized manifest references and publishes the
+replacement before retiring superseded artifacts. It never reads state back from
+object storage. Agents predating this additive protocol-v2 field must update
+before submitting checkpoints; the API returns an explicit update error.
 
 The package is versioned separately from runtime images. Development platform
 consumption uses a checked-in package tarball; production must pin a reviewed

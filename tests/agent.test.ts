@@ -86,17 +86,17 @@ test('never acknowledges checkpoint before trusted canonical commit',async()=> {
   } finally {server.stop(true);}
 });
 
-test('retries canonical verification without reopening a completed multipart upload',async()=> {
-  const folder=await mkdtemp(join(tmpdir(),'guerrilla-verify-retry-'));
+test('reuses uploaded artifacts without reopening a completed multipart upload',async()=> {
+  const folder=await mkdtemp(join(tmpdir(),'guerrilla-upload-retry-'));
   await writeFile(join(folder,'state.tar'),'frozen checkpoint');
   const calls:string[]=[];
   const server=Bun.serve({port:0,async fetch(request):Promise<Response> {
     const route=new URL(request.url).pathname.split('/').pop()!;calls.push(route);
-    return Response.json(route==='artifacts'?{artifactId:'saved',method:'verify'}:{});
+    return Response.json(route==='artifacts'?{artifactId:'saved',method:'reuse'}:{});
   }});
   try {
     expect(await archiveFile(new Client(server.url.href,''),{scanId:'s',attemptId:'a',leaseId:'l'},join(folder,'state.tar'),'state.tar','intermediate','cp',new AbortController().signal)).toBe('saved');
-    expect(calls).toEqual(['artifacts','complete']);
+    expect(calls).toEqual(['artifacts']);
   } finally {server.stop(true);}
 });
 test('aborted supervisor stops active subprocess',async()=> {

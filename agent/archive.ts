@@ -8,13 +8,9 @@ import { checkedPath, selectedFiles, retentionExclusions, excluded } from './ret
 
 export async function archiveFile(client: Client, fence: Fence, file: string, relativePath: string, role: string, checkpointId: string | undefined, signal: AbortSignal, clientId: string = randomUUID(), onProgress?: TransferProgress) {
   const identity = await hashFile(file,signal), before = await stat(file);
-  const allocation = {...fence, action:'allocate', clientId, relativePath, role, ...identity, checkpointId, reuseVerified:true};
+  const allocation = {...fence, action:'allocate', clientId, relativePath, role, ...identity, checkpointId, reuseUploaded:true};
   let intent = await client.post<UploadIntent>('artifacts', allocation, signal);
   if (intent.method === 'reuse') return intent.artifactId;
-  if (intent.method === 'verify') {
-    await client.post('complete', {...fence,artifactId:intent.artifactId},signal);
-    return intent.artifactId;
-  }
   const parts: {partNumber:number;etag:string}[] = [];
   if (intent.method === 'multipart') {
     if (!intent.partSize) throw new Error('Incomplete multipart intent');
@@ -52,7 +48,7 @@ export async function archiveFile(client: Client, fence: Fence, file: string, re
   await client.post('complete', {...fence,artifactId:intent.artifactId,...(parts.length ? {parts} : {})},signal);
   return intent.artifactId;
 }
-export type CheckpointProgress = {current:number; total:number; status:'uploading' | 'verifying'};
+export type CheckpointProgress = {current:number; total:number; status:'uploading' | 'completing'};
 export async function checkpoint(client: Client, fence: Fence, root: string, checkpointId: string, signal: AbortSignal, sequence = 1, cache = new Map<string, {clientId:string; artifactId?:string}>(), onProgress?: (progress:CheckpointProgress)=>Promise<void>, inherited: ArtifactManifest[] = []) {
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(checkpointId)) throw new Error('Invalid checkpoint ID');
   const artifactIds: string[] = [];
@@ -90,9 +86,9 @@ export async function checkpoint(client: Client, fence: Fence, root: string, che
     current += size;
     await report(0);
   }
-  await onProgress?.({current:total,total,status:'verifying'});
+  await onProgress?.({current:total,total,status:'completing'});
   const inheritedArtifactIds = [...retained.values()].map(file => file.artifactId);
-  await client.post('checkpoint',{...fence,checkpointId,artifactIds,sequence,...(inheritedArtifactIds.length ? {inheritedArtifactIds} : {})},signal);
+  await client.post('checkpoint',{...fence,checkpointId,artifactIds,sequence,state,...(inheritedArtifactIds.length ? {inheritedArtifactIds} : {})},signal);
   const directory = join(root,'.archive-acks'); await mkdir(directory,{recursive:true});
   await writeFile(join(directory,checkpointId),'committed',{mode:0o600});
 }

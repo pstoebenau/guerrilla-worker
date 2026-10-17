@@ -70,5 +70,6 @@ test('stage snapshots exclude live engine scratch and retain remote stage refere
     expect(allocations).toEqual(['platform-state.json']);
     expect(commit?.inheritedArtifactIds).toEqual(['saved-selection']);
     expect(commit?.artifactIds).toEqual(['state']);
+    expect(commit?.state).toEqual(state);
   }finally{server.stop(true);await removeScratchPath(tmpdir(),root.slice(tmpdir().length+1));}
 });
