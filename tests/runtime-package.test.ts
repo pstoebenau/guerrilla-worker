@@ -1,10 +1,58 @@
 import { describe, expect, spyOn, test } from 'bun:test';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { extractRuntimeArchive, sha256, verifiedDownload } from '../scripts/vendor-runtime';
+import { extractRuntimeArchive, renameRuntimeDirectory, sha256, verifiedDownload } from '../scripts/vendor-runtime';
+import { windowsPowerShellEnvironment } from '../scripts/windows-powershell';
 
 describe('vendored runtime integrity', () => {
+  test.skipIf(process.platform !== 'win32')('runtime publication waits for a transient Windows file lock and rejects a persistent lock', async () => {
+    const temporary = await mkdtemp(path.join(tmpdir(), 'guerrilla-runtime-lock-'));
+    try {
+      for (const releaseLock of [true, false]) {
+        const source = path.join(temporary, `source-${releaseLock}`);
+        const destination = path.join(temporary, `runtime-${releaseLock}`);
+        const ready = path.join(temporary, `ready-${releaseLock}`);
+        const release = path.join(temporary, `release-${releaseLock}`);
+        await mkdir(source);
+        const payload = path.join(source, 'payload.txt');
+        await writeFile(payload, 'verified runtime');
+        const child = Bun.spawn(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', `
+          $ErrorActionPreference = 'Stop'
+          $file = [IO.File]::Open($env:GUERRILLA_LOCK_FILE, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+          try {
+            [IO.File]::WriteAllText($env:GUERRILLA_LOCK_READY, 'ready')
+            while (![IO.File]::Exists($env:GUERRILLA_LOCK_RELEASE)) { [Threading.Thread]::Sleep(20) }
+          } finally { $file.Dispose() }
+        `], {
+          env: windowsPowerShellEnvironment({ ...process.env, GUERRILLA_LOCK_FILE: payload, GUERRILLA_LOCK_READY: ready, GUERRILLA_LOCK_RELEASE: release }),
+          stdin: 'ignore', stdout: 'ignore', stderr: 'pipe', windowsHide: true,
+        });
+        try {
+          const deadline = Date.now() + 15_000;
+          while (!(await Bun.file(ready).exists()) && Date.now() < deadline && child.exitCode === null) await Bun.sleep(20);
+          expect(await Bun.file(ready).exists()).toBe(true);
+          await expect(rename(source, destination)).rejects.toThrow();
+          if (releaseLock) {
+            const unlocked = Bun.sleep(200).then(() => writeFile(release, 'release'));
+            await renameRuntimeDirectory(source, destination);
+            await unlocked;
+            expect(await readFile(path.join(destination, 'payload.txt'), 'utf8')).toBe('verified runtime');
+          } else {
+            await expect(renameRuntimeDirectory(source, destination)).rejects.toThrow();
+            expect(await readFile(payload, 'utf8')).toBe('verified runtime');
+            expect(await Bun.file(path.join(destination, 'payload.txt')).exists()).toBe(false);
+          }
+        } finally {
+          await writeFile(release, 'release');
+          const exited = await Promise.race([child.exited, Bun.sleep(5000).then(() => null)]);
+          if (exited === null) child.kill();
+          expect(await child.exited, await new Response(child.stderr).text()).toBe(0);
+        }
+      }
+    } finally { await rm(temporary, { recursive: true, force: true }); }
+  }, 60_000);
+
   test('runtime archives extract from absolute paths and preserve the required layout', async () => {
     const temporary = await mkdtemp(path.join(tmpdir(), 'guerrilla-runtime-archive-'));
     const tar = process.platform === 'win32' ? path.join(process.env.SystemRoot ?? process.env.SYSTEMROOT!, 'System32', 'tar.exe') : 'tar';

@@ -78,6 +78,18 @@ export async function extractRuntimeArchive(archive: string, destination: string
   await run([tar, '-xf', archive, '-C', destination, ...(stripComponents ? [`--strip-components=${stripComponents}`] : [])], root);
 }
 
+export async function renameRuntimeDirectory(source: string, destination: string): Promise<void> {
+  // Executable checks and antivirus scanning can briefly retain Windows handles.
+  for (let attempt = 0; ; attempt++) {
+    try { await rename(source, destination); return; }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(code ?? '') || attempt === 5) throw error;
+      await Bun.sleep(100 * 2 ** attempt);
+    }
+  }
+}
+
 export async function vendorRuntime(destination: string): Promise<void> {
   const target = `${process.platform}-${process.arch}`;
   const lock = JSON.parse(await readFile(path.join(root, 'packaging/runtime-lock.json'), 'utf8')) as RuntimeLock;
@@ -130,9 +142,9 @@ export async function vendorRuntime(destination: string): Promise<void> {
     await writeFile(path.join(staging, 'manifest.json'), JSON.stringify({ version: 3, profile: 'native', target, nodeVersion: lock.nodeVersion, ffmpegRelease: lock.ffmpegRelease, windowsCrtManifestSha256, files }, null, 2) + '\n');
     const backup = `${destination}.previous-${crypto.randomUUID()}`;
     const exists = await Bun.file(path.join(destination, 'manifest.json')).exists();
-    if (exists) await rename(destination, backup);
-    try { await rename(staging, destination); }
-    catch (error) { if (exists) await rename(backup, destination); throw error; }
+    if (exists) await renameRuntimeDirectory(destination, backup);
+    try { await renameRuntimeDirectory(staging, destination); }
+    catch (error) { if (exists) await renameRuntimeDirectory(backup, destination); throw error; }
     if (exists) await rm(backup, { recursive: true, force: true });
     console.log(`Vendored runtime ready: ${destination}`);
   } finally { await rm(staging, { recursive: true, force: true }); }
