@@ -1094,3 +1094,111 @@ print(json.dumps({key:os.environ.get(key) for key in keys}))
     assert_eq!(report["LD_LIBRARY_PATH"], "/engine-libraries");
     assert_eq!(report["SPIRULA_BIN"], "/user/spirula");
 }
+
+#[test]
+fn log_picker_reads_retained_downloads_and_rejects_non_logs_and_links() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut paths = ContextPaths::load(temp.path().join("profile.json")).unwrap();
+    paths.scratch = temp.path().join("scratch");
+    files::write_private(
+        &paths.scratch.join("scan/attempt/download.log"),
+        b"request timed out\nBearer secret https://signed.example/private\n",
+    )
+    .unwrap();
+    files::write_private(&paths.scratch.join("scan/attempt/request.json"), b"private").unwrap();
+    let logs = guerrilla_worker::diagnostics::logs(&paths, None).unwrap();
+    assert_eq!(logs["source"], "scratch/scan/attempt/download.log");
+    assert!(logs["path"].as_str().unwrap().ends_with("download.log"));
+    assert!(logs["lines"].to_string().contains("request timed out"));
+    assert!(!logs.to_string().contains("secret"));
+    assert_eq!(logs["sources"].as_array().unwrap().len(), 2);
+    assert!(guerrilla_worker::diagnostics::logs(&paths, Some("scratch/../profile.json")).is_err());
+    assert!(
+        guerrilla_worker::diagnostics::logs(&paths, Some("scratch/scan/attempt/request.json"))
+            .is_err()
+    );
+    assert!(
+        guerrilla_worker::diagnostics::logs(&paths, Some("service")).unwrap()["lines"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(temp.path(), paths.scratch.join("linked")).unwrap();
+        assert!(
+            guerrilla_worker::diagnostics::logs(&paths, Some("scratch/linked/outside.log"))
+                .is_err()
+        );
+    }
+    std::fs::write(
+        paths.scratch.join("scan/attempt/download.log"),
+        "line\n".repeat(3000),
+    )
+    .unwrap();
+    let logs = guerrilla_worker::diagnostics::logs(&paths, None).unwrap();
+    assert_eq!(logs["truncated"], true);
+    assert_eq!(logs["lines"].as_array().unwrap().len(), 1000);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn source_download_failure_uploads_diagnostics_before_finish() {
+    let base: Arc<Mutex<String>> = Default::default();
+    let server_base = base.clone();
+    let uploaded: Arc<Mutex<Vec<Vec<u8>>>> = Default::default();
+    let uploads = uploaded.clone();
+    let (url, requests, task) = server(move |route, bytes| {
+        let response = match route {
+            "/api/worker/artifacts" => json!({"artifactId":"download-log","method":"put","url":format!("{}/upload",server_base.lock().unwrap())}),
+            "/upload" => { uploads.lock().unwrap().push(bytes.to_vec()); json!({}) },
+            _ => json!({})
+        };
+        (200, serde_json::to_vec(&response).unwrap())
+    }).await;
+    *base.lock().unwrap() = url.clone();
+    let temp = tempfile::tempdir().unwrap();
+    let paths = pipeline_fixture(&temp, "import json,sys\nprint(json.dumps({'type':'failed','error':'Source request timed out https://signed.example/private','interrupted':False}),flush=True)\nsys.exit(7)\n");
+    let mut assignment = assignment(30);
+    assignment.resume_state = None;
+    assignment.input.kind = "source".into();
+    let result = guerrilla_worker::execution::execute(
+        &paths,
+        &api::Client::new(&url, "credential").unwrap(),
+        assignment,
+        &CancellationToken::new(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(tokio::sync::Mutex::new(daemon::Status::default())),
+    )
+    .await;
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("Source request timed out"));
+    assert!(error.contains("7"));
+    assert!(error.contains("download.log"));
+    assert!(!error.contains("signed.example"));
+    let requests = requests.lock().unwrap();
+    let complete = requests
+        .iter()
+        .position(|(route, _)| route == "/api/worker/complete")
+        .unwrap();
+    let finish = requests
+        .iter()
+        .position(|(route, _)| route == "/api/worker/finish")
+        .unwrap();
+    assert!(complete < finish);
+    assert_eq!(requests[finish].1["state"], "failed");
+    assert_eq!(
+        requests[finish].1["error"],
+        "Source request timed out [redacted URL]"
+    );
+    assert!(requests
+        .iter()
+        .any(|(route, value)| route == "/api/worker/artifacts"
+            && value["relativePath"] == "logs/download.log"));
+    assert!(
+        String::from_utf8_lossy(&uploaded.lock().unwrap()[0]).contains("Source request timed out")
+    );
+    assert!(paths.scratch.join("scan/attempt/download.log").exists());
+    drop(requests);
+    task.abort();
+}

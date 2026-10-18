@@ -263,7 +263,17 @@ pub async fn execute(
                 if archive::download(client,&assignment.input.url,&input,size,sha,&cancel).await.is_err(){if cancel.is_cancelled(){bail!("Download interrupted");}let refreshed:Value=client.post("refresh",&body(&assignment.fence,json!({"input":true,"artifactIds":[]})),&cancel).await?;archive::download(client,refreshed["input"]["url"].as_str().context("Missing refreshed input URL")?,&input,size,sha,&cancel).await?;}
             }else if assignment.input.kind=="source" {
                 let args=vec!["--download".into(),assignment.input.url.clone(),"--public-source".into(),"--destination".into(),input.to_string_lossy().into_owned()];
-                run_process(paths,&args,&job.join("download.log"),&cancel,|_| async {Ok(())}).await?;
+                run_process(paths,&args,&job.join("download.log"),&cancel,|event:Value| {
+                    let events=&events;let error=&pipeline_error;
+                    async move {
+                        if event["type"]=="failed" {
+                            let message=redact(event["error"].as_str().unwrap_or("Source download failed"));
+                            *error.lock().await=Some((message.clone(),event["interrupted"]==true));
+                            events.send("progress",&message,json!({"status":"failed"}),Some("download"),None).await?;
+                        }
+                        Ok(())
+                    }
+                }).await?;
                 archive::archive_file(client,&assignment.fence,archive::UploadFile{path:&input,relative:"input/source.mp4",role:"input",checkpoint:None,client_id:&uuid::Uuid::new_v4().to_string()},&cancel).await?;
             }else {bail!("Unknown input kind");}
             events.send("stage","Video ready",json!({"status":"completed"}),Some("download"),None).await?;
@@ -334,23 +344,32 @@ pub async fn execute(
                 cleanup_pending = response.is_err();
             }
         }
-        if !cancel.is_cancelled()
-            && files::write_log_tail(&job.join("worker.log"), &output.join("logs/worker.log"))
-                .is_ok()
-        {
-            let _ = archive::archive_file(
-                client,
-                &assignment.fence,
-                archive::UploadFile {
-                    path: &output.join("logs/worker.log"),
-                    relative: "logs/worker.log",
-                    role: "log",
-                    checkpoint: None,
-                    client_id: &uuid::Uuid::new_v4().to_string(),
-                },
-                &cancel,
-            )
-            .await;
+        if !cancel.is_cancelled() {
+            for name in ["download.log", "worker.log"] {
+                let saved = output.join("logs").join(name);
+                if files::write_log_tail(&job.join(name), &saved).is_ok() {
+                    if let Err(upload_error) = archive::archive_file(
+                        client,
+                        &assignment.fence,
+                        archive::UploadFile {
+                            path: &saved,
+                            relative: &format!("logs/{name}"),
+                            role: "log",
+                            checkpoint: None,
+                            client_id: &uuid::Uuid::new_v4().to_string(),
+                        },
+                        &cancel,
+                    )
+                    .await
+                    {
+                        eprintln!(
+                            "Could not upload {name}; local log retained at {}: {}",
+                            job.join(name).display(),
+                            redact(&upload_error.to_string())
+                        );
+                    }
+                }
+            }
         }
         let pipeline_error = pipeline_error.lock().await;
         let interrupted = cancel.is_cancelled() || pipeline_error.as_ref().is_some_and(|e| e.1);
@@ -459,9 +478,23 @@ where
     };
     let mut stderr_task = stderr_task;
     tokio::select! {_=cancel.cancelled()=>{terminate_tree(pid,true);stderr_task.abort();if result.is_ok(){result=Err(anyhow::anyhow!("Pipeline interrupted"));}},_= &mut stderr_task=>{}}
+    log.lock().await.flush().await?;
     result?;
     if !exit.success() {
-        bail!("Pipeline exited unsuccessfully; see retained logs");
+        let tail = crate::diagnostics::tail(log_path)?;
+        let detail = tail.lines.iter().rev().find_map(|line| {
+            let event: Value = serde_json::from_str(line).ok()?;
+            (event["type"] == "failed")
+                .then(|| event["error"].as_str().map(redact))
+                .flatten()
+        });
+        bail!(
+            "{} ({exit}). Open Logs in Guerrilla Worker. Retained log: {}",
+            detail
+                .as_deref()
+                .unwrap_or("Pipeline exited unsuccessfully"),
+            log_path.display()
+        );
     }
     Ok(())
 }

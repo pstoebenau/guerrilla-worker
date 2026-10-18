@@ -36,7 +36,8 @@ export interface DesktopInfo {
 export interface AvailableUpdate { version: string; releaseUrl: string }
 export interface DependencyCheck { name: string; available: boolean; message?: string; version?: string }
 export interface Preflight { ok: boolean; checks?: DependencyCheck[]; engines?: EngineStatus[]; gpus?: GpuStatus[]; message?: string }
-export interface Logs { lines: string[]; truncated?: boolean }
+export interface LogSource { id: string; label: string; modifiedAt: number }
+export interface Logs { source: string; path: string; sources: LogSource[]; lines: string[]; truncated: boolean }
 export type WorkerAction = 'start' | 'stop' | 'drain' | 'disconnect';
 export type BrowseField = 'scratchDirectory';
 

@@ -161,6 +161,10 @@ input[type='checkbox'] { accent-color: var(--ready); height: 15px; width: 15px; 
 .setup-unavailable > p { color: var(--muted); font-size: 12px; }
 .page-content { flex-shrink: 0; }
 .logs-page { display: flex; flex-direction: column; flex: 1; min-height: 260px; }
+.log-source { margin-top: 14px; }
+#log-source { width: 100%; padding: 8px; border: 1px solid var(--input-line); border-radius: 5px; background: var(--input); color: var(--ink); font-size: 11px; }
+.log-path { font: 11px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; margin: 10px 0 0; color: var(--muted); }
+.logs-page .log-output { margin-top: 12px; max-height: 60vh; }
 .log-count { font-size: 10px; color: var(--muted); font-weight: 400; margin-left: 5px; }
 .log-output { flex: 1; min-height: 140px; background: var(--input); color: var(--ink); border: 1px solid var(--line); border-radius: 5px; padding: 12px; font: 11px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 10px; tab-size: 2; }
 .modal { background: var(--surface); color: var(--ink); width: calc(100% - 40px); max-width: 460px; max-height: calc(100svh - 40px); overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 22px; margin: auto; box-shadow: 0 16px 60px #0003; animation: enter 120ms ease-out; }

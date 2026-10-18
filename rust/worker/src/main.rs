@@ -36,7 +36,11 @@ enum Command {
     Stop,
     Drain,
     Disconnect,
-    Logs,
+    /// Read a retained pipeline or service log. Lists available sources in the response.
+    Logs {
+        #[arg(long)]
+        source: Option<String>,
+    },
     Run,
 }
 #[tokio::main]
@@ -112,7 +116,7 @@ async fn run() -> Result<()> {
         Command::Stop => serde_json::to_value(daemon::control(&paths, "stop").await?)?,
         Command::Drain => serde_json::to_value(daemon::control(&paths, "drain").await?)?,
         Command::Disconnect => serde_json::to_value(daemon::disconnect(&paths).await?)?,
-        Command::Logs => daemon::logs(&paths)?,
+        Command::Logs { source } => guerrilla_worker::diagnostics::logs(&paths, source.as_deref())?,
         Command::Run => {
             if paths.credentials()?.is_none() {
                 if let Ok(token) = std::env::var("WORKER_ENROLLMENT_TOKEN") {

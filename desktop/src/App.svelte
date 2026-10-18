@@ -7,7 +7,7 @@
   import { api, nativeAvailable } from './lib/native';
   import { parseStatus } from './lib/parse';
   import { isRunning, progressPercent, statusTitle } from './lib/types';
-  import type { AvailableUpdate, BrowseField, DesktopInfo, Preflight, Profile, WorkerAction, WorkerStatus } from './lib/types';
+  import type { AvailableUpdate, BrowseField, DesktopInfo, Logs, Preflight, Profile, WorkerAction, WorkerStatus } from './lib/types';
 
   type Page = 'overview' | 'setup' | 'logs';
   let page = $state<Page>('overview');
@@ -28,8 +28,10 @@
   let busy = $state('');
   let installingRuntime = $state(false);
   let token = $state('');
-  let logs = $state<string[]>([]);
-  let logsLoaded = $state(false);
+  let logResult = $state<Logs | null>(null);
+  let logSource = $state('');
+  let loadingLogs = $state(false);
+  let logRequest = 0;
   let disconnectOpen = $state(false);
   let stopOpen = $state(false);
   let advancedOpen = $state(false);
@@ -51,9 +53,18 @@
     try {
       const next = await api.status();
       if (alive) { status = next; if (info) info.enrolled = !!next.workerId; }
-      if (page === 'logs') { const result = await api.logs(); if (alive) { logs = result.lines.slice(-200); logsLoaded = true; } }
+      if (page === 'logs') await loadLogs();
     } catch (e) { if (alive) error = String(e); }
     finally { refreshing = false; }
+  }
+  async function loadLogs(source = logSource) {
+    const request = ++logRequest;
+    loadingLogs = true;
+    try {
+      const result = await api.logs(source || undefined);
+      if (alive && request === logRequest) { logResult = result; logSource = result.source; }
+    } catch (e) { if (alive && request === logRequest) error = String(e); }
+    finally { if (request === logRequest) loadingLogs = false; }
   }
   async function checkForUpdates() {
     if (!nativeAvailable || checkingUpdates) return;
@@ -163,6 +174,7 @@
             {#if status?.message}<p class="summary-copy">{status.message}</p>{/if}
             </div>
             <div class="actions">
+              <button disabled={!nativeAvailable || !!busy} onclick={() => selectPage('logs')}>View job logs</button>
               {#if running}<button class="primary" disabled={!!busy || unavailable} onclick={() => doAction('drain')}>{status?.state === 'draining' ? 'Pausing after this job' : 'Finish job, then pause'}</button><button disabled={!!busy || unavailable} onclick={() => status?.state === 'busy' || status?.state === 'draining' ? stopOpen = true : doAction('stop')}>Stop worker</button>
               {:else if info?.enrolled}<button class="primary" disabled={!!busy || unavailable} onclick={() => doAction('start')}>Start worker</button>
               {:else}<button class="primary" onclick={() => selectPage('setup')}>Set up worker <Icon name="arrow" size={16} /></button>{/if}
@@ -205,10 +217,16 @@
           {:else}<section class="setup-unavailable"><h2>Setup requires the desktop app</h2><p>Choose a server, install the runtime, and paste an enrollment token there.</p></section>{/if}
 
         {:else}
-          <div class="section-heading"><h3>Worker logs <span class="log-count">{logs.length} / 200 lines</span></h3><button disabled={!!busy || !nativeAvailable} onclick={() => perform('Refreshing logs…', async () => { const result = await api.logs(); logs = result.lines.slice(-200); logsLoaded = true; })}>Refresh</button></div>
+          <div class="section-heading"><h3>Job and worker logs</h3><div class="actions"><button disabled={!!busy || !nativeAvailable || loadingLogs} onclick={() => loadLogs()}>Refresh</button><button disabled={!nativeAvailable || !logResult || loadingLogs} onclick={() => perform('Copying log…', async () => { await navigator.clipboard.writeText(`${logResult!.path}\n\n${logResult!.lines.join('\n')}`); notice = 'Log copied.'; })}>Copy log</button></div></div>
+          <p class="field-help">Pipeline details, source download failures, and worker service output. Newest logs appear first. Updates every 3 seconds.</p>
+          <label class="log-source" for="log-source">Log file</label>
+          <select id="log-source" value={logSource} disabled={!nativeAvailable || !logResult} onchange={(event) => { logSource = event.currentTarget.value; void loadLogs(logSource); }}>
+            {#each logResult?.sources ?? [] as source (source.id)}<option value={source.id}>{source.label}</option>{/each}
+          </select>
+          {#if logResult}<p class="log-path">{logResult.path}</p><p class="field-help">{logResult.truncated ? 'Showing the last 1,000 lines, up to 256 KiB. Open the log folder for the complete file.' : `${logResult.lines.length} lines`}</p>{/if}
           <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-          <pre class="log-output" role="region" tabindex="0" aria-label="Worker log output">{logs.length ? logs.join('\n') : logsLoaded ? 'No worker output yet.' : nativeAvailable ? 'Loading worker logs…' : 'Worker logs are available in the desktop app.'}</pre>
-          <div class="workspace-footer"><span>{info?.profileDirectory ?? 'Logs stay on this computer.'}</span><button class="text-button" disabled={!nativeAvailable || !!busy} onclick={() => perform('Opening data folder…', api.openData)}>Open data folder ↗</button></div>
+          <pre class="log-output" role="region" tabindex="0" aria-label="Worker log output" aria-busy={loadingLogs}>{logResult ? logResult.lines.join('\n') || 'This log is empty.' : nativeAvailable ? 'Loading logs…' : 'Logs are available in the desktop app.'}</pre>
+          <div class="workspace-footer"><span>Logs and checkpoints stay on this computer.</span><button class="text-button" disabled={!nativeAvailable || !!busy || !logResult || loadingLogs} onclick={() => perform('Opening log folder…', () => api.openLogFolder(logSource))}>Open log folder ↗</button></div>
         {/if}
       </div>
     {/key}

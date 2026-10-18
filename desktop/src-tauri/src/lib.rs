@@ -168,7 +168,16 @@ fn owned_command(
 }
 
 async fn cli(state: &DesktopState, action: &str, token: Option<String>) -> Result<Value, String> {
+    cli_args(state, action, token, &[]).await
+}
+async fn cli_args(
+    state: &DesktopState,
+    action: &str,
+    token: Option<String>,
+    args: &[&str],
+) -> Result<Value, String> {
     let mut command = owned_command(state, action, token.is_some())?;
+    command.args(args);
     let mut child = command
         .spawn()
         .map_err(|e| format!("Cannot run bundled worker: {e}"))?;
@@ -404,8 +413,28 @@ async fn worker_action(
     self::action(&state, &action).await
 }
 #[tauri::command]
-async fn worker_logs(state: tauri::State<'_, DesktopState>) -> Result<Value, String> {
-    cli(&state, "logs", None).await
+async fn worker_logs(
+    state: tauri::State<'_, DesktopState>,
+    source: Option<String>,
+) -> Result<Value, String> {
+    let args = source
+        .as_deref()
+        .map(|s| vec!["--source", s])
+        .unwrap_or_default();
+    cli_args(&state, "logs", None, &args).await
+}
+#[tauri::command]
+async fn open_log_directory(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, DesktopState>,
+    source: String,
+) -> Result<(), String> {
+    let result = cli_args(&state, "logs", None, &["--source", &source]).await?;
+    let path = result["path"].as_str().ok_or("Log path unavailable")?;
+    let directory = Path::new(path).parent().ok_or("Log folder unavailable")?;
+    app.opener()
+        .open_path(directory.to_string_lossy(), None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -556,6 +585,7 @@ pub fn run() {
             enroll_worker,
             worker_action,
             worker_logs,
+            open_log_directory,
             browse_path,
             open_server,
             check_for_updates,
