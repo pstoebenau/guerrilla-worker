@@ -12,4 +12,4 @@ export async function setupDevelopmentWorker(env = process.env): Promise<void> {
   if ((await runDevelopmentCommand(process.execPath, [worker, '--preflight'], { cwd: root, env: scoped, captureOutput: true })).code !== 0) throw new Error('Spirula preflight failed; check GPU drivers and runtime installation.');
   console.log('Spirula worker setup passed. Start the development worker alongside a running server.');
 }
-if (import.meta.main) { try { await setupDevelopmentWorker(); } finally { if (process.connected) process.disconnect(); } }
+if (import.meta.main) { try { await setupDevelopmentWorker(); } finally { if (process.connected) process.disconnect?.(); } }
