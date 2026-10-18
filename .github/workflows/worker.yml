@@ -139,6 +139,22 @@ jobs:
           cargo test --release --locked --workspace
           cargo test --release --locked --manifest-path desktop/src-tauri/Cargo.toml --target-dir desktop/src-tauri/target --features tauri/custom-protocol
           python -m unittest discover -s tests -p 'test_*.py'
+      - name: Prepare Windows Vulkan loader for runtime verification
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Hosted runners have no GPU driver supplying the Vulkan loader.
+          # Keep this test prerequisite outside the app's bundled resources.
+          $archive = Join-Path $env:RUNNER_TEMP 'vulkan-runtime-components.zip'
+          curl.exe --fail --location --retry 3 --max-time 120 'https://sdk.lunarg.com/sdk/download/1.4.363.0/windows/VulkanRT-X64-1.4.363.0-Components.zip?Human=true' --output $archive
+          if ($LASTEXITCODE -ne 0) { throw 'Vulkan runtime download failed.' }
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne 'a25a927aa8b9f0371048f1861cf88ac3b9bc9b1fb332c42d897c8ab32695769a') { throw 'Vulkan runtime checksum mismatch.' }
+          $destination = Join-Path $env:RUNNER_TEMP 'vulkan-runtime'
+          Expand-Archive -LiteralPath $archive -DestinationPath $destination -Force
+          $loader = Join-Path $destination 'VulkanRT-X64-1.4.363.0-Components/x64'
+          if (!(Test-Path -LiteralPath (Join-Path $loader 'vulkan-1.dll') -PathType Leaf)) { throw 'Vulkan runtime archive is missing the x64 loader.' }
+          [IO.File]::AppendAllText($env:GITHUB_PATH, "$loader`n", [Text.UTF8Encoding]::new($false))
       - name: Verify native runtime installation and offline reuse
         run: |
           python - <<'PYTHON'
