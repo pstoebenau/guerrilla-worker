@@ -208,11 +208,21 @@ pub fn verify(root: &Path, items: &[Artifact]) -> Result<()> {
     Ok(())
 }
 pub fn copy_tree(source: &Path, target: &Path) -> Result<()> {
+    fn copy_file(source: &Path, target: &Path) -> Result<()> {
+        // clonefile requires a new destination. Unlink an existing output
+        // before cloning so replacing it cannot modify another shared copy.
+        ensure!(!target.is_symlink(), "Cannot replace a symlink");
+        if target.exists() {
+            fs::remove_file(target)?;
+        }
+        reflink_copy::reflink_or_copy(source, target)?;
+        File::open(target)?.sync_all()?;
+        Ok(())
+    }
     ensure!(!source.is_symlink(), "Cannot copy a symlink");
     if source.is_file() {
         fs::create_dir_all(target.parent().unwrap())?;
-        fs::copy(source, target)?;
-        File::open(target)?.sync_all()?;
+        copy_file(source, target)?;
         return Ok(());
     }
     for item in WalkDir::new(source).follow_links(false) {
@@ -222,8 +232,7 @@ pub fn copy_tree(source: &Path, target: &Path) -> Result<()> {
         if item.file_type().is_dir() {
             fs::create_dir_all(destination)?;
         } else if item.file_type().is_file() {
-            fs::copy(item.path(), &destination)?;
-            File::open(destination)?.sync_all()?;
+            copy_file(item.path(), &destination)?;
         }
     }
     Ok(())
@@ -373,6 +382,25 @@ pub fn validate_settings(backend: &str, settings: &Value, _cap: u64) -> Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn copied_dataset_is_independent_when_an_engine_changes_a_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::create_dir_all(source.join("images")).unwrap();
+        fs::write(source.join("images/frame.jpg"), b"original").unwrap();
+        copy_tree(&source, &target).unwrap();
+        fs::write(target.join("images/frame.jpg"), b"changed").unwrap();
+        assert_eq!(
+            fs::read(source.join("images/frame.jpg")).unwrap(),
+            b"original"
+        );
+        copy_tree(&source, &target).unwrap();
+        assert_eq!(
+            fs::read(target.join("images/frame.jpg")).unwrap(),
+            b"original"
+        );
+    }
     #[test]
     fn traversal_and_symlink_paths_are_rejected() {
         let root = tempfile::tempdir().unwrap();

@@ -605,6 +605,92 @@ async fn background_archive_coalesces_pending_snapshots_and_retries_without_earl
         .any(|r| r.0 == "/api/worker/checkpoint" && r.1["checkpointId"] == "superseded"));
     task.abort();
 }
+#[tokio::test]
+async fn delayed_upload_yields_to_newer_dataset_without_acknowledging_superseded_snapshot() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let started = Arc::new(AtomicBool::new(false));
+    let observed = started.clone();
+    let (url, requests, task) = server(move |route, payload| {
+        if route == "/api/worker/artifacts" {
+            let value: Value = serde_json::from_slice(payload).unwrap();
+            if value["checkpointId"] == "old" {
+                observed.store(true, Ordering::SeqCst);
+                return (503, b"{}".to_vec());
+            }
+            return (
+                200,
+                serde_json::to_vec(&json!({"artifactId":value["relativePath"],"method":"reuse"}))
+                    .unwrap(),
+            );
+        }
+        (200, b"{}".to_vec())
+    })
+    .await;
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("run");
+    for path in [
+        "selection-a/frame.jpg",
+        "reconstruction-a/sparse/0/points3D.bin",
+        "reconstruction-a/stage.log",
+        "densification-a/sparse/0/points3D.bin",
+    ] {
+        let target = output.join(path);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(target, b"data").unwrap();
+    }
+    let mut state = json!({"completed":{
+        "selection":{"directory":"selection-a","files":[{"path":"selection-a/frame.jpg"}]},
+        "reconstruction":{"directory":"reconstruction-a","files":[{"path":"reconstruction-a/sparse/0/points3D.bin"},{"path":"reconstruction-a/stage.log"}]}
+    }});
+    std::fs::write(output.join("platform-state.json"), state.to_string()).unwrap();
+    let queue = archive::BackgroundArchive::new(
+        api::Client::new(&url, "credential").unwrap(),
+        fence(),
+        output.clone(),
+        vec![],
+        CancellationToken::new(),
+    );
+    queue.enqueue("old", 1).await.unwrap();
+    for _ in 0..200 {
+        if started.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(started.load(Ordering::SeqCst));
+    state["completed"]["densification"] = json!({"directory":"densification-a","files":[{"path":"densification-a/sparse/0/points3D.bin"}]});
+    std::fs::write(output.join("platform-state.json"), state.to_string()).unwrap();
+    queue.enqueue("new", 2).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), queue.drain())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!output.join(".archive-acks/old").exists());
+    assert!(output.join(".archive-acks/new").exists());
+    assert!(output
+        .join("reconstruction-a/sparse/0/points3D.bin")
+        .exists());
+    assert!(!output.join(".worker/archives/old").exists());
+    let records = requests.lock().unwrap();
+    assert!(!records
+        .iter()
+        .any(|(route, value)| route == "/api/worker/checkpoint" && value["checkpointId"] == "old"));
+    assert!(!records
+        .iter()
+        .any(|(route, value)| route == "/api/worker/artifacts"
+            && value["relativePath"] == "reconstruction-a/sparse/0/points3D.bin"));
+    let commit = records
+        .iter()
+        .find(|(route, _)| route == "/api/worker/checkpoint")
+        .unwrap();
+    assert_eq!(
+        commit.1["state"]["completed"]["reconstruction"]["files"],
+        json!([{"path":"reconstruction-a/stage.log"}])
+    );
+    drop(records);
+    task.abort();
+}
+
 #[test]
 fn diagnostics_tail_is_bounded_and_redacted() {
     let temp = tempfile::tempdir().unwrap();

@@ -258,7 +258,33 @@ fn excluded(path: &str, paths: &[String]) -> bool {
         .any(|prefix| path == prefix || path.starts_with(&format!("{prefix}/")))
 }
 pub fn freeze(source: &Path, destination: &Path, inherited: &[Artifact]) -> Result<()> {
+    freeze_cached(source, destination, inherited, &mut BTreeMap::new())
+}
+type FrozenFiles = BTreeMap<(u64, String), PathBuf>;
+fn freeze_cached(
+    source: &Path,
+    destination: &Path,
+    inherited: &[Artifact],
+    cache: &mut FrozenFiles,
+) -> Result<()> {
     let state: Value = serde_json::from_slice(&std::fs::read(source.join("platform-state.json"))?)?;
+    cache.retain(|_, path| path.is_file());
+    let mut identities = BTreeMap::new();
+    for group in ["completed", "stageCheckpoints"] {
+        if let Some(stages) = state[group].as_object() {
+            for stage in stages.values() {
+                for file in stage["files"].as_array().into_iter().flatten() {
+                    if let (Some(path), Some(size), Some(sha)) = (
+                        file["path"].as_str(),
+                        file["size"].as_u64(),
+                        file["sha256"].as_str(),
+                    ) {
+                        identities.insert(path.to_owned(), (size, sha.to_owned()));
+                    }
+                }
+            }
+        }
+    }
     let mut names = declared(&state)?;
     if source.join("logs/worker.log").exists() {
         names.insert("logs/worker.log".into());
@@ -279,9 +305,82 @@ pub fn freeze(source: &Path, destination: &Path, inherited: &[Artifact]) -> Resu
         }
         let to = files::checked(destination, &path)?;
         files::private_dir(to.parent().unwrap())?;
-        std::fs::copy(from, to)?;
+        if to.exists() {
+            cache.retain(|_, previous| previous != &to);
+            std::fs::remove_file(&to)?;
+        }
+        // Only link immutable frozen copies, never live engine files. This
+        // shares snapshot bytes even on filesystems without copy-on-write.
+        let identity = identities.get(&path);
+        let linked = identity
+            .and_then(|key| cache.get(key))
+            .is_some_and(|previous| std::fs::hard_link(previous, &to).is_ok());
+        if !linked {
+            reflink_copy::reflink_or_copy(from, &to)?;
+        }
+        if let Some(identity) = identity {
+            cache.insert(identity.clone(), to);
+        }
     }
     Ok(())
+}
+// A completed reconstruction is no longer needed to resume after densification.
+// Preserve already published manifests exactly; only skip products which have
+// never been committed. Its small stage log still records successful execution.
+fn prepare_snapshot(
+    snapshot: &Snapshot,
+    durable: &BTreeMap<String, Value>,
+    inherited: &[Artifact],
+) -> Result<Value> {
+    let mut state: Value =
+        serde_json::from_slice(&std::fs::read(snapshot.root.join("platform-state.json"))?)?;
+    if let Some(stages) = state["completed"].as_object_mut() {
+        let dense = stages.contains_key("densification");
+        for (name, stage) in stages.iter_mut() {
+            if let Some(saved) = durable.get(name) {
+                *stage = saved.clone();
+                continue;
+            }
+            let inherited_stage = stage["files"].as_array().is_some_and(|files| {
+                !files.is_empty()
+                    && files.iter().all(|f| {
+                        inherited
+                            .iter()
+                            .any(|a| Some(a.relative_path.as_str()) == f["path"].as_str())
+                    })
+            });
+            if name == "reconstruction" && dense && !inherited_stage {
+                let log = format!(
+                    "{}/stage.log",
+                    stage["directory"]
+                        .as_str()
+                        .context("Missing stage directory")?
+                );
+                if let Some(files) = stage["files"].as_array_mut() {
+                    if files.iter().any(|file| file["path"] == log) {
+                        files.retain(|file| file["path"] == log);
+                    }
+                }
+            }
+        }
+    }
+    files::write_private(
+        &snapshot.root.join("platform-state.json"),
+        &serde_json::to_vec(&state)?,
+    )?;
+    Ok(state)
+}
+enum CheckpointResult {
+    Saved,
+    Superseded,
+}
+async fn superseded(queue: &Queue, snapshot: &Snapshot) -> bool {
+    queue
+        .pending
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|next| next.sequence > snapshot.sequence)
 }
 async fn checkpoint(
     client: &Client,
@@ -291,9 +390,9 @@ async fn checkpoint(
     cache: &mut BTreeMap<String, (String, Option<String>)>,
     cancel: &CancellationToken,
     queue: &Queue,
-) -> Result<()> {
-    let state: Value =
-        serde_json::from_slice(&std::fs::read(snapshot.root.join("platform-state.json"))?)?;
+    state: &Value,
+    commit_started: &mut bool,
+) -> Result<CheckpointResult> {
     let required = declared(&state)?;
     let exclusions = exclusions(&state)?;
     let mut retained: BTreeMap<_, _> = inherited
@@ -320,6 +419,9 @@ async fn checkpoint(
     report(queue, "uploading", snapshot, current, total).await;
     let mut ids = vec![];
     for relative in paths {
+        if !*commit_started && superseded(queue, snapshot).await {
+            return Ok(CheckpointResult::Superseded);
+        }
         if excluded(&relative, &exclusions) {
             continue;
         }
@@ -372,6 +474,9 @@ async fn checkpoint(
         current += size;
         report(queue, "uploading", snapshot, current, total).await;
     }
+    if !*commit_started && superseded(queue, snapshot).await {
+        return Ok(CheckpointResult::Superseded);
+    }
     report(queue, "completing", snapshot, total, total).await;
     let inherited_ids: Vec<_> = retained.values().map(|f| &f.artifact_id).collect();
     let mut commit = body(
@@ -381,8 +486,11 @@ async fn checkpoint(
     if !inherited_ids.is_empty() {
         commit["inheritedArtifactIds"] = json!(inherited_ids);
     }
+    // Once commit is attempted its outcome may be ambiguous on transport error.
+    // Retry the identical commit before moving on to a replacement snapshot.
+    *commit_started = true;
     let _: Value = client.post("checkpoint", &commit, cancel).await?;
-    Ok(())
+    Ok(CheckpointResult::Saved)
 }
 #[derive(Clone)]
 struct Snapshot {
@@ -433,6 +541,7 @@ pub struct BackgroundArchive {
     cancel: CancellationToken,
     task: tokio::task::JoinHandle<()>,
     inherited: Vec<Artifact>,
+    frozen: std::sync::Mutex<FrozenFiles>,
 }
 impl BackgroundArchive {
     pub fn new(
@@ -455,6 +564,7 @@ impl BackgroundArchive {
         let stop = cancel.clone();
         let restored = inherited.clone();
         let task = tokio::spawn(async move {
+            let mut durable = BTreeMap::new();
             loop {
                 let ready = q.notify.notified();
                 let snapshot = {
@@ -468,13 +578,40 @@ impl BackgroundArchive {
                 let Some(snapshot) = snapshot else {
                     tokio::select! {_=stop.cancelled()=>break,_=ready=>continue}
                 };
+                let state = match prepare_snapshot(&snapshot, &durable, &restored) {
+                    Ok(state) => state,
+                    Err(error) => {
+                        *q.error.lock().await = Some(error.to_string());
+                        q.busy.store(false, Ordering::SeqCst);
+                        q.notify.notify_waiters();
+                        break;
+                    }
+                };
                 let mut cache = BTreeMap::new();
                 let mut retries = 0;
+                let mut commit_started = false;
                 loop {
-                    match checkpoint(&client, &fence, &snapshot, &restored, &mut cache, &stop, &q)
-                        .await
+                    match checkpoint(
+                        &client,
+                        &fence,
+                        &snapshot,
+                        &restored,
+                        &mut cache,
+                        &stop,
+                        &q,
+                        &state,
+                        &mut commit_started,
+                    )
+                    .await
                     {
-                        Ok(()) => {
+                        Ok(CheckpointResult::Saved) => {
+                            if let Some(stages) = state["completed"].as_object() {
+                                durable.extend(
+                                    stages
+                                        .iter()
+                                        .map(|(name, stage)| (name.clone(), stage.clone())),
+                                );
+                            }
                             let result = files::write_private(
                                 &out.join(".archive-acks").join(&snapshot.id),
                                 b"committed",
@@ -486,6 +623,15 @@ impl BackgroundArchive {
                                 *q.error.lock().await = Some(error.to_string());
                             } else {
                                 report(&q, "saved", &snapshot, 0, 0).await;
+                            }
+                            break;
+                        }
+                        Ok(CheckpointResult::Superseded) => {
+                            q.progress.lock().unwrap().remove(&snapshot.id);
+                            if let Err(error) =
+                                files::remove(&out.join(".worker/archives"), &snapshot.id)
+                            {
+                                *q.error.lock().await = Some(error.to_string());
                             }
                             break;
                         }
@@ -507,7 +653,10 @@ impl BackgroundArchive {
                             );
                             let delay = Duration::from_secs((5u64 << retries.min(4)).min(60));
                             retries += 1;
-                            tokio::select! {_=stop.cancelled()=>break,_=tokio::time::sleep(delay)=>{}}
+                            if !commit_started && superseded(&q, &snapshot).await {
+                                continue;
+                            }
+                            tokio::select! {_=stop.cancelled()=>break,_=q.notify.notified(), if !commit_started => {},_ = tokio::time::sleep(delay)=>{}}
                         }
                     }
                 }
@@ -524,6 +673,7 @@ impl BackgroundArchive {
             cancel,
             task,
             inherited,
+            frozen: std::sync::Mutex::new(BTreeMap::new()),
         }
     }
     pub fn observe(&self, observer: Observer) {
@@ -537,7 +687,12 @@ impl BackgroundArchive {
             bail!("Checkpoint interrupted");
         }
         let root = files::checked(&self.output, &format!(".worker/archives/{id}"))?;
-        freeze(&self.output, &root, &self.inherited)?;
+        freeze_cached(
+            &self.output,
+            &root,
+            &self.inherited,
+            &mut self.frozen.lock().unwrap(),
+        )?;
         let state: Value =
             serde_json::from_slice(&std::fs::read(root.join("platform-state.json"))?)?;
         let mut stages = BTreeSet::new();
@@ -674,4 +829,97 @@ pub async fn restore(
         restored.insert(file.artifact_id.clone());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshots_share_frozen_content_without_linking_live_engine_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("run");
+        files::private_dir(&source.join("selection-a")).unwrap();
+        std::fs::write(source.join("selection-a/frame.jpg"), b"image").unwrap();
+        let (size, sha) = files::hash(&source.join("selection-a/frame.jpg")).unwrap();
+        let state = json!({"completed":{"selection":{"directory":"selection-a","files":[{"path":"selection-a/frame.jpg","size":size,"sha256":sha}]}}});
+        std::fs::write(source.join("platform-state.json"), state.to_string()).unwrap();
+        let a = temp.path().join("a");
+        let b = temp.path().join("b");
+        let mut cache = BTreeMap::new();
+        freeze_cached(&source, &a, &[], &mut cache).unwrap();
+        freeze_cached(&source, &b, &[], &mut cache).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                std::fs::metadata(a.join("selection-a/frame.jpg"))
+                    .unwrap()
+                    .ino(),
+                std::fs::metadata(b.join("selection-a/frame.jpg"))
+                    .unwrap()
+                    .ino()
+            );
+        }
+        std::fs::write(source.join("selection-a/frame.jpg"), b"changed").unwrap();
+        std::fs::remove_dir_all(a).unwrap();
+        assert_eq!(
+            std::fs::read(b.join("selection-a/frame.jpg")).unwrap(),
+            b"image"
+        );
+        // Retrying a partially frozen destination must replace its files too.
+        let (size, sha) = files::hash(&source.join("selection-a/frame.jpg")).unwrap();
+        let mut updated = state;
+        updated["completed"]["selection"]["files"][0]["size"] = json!(size);
+        updated["completed"]["selection"]["files"][0]["sha256"] = json!(sha);
+        std::fs::write(source.join("platform-state.json"), updated.to_string()).unwrap();
+        freeze_cached(&source, &b, &[], &mut cache).unwrap();
+        assert_eq!(
+            std::fs::read(b.join("selection-a/frame.jpg")).unwrap(),
+            b"changed"
+        );
+    }
+
+    #[test]
+    fn superseded_reconstruction_keeps_history_but_never_changes_a_saved_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let reconstruction = json!({"directory":"reconstruction-a","files":[
+            {"path":"reconstruction-a/sparse/0/points3D.bin"}, {"path":"reconstruction-a/stage.log"}
+        ]});
+        let state = json!({"completed":{"reconstruction":reconstruction,"densification":{"directory":"densification-a","files":[]}}});
+        let snapshot = Snapshot {
+            id: "a".into(),
+            sequence: 1,
+            root: root.clone(),
+            stages: vec![],
+        };
+        std::fs::write(root.join("platform-state.json"), state.to_string()).unwrap();
+        let projected = prepare_snapshot(&snapshot, &BTreeMap::new(), &[]).unwrap();
+        assert_eq!(
+            projected["completed"]["reconstruction"]["files"],
+            json!([{"path":"reconstruction-a/stage.log"}])
+        );
+        let durable = BTreeMap::from([("reconstruction".into(), reconstruction.clone())]);
+        let preserved = prepare_snapshot(&snapshot, &durable, &[]).unwrap();
+        assert_eq!(preserved["completed"]["reconstruction"], reconstruction);
+        let inherited: Vec<_> = reconstruction["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| Artifact {
+                artifact_id: "saved".into(),
+                relative_path: f["path"].as_str().unwrap().into(),
+                role: "intermediate".into(),
+                size: 0,
+                sha256: String::new(),
+                url: String::new(),
+            })
+            .collect();
+        assert_eq!(
+            prepare_snapshot(&snapshot, &BTreeMap::new(), &inherited).unwrap()["completed"]
+                ["reconstruction"],
+            reconstruction
+        );
+    }
 }
