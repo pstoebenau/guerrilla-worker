@@ -19,6 +19,24 @@ jobs before their workflow artifacts expire; changed source needs a new build.
 
 Windows distributions are a single setup EXE. Linux distributions include
 AppImage, DEB and RPM. macOS distributions include a DMG and app tarball.
+Windows uses Tauri's per-user NSIS installer and bundled offline WebView2. The
+first NSIS installation removes the registered legacy Inno installation while
+preserving profiles, credentials, downloaded engines and checkpoints.
+
+Packages require `TAURI_SIGNING_PRIVATE_KEY` and, for encrypted keys,
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Generate keys with `bun run tauri signer
+generate`, keep the private key and a backup outside the checkout, and store it
+in the matching GitHub Actions repository secret. The public key in
+`desktop/src-tauri/tauri.conf.json` is the installed app's trust root; losing
+its private key prevents updates to those installations. Pull requests generate
+temporary test keys; main releases fail if the production secret is missing.
+
+The release job verifies updater signatures with Minisign and publishes
+`latest.json` only with the complete release. Linux updates preserve AppImage,
+DEB or RPM format; DEB/RPM may require package-manager authorization. Windows
+updater signatures are separate from Authenticode, and macOS remains ad-hoc
+signed without Developer ID notarization.
+
 Each public asset must remain below GitHub's 2 GiB limit. Keep enrollment tokens,
 credentials, environments, scratch and generated runtime assets out of source.
 

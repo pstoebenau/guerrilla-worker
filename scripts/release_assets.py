@@ -1,12 +1,12 @@
 """Stage single-file native desktop distributions below GitHub's asset limit."""
 import argparse
+import base64
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
-import subprocess
 import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +29,8 @@ def package_name(file, platform, version):
     for suffix in ('-setup.exe', '.app.tar.gz', '.AppImage', '.deb', '.rpm', '.dmg'):
         if file.name.endswith(suffix):
             return f'guerrilla-worker-{version}-{target}{suffix}'
+    if file.name.endswith('.sig'):
+        return package_name(file.with_name(file.name[:-4]), platform, version) + '.sig'
     return file.name  # Private installer evidence retains its original name.
 
 
@@ -49,6 +51,20 @@ def stage_file(file, destination, limit=ASSET_LIMIT, name=None):
     return {'file': original, 'assets': [record(target)]}
 
 
+def read_signature(file):
+    try:
+        value = file.read_text().strip()
+        decoded = base64.b64decode(value, validate=True).decode('utf-8')
+        lines = decoded.splitlines()
+        if len(lines) != 4 or not lines[0].startswith('untrusted comment: ') or not lines[2].startswith('trusted comment: '):
+            raise ValueError()
+        if len(base64.b64decode(lines[1], validate=True)) != 74 or len(base64.b64decode(lines[3], validate=True)) != 64:
+            raise ValueError()
+        return value
+    except (OSError, ValueError, UnicodeError) as error:
+        raise ValueError(f'Missing or malformed Tauri updater signature: {file.name}') from error
+
+
 def prepare(bundle, destination, platform, version, commit):
     if platform not in PLATFORMS:
         raise ValueError(f'Unsupported release platform: {platform}')
@@ -56,32 +72,30 @@ def prepare(bundle, destination, platform, version, commit):
     if any(destination.iterdir()):
         raise ValueError('Release staging directory must be empty')
     if platform == 'Windows-X64':
-        files = list(bundle.glob('installer/*'))
-        setups = [file for file in files if file.name.endswith('-setup.exe')]
-        if len(setups) != 1 or any(file.suffix == '.bin' for file in files):
-            raise ValueError('Windows requires one self-contained setup executable without data slices')
-        checksum = bundle / 'installer' / (setups[0].stem + '-SHA256SUMS.txt')
-        listed = {}
-        for line in checksum.read_text().splitlines():
-            expected, name = line.split('  ', 1)
-            listed[name] = expected
-        payloads = [file for file in files if file.suffix in ('.exe', '.bin')]
-        if set(listed) != {file.name for file in payloads} or any(digest(file) != listed[file.name] for file in payloads):
-            raise ValueError('Windows installer checksums are incomplete or invalid')
+        files = list((bundle / 'nsis').glob('*-setup.exe'))
+        if len(files) != 1:
+            raise ValueError('Windows requires one self-contained NSIS setup executable')
+        updaters = [files[0]]
     elif platform == 'Linux-X64':
         files = [file for folder, suffix in (('deb', '.deb'), ('rpm', '.rpm'), ('appimage', '.AppImage'))
                  for file in (bundle / folder).glob('*' + suffix)]
-        if {file.suffix for file in files} != {'.deb', '.rpm', '.AppImage'}:
-            raise ValueError('Linux AppImage, DEB and RPM are all required')
+        if len(files) != 3 or {file.suffix for file in files} != {'.deb', '.rpm', '.AppImage'}:
+            raise ValueError('Exactly one Linux AppImage, DEB and RPM are required')
+        updaters = files.copy()
     else:
         files = list((bundle / 'dmg').glob('*.dmg'))
         apps = list((bundle / 'macos').glob('*.app'))
-        if len(files) != 1 or len(apps) != 1:
-            raise ValueError('The native macOS app and DMG are required')
-        # Native tar preserves app symlinks and executable permissions.
-        archive = bundle / f'Guerrilla-Worker-{version}-{platform}.app.tar.gz'
-        subprocess.run(['tar', '-czf', str(archive.resolve()), '-C', str(apps[0].parent.resolve()), apps[0].name], check=True)
-        files.append(archive)
+        archives = list((bundle / 'macos').glob('*.app.tar.gz'))
+        if len(files) != 1 or len(apps) != 1 or len(archives) != 1:
+            raise ValueError('The native macOS app, DMG and Tauri updater archive are required')
+        # Use the archive produced and signed by Tauri. Repacking would change
+        # the signed bytes and invalidate the updater artifact.
+        updaters = archives
+        files.extend(updaters)
+    for updater in updaters:
+        signature = updater.with_name(updater.name + '.sig')
+        read_signature(signature)
+        files.append(signature)
     packages = []
     for file in sorted(files):
         if file.is_file():
@@ -93,7 +107,8 @@ def prepare(bundle, destination, platform, version, commit):
     with tarfile.open(notices, 'w:gz') as archive:
         archive.add(ROOT / 'desktop/src-tauri/resources/runtime/notices', arcname='notices')
         archive.add(ROOT / 'desktop/src-tauri/resources/runtime/manifest.json', arcname='runtime-manifest.json')
-    manifest = {'version': version, 'commit': commit, 'platform': platform, 'packages': packages,
+    updates = [{'name': package_name(file, platform, version), 'signature': package_name(file, platform, version) + '.sig'} for file in updaters]
+    manifest = {'updaters': updates, 'version': version, 'commit': commit, 'platform': platform, 'packages': packages,
                 'assets': [record(file) for file in sorted(destination.iterdir())]}
     (destination / f'release-{platform}.json').write_text(json.dumps(manifest, indent=2) + '\n')
     print(f'Prepared {platform}: {len(manifest["assets"])} release assets')

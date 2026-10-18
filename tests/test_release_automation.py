@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import os
@@ -20,6 +21,17 @@ import release_image
 
 
 class ReleaseAutomationTests(unittest.TestCase):
+    def collect(self, *args, **kwargs):
+        # Inventory/feed tests isolate crypto, covered below with the real
+        # upstream verifier and Tauri signer on the Linux package runner.
+        with patch.object(publish_release, 'verify_signature', side_effect=lambda payload, signature, key, version: release_assets.read_signature(signature)):
+            return publish_release.collect(*args, **kwargs)
+
+    @staticmethod
+    def fixture_signature(version='0.3.0'):
+        return base64.b64encode(('untrusted comment: test fixture\n' + base64.b64encode(b'Ed' + b'x' * 72).decode() +
+                                 f'\ntrusted comment: timestamp:1\tversion:{version}\n' + base64.b64encode(b'x' * 64).decode() + '\n').encode()).decode()
+
     def release_fixture(self, root):
         commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=publish_release.ROOT, text=True).strip()
         artifacts = root / 'artifacts'
@@ -32,12 +44,18 @@ class ReleaseAutomationTests(unittest.TestCase):
             directory = artifacts / platform
             directory.mkdir(parents=True)
             packages = []
+            updaters = []
             for suffix in suffixes:
                 file = directory / (platform + suffix)
                 file.write_bytes(('native package ' + file.name).encode())
                 item = release_assets.record(file)
                 packages.append({'file': item, 'assets': [item]})
                 public.add(file.name)
+                if suffix != '.dmg':
+                    signature = file.with_name(file.name + '.sig')
+                    signature.write_text(self.fixture_signature())
+                    updaters.append({'name': file.name, 'signature': signature.name})
+                    public.add(signature.name)
             (directory / (platform + '-notices.tar.gz')).write_bytes(b'bundled licenses and runtime evidence')
             if platform == 'Windows-X64':
                 for suffix in ('-SHA256SUMS.txt', '-WebView2.json'):
@@ -45,7 +63,7 @@ class ReleaseAutomationTests(unittest.TestCase):
                     file.write_bytes(b'Windows build evidence')
                     item = release_assets.record(file)
                     packages.append({'file': item, 'assets': [item]})
-            report = {'platform': platform, 'version': '0.3.0', 'commit': commit, 'packages': packages,
+            report = {'updaters': updaters, 'platform': platform, 'version': '0.3.0', 'commit': commit, 'packages': packages,
                       'assets': [release_assets.record(file) for file in sorted(directory.iterdir())]}
             (directory / f'release-{platform}.json').write_text(json.dumps(report))
         return artifacts, commit, public
@@ -57,9 +75,9 @@ class ReleaseAutomationTests(unittest.TestCase):
             evidence = {file.relative_to(artifacts): release_assets.record(file)
                         for file in artifacts.rglob('*') if file.is_file()}
             destination = root / 'public'
-            assets = publish_release.collect(artifacts, destination, '0.3.0', commit)
+            assets = self.collect(artifacts, destination, '0.3.0', commit)
             self.assertEqual({asset['name'] for asset in assets},
-                             packages | {'guerrilla-worker-0.3.0-source.tar.gz', 'SHA256SUMS.txt'})
+                             packages | {'guerrilla-worker-0.3.0-source.tar.gz', 'SHA256SUMS.txt', 'latest.json'})
             checksums = {name: digest for digest, name in
                          (line.split('  ', 1) for line in (destination / 'SHA256SUMS.txt').read_text().splitlines())}
             self.assertEqual(checksums, {asset['name']: asset['sha256'] for asset in assets if asset['name'] != 'SHA256SUMS.txt'})
@@ -84,7 +102,70 @@ class ReleaseAutomationTests(unittest.TestCase):
                     manifest.write_text(json.dumps(report))
                     message = 'exactly one Linux-X64 .rpm'
                 with self.assertRaisesRegex(ValueError, message):
-                    publish_release.collect(artifacts, root / 'public', '0.3.0', commit)
+                    self.collect(artifacts, root / 'public', '0.3.0', commit)
+
+    def test_feed_uses_verified_signatures_and_format_specific_immutable_urls(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            artifacts, commit, _ = self.release_fixture(root)
+            self.collect(artifacts, root / 'public', '0.3.0', commit, 'owner/repo')
+            feed = json.loads((root / 'public/latest.json').read_text())
+            self.assertEqual(feed['version'], '0.3.0')
+            self.assertEqual(set(feed['platforms']), {'windows-x86_64', 'darwin-aarch64', 'linux-x86_64-appimage', 'linux-x86_64-deb', 'linux-x86_64-rpm'})
+            for target, update in feed['platforms'].items():
+                self.assertIn('https://github.com/owner/repo/releases/download/v0.3.0/', update['url'])
+                self.assertEqual(update['signature'], self.fixture_signature())
+                if target.startswith('linux-'):
+                    self.assertTrue(update['url'].endswith({'appimage': '.AppImage', 'deb': '.deb', 'rpm': '.rpm'}[target.rsplit('-', 1)[1]]))
+
+    def test_feed_refuses_missing_malformed_corrupt_or_misdirected_signatures(self):
+        for failure in ('missing', 'malformed', 'corrupt', 'reference'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                artifacts, commit, _ = self.release_fixture(root)
+                manifest = artifacts / 'Windows-X64/release-Windows-X64.json'
+                report = json.loads(manifest.read_text())
+                signature = manifest.parent / 'Windows-X64-setup.exe.sig'
+                if failure == 'missing':
+                    report['assets'] = [asset for asset in report['assets'] if asset['name'] != signature.name]
+                    signature.unlink()
+                elif failure == 'malformed':
+                    signature.write_text('not a Tauri signature')
+                    report['assets'] = [release_assets.record(manifest.parent / asset['name']) for asset in report['assets']]
+                elif failure == 'corrupt':
+                    signature.write_text('corruption after manifest')
+                else:
+                    report['updaters'][0]['name'] = '../outside.exe'
+                manifest.write_text(json.dumps(report))
+                with self.assertRaises(ValueError):
+                    self.collect(artifacts, root / 'public', '0.3.0', commit)
+                self.assertFalse((root / 'public/latest.json').exists())
+
+    @unittest.skipUnless(shutil.which('minisign'), 'upstream Minisign is installed on the Linux release runner')
+    def test_real_tauri_signature_refuses_tampering_wrong_key_and_wrong_signed_version(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            data = root / 'artifact.AppImage'
+            data.write_bytes(b'real signed update artifact')
+            keys = [root / 'first.key', root / 'second.key']
+            environment = {key: value for key, value in os.environ.items() if not key.startswith('TAURI_SIGNING_')}
+            for key in keys:
+                result = subprocess.run(['bun', 'run', 'tauri', 'signer', 'generate', '--ci', '--password', '', '--write-keys', str(key)],
+                                        cwd=release_assets.ROOT / 'desktop', capture_output=True, env=environment)
+                self.assertEqual(result.returncode, 0, 'Tauri key generation failed')
+            result = subprocess.run(['bun', 'run', 'tauri', 'signer', 'sign', '--private-key-path', str(keys[0]), '--password', '', '--app-version', '0.3.0', str(data)],
+                                    cwd=release_assets.ROOT / 'desktop', capture_output=True, env=environment)
+            self.assertEqual(result.returncode, 0, 'Tauri signing failed')
+            public = keys[0].with_suffix('.key.pub').read_text().strip()
+            signature = data.with_name(data.name + '.sig')
+            publish_release.verify_signature(data, signature, public, '0.3.0')
+            with self.assertRaisesRegex(ValueError, 'signed version differs'):
+                publish_release.verify_signature(data, signature, public, '0.3.1')
+            with self.assertRaisesRegex(ValueError, 'verification failed'):
+                publish_release.verify_signature(data, signature, keys[1].with_suffix('.key.pub').read_text().strip(), '0.3.0')
+            data.write_bytes(b'tampered artifact')
+            with self.assertRaisesRegex(ValueError, 'verification failed'):
+                publish_release.verify_signature(data, signature, public, '0.3.0')
 
     def test_one_numeric_version_is_allocated_and_reruns_reuse_it(self):
         releases = [{'tag_name': 'v0.3.9', 'prerelease': False, 'target_commitish': 'old'},
@@ -248,13 +329,13 @@ class ReleaseAutomationTests(unittest.TestCase):
                 (directory / f'release-{platform}.json').write_text(json.dumps({
                     'platform': platform, 'version': '0.3.0', 'commit': 'a' * 40, 'assets': []}))
             with self.assertRaisesRegex(ValueError, 'Publication requires'):
-                publish_release.collect(artifacts, root / 'output', '0.3.0', 'a' * 40)
+                self.collect(artifacts, root / 'output', '0.3.0', 'a' * 40)
             directory = artifacts / 'macOS-ARM64'
             directory.mkdir()
             (directory / 'release-macOS-ARM64.json').write_text(json.dumps({
                 'platform': 'macOS-ARM64', 'version': '0.3.0', 'commit': 'b' * 40, 'assets': []}))
             with self.assertRaisesRegex(ValueError, 'same version and commit'):
-                publish_release.collect(artifacts, root / 'output', '0.3.0', 'a' * 40)
+                self.collect(artifacts, root / 'output', '0.3.0', 'a' * 40)
 
     def test_publish_verification_rejects_missing_or_corrupt_uploaded_assets(self):
         expected = [{'name': 'package.dmg', 'size': 5, 'sha256': hashlib.sha256(b'bytes').hexdigest()}]
@@ -270,7 +351,7 @@ class ReleaseAutomationTests(unittest.TestCase):
         asset = {'name': 'package.dmg', 'size': 5, 'sha256': hashlib.sha256(b'bytes').hexdigest()}
         release = {'id': 123, 'tag_name': 'v0.3.0', 'target_commitish': 'a' * 40, 'draft': True,
                    'assets': [{**asset, 'state': 'uploaded', 'digest': 'sha256:' + asset['sha256']}]}
-        for existing in (False, True):
+        for existing, latest_tag in ((False, 'v0.2.0'), (True, 'v0.2.0'), (True, 'v0.3.10')):
             with self.subTest(existing=existing), tempfile.TemporaryDirectory() as folder:
                 root = Path(folder)
                 destination = root / 'assets'
@@ -294,6 +375,8 @@ class ReleaseAutomationTests(unittest.TestCase):
                         # created draft. Its create response must provide the ID.
                         self.assertFalse(created and not existing)
                         return json.dumps([[{'id': 99, 'tag_name': 'v0.2.0'}], [release] if created else []])
+                    if args[:2] == ('api', 'repos/owner/repo/releases/latest'):
+                        return json.dumps({'tag_name': latest_tag})
                     if args[:2] == ('api', 'repos/owner/repo/releases/123'):
                         return json.dumps(release)
                     if args[:2] in (('release', 'upload'), ('release', 'edit')):
@@ -310,6 +393,7 @@ class ReleaseAutomationTests(unittest.TestCase):
                 verified = calls.index(('api', 'repos/owner/repo/releases/123'))
                 published = next(i for i, call in enumerate(calls) if call[:2] == ('release', 'edit'))
                 self.assertLess(verified, published)
+                self.assertIn('--latest=false' if latest_tag == 'v0.3.10' else '--latest', calls[published])
 
 
 if __name__ == '__main__':

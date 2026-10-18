@@ -33,7 +33,6 @@ export interface DesktopInfo {
   version: string;
   platform: 'windows' | 'linux' | 'macos';
 }
-export interface AvailableUpdate { version: string; releaseUrl: string }
 export interface DependencyCheck { name: string; available: boolean; message?: string; version?: string }
 export interface Preflight { ok: boolean; checks?: DependencyCheck[]; engines?: EngineStatus[]; gpus?: GpuStatus[]; message?: string }
 export interface LogSource { id: string; label: string; modifiedAt: number }

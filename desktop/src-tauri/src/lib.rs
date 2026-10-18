@@ -32,6 +32,7 @@ struct DesktopState {
     worker: PathBuf,
     gate: Mutex<()>,
     quitting: AtomicBool,
+    updating: AtomicBool,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,6 +44,16 @@ struct DesktopInfo {
     gpu_runtime: guerrilla_runtime::SetupStatus,
     version: &'static str,
     platform: &'static str,
+}
+
+fn ensure_mutable(state: &DesktopState) -> Result<(), String> {
+    if state.quitting.load(Ordering::SeqCst) {
+        return Err("Worker is quitting.".into());
+    }
+    if state.updating.load(Ordering::SeqCst) {
+        return Err("An update is waiting for jobs to finish. Cancel the update before changing worker settings or activity.".into());
+    }
+    Ok(())
 }
 
 fn read_profile(state: &DesktopState) -> Result<Profile, String> {
@@ -231,12 +242,19 @@ async fn desktop_info(state: tauri::State<'_, DesktopState>) -> Result<DesktopIn
     info(&state)
 }
 #[tauri::command]
-async fn worker_status(state: tauri::State<'_, DesktopState>) -> Result<Value, String> {
-    cli(&state, "status", None).await
+async fn worker_status(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<Value, String> {
+    let status = cli(&state, "status", None).await?;
+    updates::observe_worker_status(&app, &status);
+    Ok(status)
 }
 #[tauri::command]
 async fn worker_preflight(state: tauri::State<'_, DesktopState>) -> Result<Value, String> {
+    ensure_mutable(&state)?;
     let _guard = state.gate.lock().await;
+    ensure_mutable(&state)?;
     cli(&state, "preflight", None).await
 }
 
@@ -245,10 +263,9 @@ async fn install_gpu_runtime(
     app: tauri::AppHandle,
     state: tauri::State<'_, DesktopState>,
 ) -> Result<DesktopInfo, String> {
+    ensure_mutable(&state)?;
     let _guard = state.gate.lock().await;
-    if state.quitting.load(Ordering::SeqCst) {
-        return Err("Worker is quitting.".into());
-    }
+    ensure_mutable(&state)?;
     let mut command = owned_command(&state, "setup-runtime", false)?;
     let mut child = command
         .spawn()
@@ -321,7 +338,9 @@ async fn save_profile(
     state: tauri::State<'_, DesktopState>,
     mut profile: Profile,
 ) -> Result<DesktopInfo, String> {
+    ensure_mutable(&state)?;
     let _guard = state.gate.lock().await;
+    ensure_mutable(&state)?;
     let current = read_profile(&state)?;
     profile.control_url = profile::normalize_server(&profile.control_url)?;
     if let Some(origin) = profile::bound_server(&state.directory)?
@@ -376,10 +395,9 @@ async fn enroll_worker(
 }
 
 async fn enroll(state: &DesktopState, token: String, control_url: String) -> Result<Value, String> {
+    ensure_mutable(&state)?;
     let _guard = state.gate.lock().await;
-    if state.quitting.load(Ordering::SeqCst) {
-        return Err("Worker is quitting.".into());
-    }
+    ensure_mutable(state)?;
     if token.trim().is_empty() || token.len() > 4096 {
         return Err("Paste an enrollment token from the server's Workers page.".into());
     }
@@ -398,10 +416,9 @@ async fn action(state: &DesktopState, action: &str) -> Result<Value, String> {
     if !matches!(action, "start" | "stop" | "drain" | "disconnect") {
         return Err("Unknown worker action".into());
     }
+    ensure_mutable(&state)?;
     let _guard = state.gate.lock().await;
-    if state.quitting.load(Ordering::SeqCst) {
-        return Err("Worker is quitting.".into());
-    }
+    ensure_mutable(state)?;
     cli(state, action, None).await?;
     cli(state, "status", None).await
 }
@@ -477,8 +494,23 @@ async fn open_server(
         .map_err(|e| e.to_string())
 }
 #[tauri::command]
-async fn check_for_updates() -> Result<Option<updates::AvailableUpdate>, String> {
-    updates::check().await
+async fn updater_snapshot(app: tauri::AppHandle) -> updates::Snapshot {
+    updates::snapshot(&app)
+}
+#[tauri::command]
+async fn updater_check(app: tauri::AppHandle) -> Result<updates::Snapshot, String> {
+    updates::check(app).await
+}
+#[tauri::command]
+async fn updater_schedule_install(
+    app: tauri::AppHandle,
+    wait_for_idle: bool,
+) -> Result<updates::Snapshot, String> {
+    updates::schedule(app, wait_for_idle)
+}
+#[tauri::command]
+async fn updater_cancel_install(app: tauri::AppHandle) -> Result<updates::Snapshot, String> {
+    updates::cancel(&app)
 }
 #[tauri::command]
 async fn open_release(app: tauri::AppHandle, url: String) -> Result<(), String> {
@@ -551,6 +583,7 @@ fn show_window(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
+    updates::initialize_tls();
     let mut context = tauri::generate_context!();
     if std::env::var_os("GUERRILLA_WORKER_DATA_DIR").is_some() {
         use std::hash::{Hash, Hasher};
@@ -570,6 +603,7 @@ pub fn run() {
                 show_window(app);
             }
         }))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(
@@ -588,7 +622,10 @@ pub fn run() {
             open_log_directory,
             browse_path,
             open_server,
-            check_for_updates,
+            updater_snapshot,
+            updater_check,
+            updater_schedule_install,
+            updater_cancel_install,
             open_release,
             open_data_directory,
             quit_interface
@@ -629,11 +666,31 @@ pub fn run() {
                 worker,
                 gate: Mutex::new(()),
                 quitting: AtomicBool::new(false),
+                updating: AtomicBool::new(false),
             };
             let p = read_profile(&state).map_err(std::io::Error::other)?;
             profile::atomic_save(&state.directory.join("config.json"), &p)
                 .map_err(std::io::Error::other)?;
             app.manage(state);
+            app.manage(updates::State::default());
+            // NSIS can replace the installer registration while preserving this
+            // external profile. Reconcile its saved preference using Tauri's plugin.
+            if std::env::var_os("GUERRILLA_WORKER_DATA_DIR").is_none() {
+                let reconcile = (|| {
+                    let enabled = app.autolaunch().is_enabled().map_err(|error| error.to_string())?;
+                    if enabled != p.start_at_login {
+                        if p.start_at_login { app.autolaunch().enable() } else { app.autolaunch().disable() }
+                            .map_err(|error| error.to_string())?;
+                    }
+                    Ok::<_, String>(())
+                })();
+                if let Err(message) = reconcile {
+                    app.dialog().message(format!("Could not restore login startup: {message}. Retry the preference in Settings."))
+                        .title("Guerrilla Worker")
+                        .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+                        .show(|_| {});
+                }
+            }
             let overview =
                 MenuItem::with_id(app, "overview", "Open Guerrilla Worker", true, None::<&str>)?;
             let start = MenuItem::with_id(app, "start", "Start worker", true, None::<&str>)?;
@@ -700,10 +757,22 @@ pub fn run() {
             if !background || !has_tray {
                 show_window(app.handle());
             }
-            if background && p.start_at_login {
+            let resume_update = app
+                .state::<DesktopState>()
+                .directory
+                .join("resume-after-update")
+                .exists();
+            if resume_update || (background && p.start_at_login) {
                 let app = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    if let Err(message) = action(&app.state::<DesktopState>(), "start").await {
+                    let result = if resume_update {
+                        updates::resume_after_update(&app).await
+                    } else {
+                        action(&app.state::<DesktopState>(), "start")
+                            .await
+                            .map(|_| ())
+                    };
+                    if let Err(message) = result {
                         let _ = app.emit("worker-error", message);
                         show_window(&app);
                     }
@@ -761,6 +830,7 @@ mod integration_tests {
             worker: worker.clone(),
             gate: Mutex::new(()),
             quitting: AtomicBool::new(false),
+            updating: AtomicBool::new(false),
         };
         tauri::async_runtime::block_on(async {
             for (output, exit_code, succeeds) in [
@@ -811,6 +881,7 @@ mod integration_tests {
             worker,
             gate: Mutex::new(()),
             quitting: AtomicBool::new(false),
+            updating: AtomicBool::new(false),
         };
         let mut profile = read_profile(&state).unwrap();
         profile.control_url = "http://127.0.0.1:9".into();

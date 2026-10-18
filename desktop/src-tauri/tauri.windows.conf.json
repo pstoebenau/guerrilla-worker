@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": [
+      "nsis"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "../../packaging/windows-hooks.nsh",
+        "compression": "lzma",
+        "startMenuFolder": "Guerrilla Worker"
+      }
+    }
+  }
+}

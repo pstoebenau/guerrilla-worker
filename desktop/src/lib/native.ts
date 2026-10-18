@@ -1,6 +1,7 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
-import type { AvailableUpdate, BrowseField, DesktopInfo, Logs, Preflight, Profile, WorkerAction, WorkerStatus } from './types';
+import type { BrowseField, DesktopInfo, Logs, Preflight, Profile, WorkerAction, WorkerStatus } from './types';
 import { parsePreflight, parseStatus } from './parse';
+import { parseUpdateSnapshot } from './updates';
 
 export const nativeAvailable = isTauri();
 export function native<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -19,7 +20,10 @@ export const api = {
   openLogFolder: (source: string) => native<void>('open_log_directory', { source }),
   browse: (field: BrowseField) => native<string | null>('browse_path', { field }),
   openServer: () => native<void>('open_server'),
-  checkForUpdates: () => native<AvailableUpdate | null>('check_for_updates'),
+  updateSnapshot: async () => parseUpdateSnapshot(await native<unknown>('updater_snapshot')),
+  checkForUpdates: async () => parseUpdateSnapshot(await native<unknown>('updater_check')),
+  scheduleUpdate: async (waitForIdle: boolean) => parseUpdateSnapshot(await native<unknown>('updater_schedule_install', { waitForIdle })),
+  cancelUpdate: async () => parseUpdateSnapshot(await native<unknown>('updater_cancel_install')),
   openRelease: (url: string) => native<void>('open_release', { url }),
   openData: () => native<void>('open_data_directory'),
   quit: () => native<void>('quit_interface'),

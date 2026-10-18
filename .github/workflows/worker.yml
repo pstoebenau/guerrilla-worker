@@ -69,6 +69,9 @@ jobs:
           PYTHON
           fi
   packages:
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ github.ref == 'refs/heads/main' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ github.ref == 'refs/heads/main' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
     needs: prepare
     name: Build ${{ matrix.platform }}
     strategy:
@@ -123,11 +126,16 @@ jobs:
           [IO.File]::AppendAllText($env:GITHUB_ENV, "WORKER_BUILD_CACHE=$runtimeCache`n", [Text.UTF8Encoding]::new($false))
       - name: Install Linux desktop build dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev patchelf libfuse2 rpm librdmacm1
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev patchelf libfuse2 rpm cpio librdmacm1 minisign
       - name: Install Rust
         run: |
           rustup toolchain install 1.99.0 --profile minimal
           rustup default 1.99.0
+      - name: Prepare updater signing (ephemeral keys for pull requests)
+        run: |
+          bun install --frozen-lockfile
+          bun install --frozen-lockfile --cwd desktop
+          python scripts/configure_updater.py
       - name: Build desktop with vendored dependencies
         run: |
           bun install --frozen-lockfile
@@ -139,6 +147,33 @@ jobs:
           cargo test --release --locked --workspace
           cargo test --release --locked --manifest-path desktop/src-tauri/Cargo.toml --target-dir desktop/src-tauri/target --features tauri/custom-protocol
           python -m unittest discover -s tests -p 'test_*.py'
+      - name: Verify signed macOS updater installation and rejection recovery
+        if: runner.os == 'macOS'
+        run: |
+          python - <<'PYTHON'
+          import json, os, subprocess, tempfile
+          from pathlib import Path
+          root = Path.cwd()
+          config = json.loads((root / 'desktop/src-tauri/tauri.conf.json').read_text())
+          archives = list((root / 'desktop/src-tauri/target/release/bundle/macos').glob('*.app.tar.gz'))
+          if len(archives) != 1:
+              raise ValueError('Expected exactly one signed Tauri macOS updater archive')
+          package = archives[0].resolve()
+          signature = package.with_name(package.name + '.sig')
+          if not signature.is_file():
+              raise ValueError('The built macOS updater signature is missing')
+          with tempfile.TemporaryDirectory(prefix='updater-public-key-', dir=os.environ['RUNNER_TEMP']) as directory:
+              public_key = Path(directory) / 'release.pub'
+              public_key.write_text(os.environ.get('GUERRILLA_UPDATER_TEST_PUBKEY') or config['plugins']['updater']['pubkey'])
+              environment = dict(os.environ, GUERRILLA_UPDATER_TEST_PACKAGE=str(package),
+                  GUERRILLA_UPDATER_TEST_SIGNATURE=str(signature), GUERRILLA_UPDATER_TEST_PUBLIC_KEY=str(public_key),
+                  GUERRILLA_UPDATER_TEST_VERSION=config['version'])
+              environment.pop('GUERRILLA_UPDATER_TEST_KEEP', None)
+              subprocess.run(['cargo', 'test', '--release', '--locked', '--manifest-path', 'desktop/src-tauri/Cargo.toml',
+                  '--target-dir', 'desktop/src-tauri/target', '--features', 'tauri/custom-protocol',
+                  'updates::lifecycle_tests::native_signed_macos_fixture_installs_and_preserves_old_app_on_rejection',
+                  '--', '--ignored', '--exact'], env=environment, check=True, timeout=300)
+          PYTHON
       - name: Prepare Windows Vulkan loader for runtime verification
         if: runner.os == 'Windows'
         shell: pwsh
@@ -183,109 +218,7 @@ jobs:
       - name: Smoke test Windows installer without enrollment or worker launch
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          # This production installer test is runner-only. Fail closed if the
-          # account has an existing worker/profile/login entry; /DIR alone does
-          # not isolate the installer's normal profile and registry cleanup.
-          $normalProfile = Join-Path $env:LOCALAPPDATA 'Guerrilla/worker'
-          function Assert-FreshWorkerAccount {
-            if (Test-Path -LiteralPath $normalProfile) { throw 'Installer smoke requires a fresh dedicated runner without a normal worker profile.' }
-            if (@(Get-Process -Name 'guerrilla-worker-desktop', 'guerrilla-worker', 'guerrilla-pipeline' -ErrorAction SilentlyContinue).Count -gt 0) { throw 'Existing worker processes prevent an isolated installer smoke test.' }
-            $runKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
-            try {
-              if ($null -ne $runKey) {
-                foreach ($entry in @('GuerrillaWorker', 'guerrilla-worker-desktop')) {
-                  if ($runKey.GetValueNames() -contains $entry) { throw 'Existing Guerrilla login registration prevents installer smoke testing.' }
-                }
-              }
-            } finally { if ($null -ne $runKey) { $runKey.Dispose() } }
-          }
-          Assert-FreshWorkerAccount
-          $installerFolder = Join-Path $env:GITHUB_WORKSPACE 'desktop/src-tauri/target/release/bundle/installer'
-          $installers = @(Get-ChildItem -LiteralPath $installerFolder -Filter '*-windows-x64-setup.exe' -File)
-          if ($installers.Count -ne 1) { throw 'Expected exactly one generated Windows installer.' }
-          $installer = $installers[0]
-          if (@(Get-ChildItem -LiteralPath $installerFolder -Filter ($installer.BaseName + '-*.bin') -File).Count -ne 0) { throw 'Expected a single-file installer without data slices.' }
-          $qaRoot = Join-Path $env:RUNNER_TEMP ('guerrilla-installer-' + [Guid]::NewGuid().ToString('N'))
-          $installed = Join-Path $qaRoot 'app'
-          $profileDirectory = Join-Path $qaRoot 'profile'
-          $null = New-Item -ItemType Directory -Path $profileDirectory -Force
-          $config = Join-Path $profileDirectory 'config.json'
-          $scratch = Join-Path $profileDirectory 'scratch'
-          $null = New-Item -ItemType Directory -Path $scratch -Force
-          $sentinel = Join-Path $scratch 'retained-checkpoint.txt'
-          [IO.File]::WriteAllText($sentinel, 'preserved-checkpoint', [Text.UTF8Encoding]::new($false))
-          $installLog = Join-Path $qaRoot 'install.log'
-          $uninstallLog = Join-Path $qaRoot 'uninstall.log'
-          $trackedEnvironment = @('WORKER_CREDENTIAL_FILE', 'WORKER_PIPELINE_BIN', 'WORKER_RUNTIME_ROOT', 'WORKER_CRT_ROOT', 'WORKER_SCRATCH')
-          $previousEnvironment = @{}
-          foreach ($name in $trackedEnvironment) { $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
-          $uninstaller = Join-Path $installed 'unins000.exe'
-          $removed = $false
-          try {
-            $setup = Start-Process -FilePath $installer.FullName -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$installed`"", "/LOG=`"$installLog`"") -Wait -PassThru
-            if ($setup.ExitCode -ne 0) { throw "Installer failed ($($setup.ExitCode)); inspect $installLog" }
-            # Reinstall must remove obsolete app-owned GPU files, rather than
-            # mixing the base runtime with dependencies from older releases.
-            $obsolete = Join-Path $installed 'resources/runtime/obsolete-runtime.fixture'
-            [IO.File]::WriteAllText($obsolete, 'obsolete app-owned dependency')
-            $upgrade = Start-Process -FilePath $installer.FullName -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$installed`"", "/LOG=`"$installLog`"") -Wait -PassThru
-            if ($upgrade.ExitCode -ne 0 -or (Test-Path -LiteralPath $obsolete)) { throw 'Upgrade failed to replace the app-owned runtime cleanly.' }
-            $requiredFiles = @(
-              'guerrilla-worker-desktop.exe', 'guerrilla-worker.exe', 'guerrilla-pipeline.exe',
-              'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll', 'LICENSE', 'README.md',
-              'resources/runtime/manifest.json', 'resources/runtime/windows-crt/manifest.json',
-              'resources/runtime/node/node.exe',
-              'resources/runtime/ffmpeg/ffmpeg.exe', 'resources/runtime/ffmpeg/ffprobe.exe',
-              'resources/runtime/converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs'
-            )
-            foreach ($relative in $requiredFiles) {
-              if (!(Test-Path -LiteralPath (Join-Path $installed $relative) -PathType Leaf)) { throw "Installed app is missing $relative" }
-            }
-            $runtime = Join-Path $installed 'resources/runtime'
-            $profile = [ordered]@{
-              controlUrl = 'https://example.invalid'; scratchDirectory = $scratch;
-              nodePath = (Join-Path $runtime 'node/node.exe');
-              ffmpegPath = (Join-Path $runtime 'ffmpeg/ffmpeg.exe');
-              converterPath = (Join-Path $runtime 'converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs');
-              startAtLogin = $false
-            }
-            [IO.File]::WriteAllText($config, ($profile | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
-            $configHash = (Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash
-            $env:WORKER_CREDENTIAL_FILE = Join-Path $profileDirectory 'credentials.json'
-            $env:WORKER_PIPELINE_BIN = Join-Path $installed 'guerrilla-pipeline.exe'
-            $env:WORKER_RUNTIME_ROOT = $runtime
-            $env:WORKER_CRT_ROOT = Join-Path $runtime 'windows-crt'
-            $env:WORKER_SCRATCH = $scratch
-            $worker = Join-Path $installed 'guerrilla-worker.exe'
-            $statusOutput = & $worker --config $config status
-            if ($LASTEXITCODE -ne 0) { throw 'Installed worker status command failed.' }
-            $status = ($statusOutput -join "`n") | ConvertFrom-Json
-            if ($status.state -ne 'unenrolled' -or $status.connected -or $status.running) { throw 'Fresh installed worker must be unenrolled, disconnected and stopped.' }
-            if (Test-Path -LiteralPath $env:WORKER_CREDENTIAL_FILE) { throw 'Status/preflight unexpectedly created enrollment.' }
-            Assert-FreshWorkerAccount
-            $remove = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$uninstallLog`"") -Wait -PassThru
-            if ($remove.ExitCode -ne 0) { throw "Uninstall failed ($($remove.ExitCode)); inspect $uninstallLog" }
-            $removed = $true
-            # The uninstaller deletes its own executable through a short-lived
-            # helper; allow it to finish before checking the removed files.
-            $deadline = [DateTime]::UtcNow.AddSeconds(15)
-            while ((Test-Path -LiteralPath (Join-Path $installed 'guerrilla-worker-desktop.exe')) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 250 }
-            foreach ($relative in $requiredFiles) {
-              if (Test-Path -LiteralPath (Join-Path $installed $relative)) { throw "Uninstall retained owned app file $relative" }
-            }
-            if (!(Test-Path -LiteralPath $config) -or (Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash -ne $configHash) { throw 'Uninstall changed the isolated worker profile.' }
-            if (!(Test-Path -LiteralPath $sentinel) -or [IO.File]::ReadAllText($sentinel) -ne 'preserved-checkpoint') { throw 'Uninstall removed the retained checkpoint.' }
-            Assert-FreshWorkerAccount
-          } finally {
-            if (!$removed -and (Test-Path -LiteralPath $uninstaller)) {
-              $cleanup = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$uninstallLog`"") -Wait -PassThru
-              if ($cleanup.ExitCode -ne 0) { Write-Warning "Installer smoke cleanup failed ($($cleanup.ExitCode))." }
-            }
-            foreach ($name in $trackedEnvironment) { [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process') }
-            foreach ($log in @($installLog, $uninstallLog)) { if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 60 | Write-Host } }
-          }
+        run: ./scripts/smoke-windows-installer.ps1
       - name: Prepare complete release assets and checksums
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
@@ -396,6 +329,8 @@ jobs:
         with:
           pattern: guerrilla-worker-*
           path: dist/release-artifacts
+      - name: Install upstream updater signature verifier
+        run: sudo apt-get update && sudo apt-get install -y minisign
       - name: Verify every platform, upload all assets, then publish
         env:
           GH_TOKEN: ${{ github.token }}

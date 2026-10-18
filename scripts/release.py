@@ -23,7 +23,7 @@ for folder, patterns in {
     'desktop': ['package.json', 'bun.lock', '*.json', '*.ts', '*.html', 'src/**/*', 'public/**/*',
                 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock', 'src-tauri/*.json', 'src-tauri/*.rs',
                 'src-tauri/src/*.rs', 'src-tauri/capabilities/*.json', 'src-tauri/icons/*'],
-    'packaging': ['*.json', '*.iss', 'Dockerfile*'],
+    'packaging': ['*.json', '*.nsh', 'Dockerfile*'],
 }.items():
     for pattern in patterns:
         files.extend(file for file in (root / folder).glob(pattern) if file.is_file())

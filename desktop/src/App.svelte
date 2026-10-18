@@ -6,8 +6,10 @@
   import { listen } from '@tauri-apps/api/event';
   import { api, nativeAvailable } from './lib/native';
   import { parseStatus } from './lib/parse';
+  import { downloadSize, latestUpdate, parseUpdateSnapshot, updatePercent } from './lib/updates';
+  import type { UpdateSnapshot } from './lib/updates';
   import { isRunning, progressPercent, statusTitle } from './lib/types';
-  import type { AvailableUpdate, BrowseField, DesktopInfo, Logs, Preflight, Profile, WorkerAction, WorkerStatus } from './lib/types';
+  import type { BrowseField, DesktopInfo, Logs, Preflight, Profile, WorkerAction, WorkerStatus } from './lib/types';
 
   type Page = 'overview' | 'setup' | 'logs';
   let page = $state<Page>('overview');
@@ -35,9 +37,10 @@
   let disconnectOpen = $state(false);
   let stopOpen = $state(false);
   let advancedOpen = $state(false);
-  let availableUpdate = $state<AvailableUpdate | null>(null);
-  let dismissedVersion = '';
-  let checkingUpdates = false;
+  let update = $state.raw<UpdateSnapshot | null>(null);
+  let updateError = $state('');
+  let updatePending = $state(false);
+  let checkingUpdates = $state(false);
   let refreshing = false;
   let alive = true;
   const running = $derived(isRunning(status));
@@ -46,6 +49,11 @@
   const displayEngines = $derived(check?.engines ?? status?.engines ?? []);
   const displayGpus = $derived(check?.gpus ?? status?.gpus ?? []);
   const title = $derived(statusTitle(status, nativeAvailable));
+  const downloadPercent = $derived(updatePercent(update));
+  const updateActive = $derived(update?.status === 'checking' || update?.status === 'downloading' || update?.status === 'installing');
+  const updateQueued = $derived(update?.installQueued === true);
+  const updateCanceling = $derived(update?.status === 'waitingForIdle' && !update.installQueued);
+  const updateWorkerBusy = $derived(update?.workerBusy || status?.state === 'busy' || status?.state === 'draining' || status?.state === 'starting');
 
   async function refresh() {
     if (!nativeAvailable || refreshing || busy) return;
@@ -66,14 +74,38 @@
     } catch (e) { if (alive && request === logRequest) error = String(e); }
     finally { if (request === logRequest) loadingLogs = false; }
   }
+  function receiveUpdate(next: UpdateSnapshot) {
+    if (alive) {
+      const latest = latestUpdate(update, next);
+      if (latest === next) { update = latest; updateError = ''; }
+    }
+  }
   async function checkForUpdates() {
-    if (!nativeAvailable || checkingUpdates) return;
-    checkingUpdates = true;
-    try {
-      const update = await api.checkForUpdates();
-      if (alive) availableUpdate = update?.version === dismissedVersion ? null : update;
-    } catch { /* Offline or rate-limited checks should not interrupt worker management. */ }
+    if (!nativeAvailable || checkingUpdates || updateActive || updateQueued || updateCanceling) return;
+    checkingUpdates = true; updateError = '';
+    try { receiveUpdate(await api.checkForUpdates()); }
+    catch (e) { if (alive) updateError = String(e); }
     finally { checkingUpdates = false; }
+  }
+  async function updateAction(cancel = false) {
+    if (updatePending) return;
+    updatePending = true; updateError = '';
+    try { receiveUpdate(await (cancel ? api.cancelUpdate() : api.scheduleUpdate(true))); }
+    catch (e) { if (alive) updateError = String(e); }
+    finally { updatePending = false; }
+  }
+  async function subscribeToUpdates(unlisteners: (() => void)[]) {
+    try {
+      const unlisten = await listen<unknown>('updater-state', event => {
+        if (!alive) return;
+        try { receiveUpdate(parseUpdateSnapshot(event.payload)); }
+        catch (e) { updateError = String(e); }
+      });
+      if (!alive) { unlisten(); return; }
+      unlisteners.push(unlisten);
+      receiveUpdate(await api.updateSnapshot());
+      if (alive && update?.status !== 'ready') await checkForUpdates();
+    } catch (e) { if (alive) updateError = String(e); }
   }
   async function perform(label: string, work: () => Promise<void>) {
     if (busy) return;
@@ -121,7 +153,7 @@
     motion.addEventListener('change', updateMotion);
     const unlisteners: (() => void)[] = [];
     if (nativeAvailable) {
-      void checkForUpdates();
+      void subscribeToUpdates(unlisteners);
       void perform('Loading worker…', async () => { await reloadInfo(); status = await api.status(); if (!info?.enrolled) page = 'setup'; });
       void listen<unknown>('worker-status', event => { try { status = parseStatus(event.payload); } catch (e) { error = String(e); } }).then(unlisten => alive ? unlisteners.push(unlisten) : unlisten());
       void listen<string>('worker-error', event => { error = event.payload; }).then(unlisten => alive ? unlisteners.push(unlisten) : unlisten());
@@ -158,12 +190,37 @@
     {/if}
     {#if error}<div class="alert error" role="alert"><span>{error}</span><button aria-label="Dismiss error" onclick={() => error = ''}>×</button></div>{/if}
     {#if notice}<div class="alert" role="status"><span>{notice}</span><button aria-label="Dismiss notification" onclick={() => notice = ''}>×</button></div>{/if}
-    {#if availableUpdate}
-      <div class="update-notice" role="status">
-        <span>Version {availableUpdate.version} available</span>
-        <button class="text-button" disabled={!!busy} onclick={() => perform('Opening release…', () => api.openRelease(availableUpdate!.releaseUrl))}>View release <Icon name="external" size={12} /></button>
-        <button class="dismiss-update" aria-label="Dismiss update notification" onclick={() => { dismissedVersion = availableUpdate!.version; availableUpdate = null; }}>×</button>
-      </div>
+    {#if updateError || (update && update.status !== 'idle')}
+      <section class="update-notice" aria-label="App update">
+        <div class="update-copy" role="status">
+          <strong>{update?.status === 'installing' ? 'Installing update…' : update?.status === 'checking' ? 'Checking for updates…' : update?.version ? `Version ${update.version}${update.status === 'downloading' ? ' is downloading' : ' available'}` : 'App update'}</strong>
+          {#if updateError || update?.status === 'error'}
+            <p class="update-error" role="alert">{updateError || update?.error || 'The update could not finish. Check your connection and try again.'}</p>
+          {:else if updateCanceling}
+            <p>{update?.error || 'Update canceled. Finishing the current job before restoring worker activity.'}</p>
+          {:else if updateQueued}
+            <p>The update will install and restart the app after current jobs finish. Your settings and enrollment are saved.</p>
+          {:else if update?.status === 'ready'}
+            <p>Ready to install. The app will restart and keep your settings and enrollment.</p>
+          {:else if update?.status === 'downloading'}
+            <p>{downloadSize(update.downloaded)}{update.total ? ` of ${downloadSize(update.total)}` : ''}{downloadPercent === null ? '' : ` · ${downloadPercent}%`} · Jobs continue while downloading.</p>
+          {:else if update?.status === 'installing'}
+            <p>The app will restart when installation finishes.</p>
+          {/if}
+        </div>
+        {#if updateCanceling}
+          <span class="muted">Restoring worker activity…</span>
+        {:else if updateQueued}
+          <button disabled={updatePending || update?.status === 'installing'} onclick={() => updateAction(true)}>Cancel update</button>
+        {:else if update?.status === 'ready'}
+          <button class="primary" disabled={updatePending || !!busy} onclick={() => updateAction()}>{updateWorkerBusy ? 'Update when jobs finish' : 'Update and restart'}</button>
+        {:else if updateError || update?.status === 'error'}
+          <button disabled={checkingUpdates || updatePending || updateActive} onclick={checkForUpdates}>Retry update</button>
+        {/if}
+        {#if update?.status === 'downloading'}
+          <div class="progress-track update-progress" role="progressbar" aria-label="Update download progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={downloadPercent ?? undefined} class:indeterminate={downloadPercent === null}><div style:width={downloadPercent === null ? '30%' : `${downloadPercent}%`}></div></div>
+        {/if}
+      </section>
     {/if}
 
     {#key page}
@@ -233,6 +290,7 @@
   </main>
   <footer class="app-footer">
     <span>{info ? `v${info.version}` : 'Guerrilla Worker'}</span>
+    {#if nativeAvailable}<button class="text-button" disabled={checkingUpdates || updateActive || updateQueued || updateCanceling || updatePending} onclick={checkForUpdates}>{checkingUpdates || update?.status === 'checking' ? 'Checking…' : update?.status === 'idle' ? 'Up to date · Check again' : 'Check for updates'}</button>{/if}
     {#if busy}<span class="pending" role="status">{busy}</span>{/if}
     <div class="theme-switch" role="group" aria-label="Appearance">
       {#each [{ value: 'light', icon: 'sun', label: 'Light' }, { value: 'system', icon: 'monitor', label: 'System' }, { value: 'dark', icon: 'moon', label: 'Dark' }] as option (option.value)}
