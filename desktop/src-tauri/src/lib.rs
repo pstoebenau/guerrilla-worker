@@ -810,6 +810,43 @@ pub fn run() {
 mod integration_tests {
     use super::*;
 
+    #[cfg(all(windows, target_env = "msvc"))]
+    #[test]
+    fn windows_test_harness_embeds_common_controls_v6_manifest() {
+        use std::ffi::c_void;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetModuleHandleW(name: *const u16) -> *mut c_void;
+            fn FindResourceW(
+                module: *mut c_void,
+                name: *const u16,
+                kind: *const u16,
+            ) -> *mut c_void;
+            fn LoadResource(module: *mut c_void, resource: *mut c_void) -> *mut c_void;
+            fn LockResource(resource: *mut c_void) -> *const c_void;
+            fn SizeofResource(module: *mut c_void, resource: *mut c_void) -> u32;
+        }
+        // Resource 1 / RT_MANIFEST (24) is the current executable's activation
+        // manifest; the OS owns its bytes for the lifetime of this process.
+        unsafe {
+            let module = GetModuleHandleW(std::ptr::null());
+            assert!(!module.is_null());
+            let resource = FindResourceW(module, 1_usize as *const u16, 24_usize as *const u16);
+            assert!(
+                !resource.is_null(),
+                "Unit-test executable lacks an embedded application manifest"
+            );
+            let size = SizeofResource(module, resource) as usize;
+            let loaded = LoadResource(module, resource);
+            assert!(!loaded.is_null());
+            let bytes = LockResource(loaded).cast::<u8>();
+            assert!(!bytes.is_null());
+            let manifest = std::str::from_utf8(std::slice::from_raw_parts(bytes, size)).unwrap();
+            assert!(manifest.contains("Microsoft.Windows.Common-Controls"));
+            assert!(manifest.contains("6.0.0.0"));
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn quit_waits_for_stop_and_rejects_unconfirmed_shutdown() {

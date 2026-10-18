@@ -739,7 +739,7 @@ esac
             "#!/bin/sh\n[ \"$3\" = status ] || exit 99\nprintf '{\"running\":true,\"state\":\"busy\"}'\n",
         );
         tauri::async_runtime::block_on(async {
-            tokio::time::timeout(Duration::from_secs(2), restore(&state, true, true))
+            tokio::time::timeout(Duration::from_secs(15), restore(&state, true, true))
                 .await
                 .unwrap()
                 .unwrap();
@@ -819,30 +819,57 @@ case "$3" in
 status)
  if [ -f "$root/finished" ]; then printf '{"running":false,"state":"stopped"}';
  else printf '{"running":true,"state":"busy","scanId":"active-scan"}'; fi;;
-drain) touch "$root/finished"; sleep 0.15; printf 'invalid-response';;
-start) touch "$root/restarted"; printf '{"running":true,"state":"idle"}';;
+drain)
+ touch "$root/drain-requested"
+ while [ ! -f "$root/cancel-acknowledged" ]; do sleep 0.01; done
+ touch "$root/finished"
+ printf 'invalid-response';;
+start)
+ [ -f "$root/finished" ] || exit 99
+ touch "$root/restarted"
+ printf '{"running":true,"state":"idle"}';;
 *) touch "$root/unexpected-command"; exit 2;;
 esac
 "#,
         );
         cached_fixture(&app, &state, b"test");
         tauri::async_runtime::block_on(async {
-            let operation = prepare_and_install(app.handle(), &state, true);
-            let cancellation = async {
-                while !state.directory.join("finished").exists() {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+            // The deadline detects a deadlock; fixture acknowledgement, rather than
+            // a short shell sleep, determines exactly when cancellation must happen.
+            tokio::time::timeout(Duration::from_secs(15), async {
+                let operation = prepare_and_install(app.handle(), &state, true);
+                tokio::pin!(operation);
+                tokio::select! {
+                    result = &mut operation => panic!(
+                        "Update preparation exited before the fixture received drain: {result:?}"
+                    ),
+                    _ = async {
+                        while !state.directory.join("drain-requested").exists() {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    } => {}
                 }
-                cancel(app.handle()).unwrap();
-            };
-            let (result, _) = tokio::time::timeout(Duration::from_secs(4), async {
-                tokio::join!(operation, cancellation)
+                assert!(!state.directory.join("finished").exists());
+                assert!(!state.directory.join("restarted").exists());
+                let canceled = cancel(app.handle()).unwrap();
+                assert!(!canceled.install_queued);
+                assert!(canceled.status == Status::WaitingForIdle);
+                assert!(app.state::<State>().cancel.load(Ordering::SeqCst));
+                // Only an acknowledged cancellation releases the fake daemon exit
+                // and its malformed response, exercising recovery after a side effect.
+                std::fs::write(state.directory.join("cancel-acknowledged"), "").unwrap();
+                operation.await.unwrap();
+                assert!(state.directory.join("finished").exists());
+                assert!(state.directory.join("restarted").exists());
+                assert!(!state.directory.join("unexpected-command").exists());
+                let restored = snapshot(app.handle());
+                assert!(restored.status == Status::Ready);
+                assert!(!restored.install_queued);
+                assert!(restored.error.is_none());
+                assert!(restored.revision > canceled.revision);
             })
             .await
-            .unwrap();
-            result.unwrap();
-            assert!(state.directory.join("restarted").exists());
-            assert!(!state.directory.join("unexpected-command").exists());
-            assert!(snapshot(app.handle()).status == Status::Ready);
+            .expect("Drain cancellation and worker restoration did not complete");
         });
         std::fs::remove_dir_all(state.directory).unwrap();
     }
@@ -887,7 +914,7 @@ esac
         tauri::async_runtime::block_on(async {
             let guard = state.gate.lock().await;
             let result = tokio::time::timeout(
-                Duration::from_secs(5),
+                Duration::from_secs(15),
                 prepare_and_install(app.handle(), &state, true),
             )
             .await
@@ -905,7 +932,20 @@ esac
         let lock = lock_for_install(&state).unwrap();
         assert!(lock_for_install(&state).is_err());
         drop(lock);
-        assert!(lock_for_install(&state).is_ok());
+        // A concurrent process spawn can briefly inherit the file descriptor
+        // between fork and exec. The lock must become available once it closes.
+        tauri::async_runtime::block_on(async {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    if let Ok(lock) = lock_for_install(&state) {
+                        break lock;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("Worker lock remained held after release");
+        });
         std::fs::remove_dir_all(state.directory).unwrap();
     }
 

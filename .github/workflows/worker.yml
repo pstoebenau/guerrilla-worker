@@ -141,35 +141,6 @@ jobs:
           bun install --frozen-lockfile
           bun run check
           bun run build --verbose
-      - name: Stage Windows app-local CRT beside desktop Rust tests
-        if: runner.os == 'Windows'
-        run: |
-          python - <<'PYTHON'
-          import hashlib, json, re, shutil
-          from pathlib import Path
-          root = Path.cwd()
-          source = root / 'desktop/src-tauri/resources/runtime/windows-crt'
-          destination = root / 'desktop/src-tauri/target/release/deps'
-          manifest = json.loads((source / 'manifest.json').read_text())
-          if manifest['schemaVersion'] != 1 or manifest['architecture'] != 'x64':
-              raise ValueError('Expected the packaged x64 Microsoft CRT manifest')
-          files = manifest['files']
-          names = {record['fileName'].lower() for record in files}
-          if not {'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll'} <= names:
-              raise ValueError('Packaged Microsoft CRT dependencies are incomplete')
-          for record in files:
-              name = record['fileName']
-              if not re.fullmatch(r'(?:msvcp140(?:_[a-z0-9_]+)?|vcruntime140(?:_[a-z0-9_]+)?|concrt140|vcomp140)\.dll', name, re.I):
-                  raise ValueError(f'Unexpected Microsoft CRT filename: {name}')
-              if hashlib.sha256((source / name).read_bytes()).hexdigest() != record['sha256']:
-                  raise ValueError(f'Packaged Microsoft CRT checksum mismatch: {name}')
-          destination.mkdir(parents=True, exist_ok=True)
-          for record in files:
-              # Windows searches the executable directory before System32 and PATH.
-              # Cargo places these test executables in release/deps, not release/.
-              shutil.copy2(source / record['fileName'], destination / record['fileName'])
-              print(f"Desktop test app-local CRT: {record['fileName']} {record['sourceFileVersion']}")
-          PYTHON
       - name: Test the built worker, desktop and packaged integrations
         run: |
           bun test tests
@@ -192,12 +163,12 @@ jobs:
                   paths = result.stdout.splitlines()
                   dumpbin = paths[-1] if result.returncode == 0 and paths else None
           if not dumpbin:
-              print('DUMPBIN unavailable; inspect the logged app-local CRT versions and Windows loader exit code.')
+              print('DUMPBIN unavailable; inspect the Windows loader exit code and embedded application manifest.')
           else:
               executables = sorted(Path('desktop/src-tauri/target/release/deps').glob('guerrilla_worker_desktop-*.exe'))
               for executable in executables:
                   print(f'Desktop test loader imports: {executable}', flush=True)
-                  for option in ['/dependents', '/imports:msvcp140.dll', '/imports:vcruntime140.dll', '/imports:vcruntime140_1.dll']:
+                  for option in ['/dependents', '/imports:comctl32.dll', '/headers']:
                       subprocess.run([dumpbin, option, str(executable)], check=False, timeout=30)
           PYTHON
       - name: Verify signed macOS updater installation and rejection recovery
