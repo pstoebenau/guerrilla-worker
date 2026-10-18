@@ -215,8 +215,14 @@ pub fn copy_tree(source: &Path, target: &Path) -> Result<()> {
         if target.exists() {
             fs::remove_file(target)?;
         }
-        reflink_copy::reflink_or_copy(source, target)?;
-        File::open(target)?.sync_all()?;
+        reflink_copy::reflink_or_copy(source, target)
+            .with_context(|| format!("Copying dataset file {}", target.display()))?;
+        // Windows FlushFileBuffers requires a handle opened for writing.
+        File::options()
+            .write(true)
+            .open(target)?
+            .sync_all()
+            .with_context(|| format!("Syncing dataset file {}", target.display()))?;
         Ok(())
     }
     ensure!(!source.is_symlink(), "Cannot copy a symlink");
