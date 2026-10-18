@@ -15,6 +15,20 @@ function Assert-FreshWorkerAccount([bool]$AllowStartup = $false) {
     }
   } finally { if ($null -ne $runKey) { $runKey.Dispose() } }
 }
+function Assert-InstalledCrt([string]$InstallDirectory) {
+  $crtDirectory = Join-Path $InstallDirectory 'resources/runtime/windows-crt'
+  $manifest = Get-Content -LiteralPath (Join-Path $crtDirectory 'manifest.json') -Raw | ConvertFrom-Json
+  if (@($manifest.files).Count -eq 0) { throw 'Installed CRT manifest contains no DLLs.' }
+  foreach ($entry in $manifest.files) {
+    foreach ($directory in @($InstallDirectory, $crtDirectory)) {
+      $file = Join-Path $directory $entry.fileName
+      if (!(Test-Path -LiteralPath $file -PathType Leaf)) { throw "Installed CRT copy is missing: $file" }
+      if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $entry.sha256) {
+        throw "Installed CRT copy differs from its verified manifest: $file"
+      }
+    }
+  }
+}
 Assert-FreshWorkerAccount
 foreach ($key in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Guerrilla Worker', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{B837DEDE-FDC1-453A-90C9-B3B010299A61}_is1')) {
   if (Test-Path -LiteralPath $key) { throw 'Installer smoke requires a fresh dedicated runner without a registered Guerrilla installation.' }
@@ -63,6 +77,7 @@ try {
   if (!(Test-Path -LiteralPath $nsisKey)) { throw 'NSIS uninstaller registration is missing.' }
   $expectedStartup = '"' + (Join-Path $installed 'guerrilla-worker-desktop.exe') + '" --background'
   if ((Get-ItemPropertyValue -LiteralPath $startupKey -Name 'guerrilla-worker-desktop') -ne $expectedStartup) { throw 'Migration lost or misdirected startup registration.' }
+  Assert-InstalledCrt $installed
   # Reinstall must remove obsolete app-owned GPU files, rather than
   # mixing the base runtime with dependencies from older releases.
   $obsolete = Join-Path $installed 'resources/runtime/obsolete-runtime.fixture'
@@ -70,6 +85,7 @@ try {
   $upgrade = Start-Process -FilePath $installer.FullName -ArgumentList @('/S', "/D=$installed") -Wait -PassThru
   if ($upgrade.ExitCode -ne 0 -or (Test-Path -LiteralPath $obsolete)) { throw 'Upgrade failed to replace the app-owned runtime cleanly.' }
   if ((Get-ItemPropertyValue -LiteralPath $startupKey -Name 'guerrilla-worker-desktop') -ne $expectedStartup) { throw 'Upgrade lost startup registration.' }
+  Assert-InstalledCrt $installed
   $requiredFiles = @(
     'guerrilla-worker-desktop.exe', 'guerrilla-worker.exe', 'guerrilla-pipeline.exe',
     'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll', 'LICENSE', 'README.md',

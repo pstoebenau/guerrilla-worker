@@ -2,6 +2,7 @@ import { cp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { vendorRuntime } from './vendor-runtime';
 import { linuxBundleEnvironment } from './linux-bundle';
+import { stageWindowsCrtResources } from './windows-crt';
 
 const root = path.resolve(import.meta.dir, '..');
 const app = path.join(root, 'desktop');
@@ -40,10 +41,8 @@ if (process.platform === 'win32') {
   // Tauri resource mappings keep app-local CRT beside all three executables.
   const resources: Record<string, string> = {
     'resources/runtime/': 'resources/runtime/', '../../LICENSE': 'LICENSE', '../../docs/windows-worker.md': 'README.md',
+    ...await stageWindowsCrtResources(tauri),
   };
-  for (const file of await readdir(path.join(tauri, 'resources/runtime/windows-crt'))) {
-    if (file.toLowerCase().endsWith('.dll')) resources[`resources/runtime/windows-crt/${file}`] = file;
-  }
   await mkdir(path.join(tauri, 'target'), { recursive: true });
   const config = path.join(tauri, 'target/windows-resources.conf.json');
   await writeFile(config, JSON.stringify({ bundle: { resources } }));

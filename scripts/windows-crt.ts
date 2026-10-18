@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { windowsPowerShellEnvironment } from './windows-powershell';
 
@@ -19,6 +19,28 @@ interface CrtManifest {
   redistributableVersion: string;
   files: CrtFile[];
   documentation: string;
+}
+
+/** Give app-root DLLs distinct source paths from the bundled runtime copies. */
+export async function stageWindowsCrtResources(tauri: string): Promise<Record<string, string>> {
+  const source = path.join(tauri, 'resources/runtime/windows-crt');
+  const files = (await readdir(source, { withFileTypes: true }))
+    .filter(file => file.isFile() && file.name.toLowerCase().endsWith('.dll'))
+    .map(file => file.name).sort();
+  for (const required of ['msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll']) {
+    if (!files.some(file => file.toLowerCase() === required)) throw new Error(`Missing app-local runtime ${required}`);
+  }
+  const destination = path.join(tauri, 'target/windows-crt');
+  await rm(destination, { recursive: true, force: true });
+  await mkdir(destination, { recursive: true });
+  const resources: Record<string, string> = {};
+  for (const file of files) {
+    // NSIS deduplicates by source path even when targets differ. Keep these
+    // sources outside resources/runtime/, which is also bundled recursively.
+    await copyFile(path.join(source, file), path.join(destination, file));
+    resources[`target/windows-crt/${file}`] = file;
+  }
+  return resources;
 }
 
 // Windows SDK tools handle Authenticode/catalog signatures and native file

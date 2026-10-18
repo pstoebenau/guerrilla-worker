@@ -1,6 +1,6 @@
 """Check format identity in the actual native packages used by the updater."""
 from pathlib import Path
-import shutil
+import io
 import subprocess
 import sys
 import tarfile
@@ -13,21 +13,31 @@ BUNDLE = ROOT / 'desktop/src-tauri/target/release/bundle'
 
 
 def rpm_executable(package):
-    # cpio may stop at its archive trailer before rpm2cpio has written all
-    # trailing bytes. Finish and verify decompression before selecting a file.
+    verified = subprocess.run(['rpm', '--checksig', '--nosignature', str(package)], capture_output=True)
+    if verified.returncode:
+        diagnostics = verified.stdout + verified.stderr
+        raise AssertionError(f'RPM digest verification failed ({verified.returncode}): {diagnostics.decode(errors="replace")}')
+    # rpm-rs 0.16 omits the archive size tag that rpm2cpio requires. rpm2archive
+    # supports those packages; verify digests and finish conversion first.
     with tempfile.TemporaryFile() as archive:
-        produced = subprocess.run(['rpm2cpio', str(package)], stdout=archive, stderr=subprocess.PIPE)
+        with package.open('rb') as source:
+            produced = subprocess.run(['rpm2archive', '--nocompression', '-'], stdin=source,
+                                      stdout=archive, stderr=subprocess.PIPE)
         if produced.returncode:
-            raise AssertionError(f'rpm2cpio failed ({produced.returncode}): {produced.stderr.decode(errors="replace")}')
+            raise AssertionError(f'rpm2archive failed ({produced.returncode}): {produced.stderr.decode(errors="replace")}')
         archive.seek(0)
-        extracted = subprocess.run(['cpio', '--extract', '--quiet', '--to-stdout',
-                                    'usr/bin/guerrilla-worker-desktop', './usr/bin/guerrilla-worker-desktop'],
-                                   stdin=archive, capture_output=True)
-        if extracted.returncode:
-            raise AssertionError(f'cpio failed ({extracted.returncode}): {extracted.stderr.decode(errors="replace")}')
-        if not extracted.stdout:
-            raise AssertionError('cpio archive does not contain the desktop executable')
-        return extracted.stdout
+        try:
+            with tarfile.open(fileobj=archive, mode='r:') as contents:
+                matches = [member for member in contents if member.name in (
+                    'usr/bin/guerrilla-worker-desktop', './usr/bin/guerrilla-worker-desktop')]
+                if len(matches) != 1 or not matches[0].isfile():
+                    raise AssertionError('RPM archive must contain one desktop executable')
+                executable = contents.extractfile(matches[0]).read()
+        except tarfile.TarError as error:
+            raise AssertionError(f'Invalid RPM tar archive: {error}') from error
+        if not executable:
+            raise AssertionError('RPM archive contains an empty desktop executable')
+        return executable
 
 
 @unittest.skipUnless(sys.platform == 'linux', 'native Linux package integration')
@@ -63,35 +73,53 @@ class LinuxBundleTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1, 'DEB/RPM must differ only at the live Tauri bundle marker')
 
 
-@unittest.skipUnless(sys.platform == 'linux' and shutil.which('cpio'), 'GNU cpio extraction regression')
 class RpmExtractionTests(unittest.TestCase):
-    def extract_fixture(self, producer):
-        run = subprocess.run
+    def extract_fixture(self, archive=b'', verification=None, conversion=None):
+        if verification is None:
+            verification = subprocess.CompletedProcess([], 0, b'digests OK', b'')
+        if conversion is None:
+            conversion = subprocess.CompletedProcess([], 0, None, b'')
         def commands(command, **options):
-            if command[0] == 'rpm2cpio':
-                command = [sys.executable, '-c', producer]
-            return run(command, **options)
-        with patch.object(subprocess, 'run', side_effect=commands):
-            return rpm_executable(Path('fixture.rpm'))
+            if command[0] == 'rpm':
+                self.assertEqual(command[1:3], ['--checksig', '--nosignature'])
+                return verification
+            self.assertEqual(command, ['rpm2archive', '--nocompression', '-'])
+            self.assertEqual(options['stdin'].read(), b'RPM fixture')
+            options['stdout'].write(archive)
+            return conversion
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / 'fixture.rpm'
+            package.write_bytes(b'RPM fixture')
+            with patch.object(subprocess, 'run', side_effect=commands) as run:
+                try:
+                    return rpm_executable(package)
+                finally:
+                    self.assertEqual(run.call_count, 1 if verification.returncode else 2)
 
     def test_selected_file_survives_large_trailing_archive_padding(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            relative = 'usr/bin/guerrilla-worker-desktop'
-            file = root / relative
-            file.parent.mkdir(parents=True)
-            file.write_bytes(b'executable fixture')
-            archive = subprocess.run(['cpio', '--create', '--format=newc', '--quiet'],
-                                     cwd=root, input=('./' + relative + '\n').encode(), capture_output=True, check=True).stdout
-            padded = root / 'padded.cpio'
-            padded.write_bytes(archive + b'\0' * (4 * 1024 * 1024))
-            producer = f'import shutil, sys; shutil.copyfileobj(open({str(padded)!r}, "rb"), sys.stdout.buffer)'
-            self.assertEqual(self.extract_fixture(producer), b'executable fixture')
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode='w') as contents:
+            member = tarfile.TarInfo('./usr/bin/guerrilla-worker-desktop')
+            member.size = len(b'executable fixture')
+            contents.addfile(member, io.BytesIO(b'executable fixture'))
+        self.assertEqual(self.extract_fixture(archive.getvalue() + b'\0' * (4 * 1024 * 1024)),
+                         b'executable fixture')
 
-    def test_failed_decompression_preserves_producer_diagnostics(self):
-        with self.assertRaisesRegex(AssertionError, r'rpm2cpio failed \(7\): corrupt compressed payload'):
-            self.extract_fixture('import sys; sys.stdout.buffer.write(b"partial archive"); sys.stderr.write("corrupt compressed payload"); sys.exit(7)')
+    def test_corrupt_package_fails_digest_verification_before_conversion(self):
+        with self.assertRaisesRegex(AssertionError, r'RPM digest verification failed \(1\): fixture.rpm: DIGESTS NOT OK'):
+            self.extract_fixture(verification=subprocess.CompletedProcess([], 1, b'fixture.rpm: DIGESTS NOT OK', b''))
 
-    def test_failed_extraction_preserves_consumer_diagnostics(self):
-        with self.assertRaisesRegex(AssertionError, r'cpio failed \([1-9][0-9]*\): .+'):
-            self.extract_fixture('import sys; sys.stdout.buffer.write(b"not a cpio archive")')
+    def test_failed_conversion_preserves_diagnostics(self):
+        with self.assertRaisesRegex(AssertionError, r'rpm2archive failed \(7\): corrupt compressed payload'):
+            self.extract_fixture(b'partial archive', conversion=subprocess.CompletedProcess([], 7, None, b'corrupt compressed payload'))
+
+    def test_invalid_converted_archive_is_rejected(self):
+        with self.assertRaisesRegex(AssertionError, 'Invalid RPM tar archive:'):
+            self.extract_fixture(b'not a tar archive')
+
+    def test_missing_executable_is_rejected(self):
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode='w'):
+            pass
+        with self.assertRaisesRegex(AssertionError, 'RPM archive must contain one desktop executable'):
+            self.extract_fixture(archive.getvalue())
