@@ -8,11 +8,9 @@ import { vendorWindowsCrt } from './windows-crt';
 type Asset = { url: string; sha256: string };
 type RuntimeLock = {
   version: number;
-  pythonVersion: string;
   nodeVersion: string;
   ffmpegRelease: string;
-  models: { roma: Asset; dinov3: Asset; dinov3Commit: string };
-  targets: Record<string, Record<'python' | 'node' | 'ffmpegArchive' | 'ffmpegConfig' | 'ffmpegLicense' | 'ffmpegReadme', Asset>>;
+  targets: Record<string, Record<'node' | 'ffmpegArchive' | 'ffmpegConfig' | 'ffmpegLicense' | 'ffmpegReadme', Asset>>;
 };
 const root = path.resolve(import.meta.dir, '..');
 
@@ -91,7 +89,7 @@ export async function vendorRuntime(destination: string): Promise<void> {
   const windows = process.platform === 'win32';
   const suffix = windows ? '.exe' : '';
   try {
-    for (const name of ['python', 'node'] as const) {
+    for (const name of ['node'] as const) {
       const archive = await verifiedDownload(assets[name], cache);
       const install = path.join(staging, name);
       await mkdir(install);
@@ -111,11 +109,8 @@ export async function vendorRuntime(destination: string): Promise<void> {
     for (const [name, installed] of [['ffmpegLicense', 'LICENSE'], ['ffmpegReadme', 'README']] as const) {
       await cp(await verifiedDownload(assets[name], cache), path.join(staging, 'ffmpeg', installed));
     }
-    const python = path.join(staging, 'python', windows ? 'python.exe' : 'bin/python3');
     const node = path.join(staging, 'node', windows ? 'node.exe' : 'bin/node');
     const npm = path.join(staging, 'node', windows ? 'node_modules/npm/bin/npm-cli.js' : 'lib/node_modules/npm/bin/npm-cli.js');
-    const requirements = 'python-base.txt';
-    await run([python, '-I', '-m', 'pip', '--isolated', '--cache-dir', path.join(cache, 'pip'), 'install', '--disable-pip-version-check', '--require-hashes', '--only-binary=:all:', '--no-compile', '-r', path.join(root, 'packaging', requirements)], root);
     const converter = path.join(staging, 'converter');
     await mkdir(converter);
     for (const file of ['package.json', 'package-lock.json']) await cp(path.join(root, 'pipeline/docker/converter', file), path.join(converter, file));
@@ -125,29 +120,14 @@ export async function vendorRuntime(destination: string): Promise<void> {
     await run([node, npm, 'ci', '--prefix', converter, '--global=false', '--userconfig', npmConfig, '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], converter, runtimeEnv);
     await rm(npmConfig);
     await run([node, path.join(converter, 'node_modules/@playcanvas/splat-transform/bin/cli.mjs'), '--version'], root, runtimeEnv);
-    await run([python, '-I', '-c', 'import cv2, numpy, jsonschema, filelock, psutil; print("Python integration dependencies ready")'], root);
-    const setup = path.join(staging, 'setup');
-    await mkdir(setup);
-    const gpuRequirements = windows ? 'python-windows-cuda.txt' : 'python-linux-cuda.txt';
-    const recipe = {
-      supported: process.platform !== 'darwin', target, pythonVersion: lock.pythonVersion,
-      python: assets.python, models: lock.models, requirements: gpuRequirements,
-      requirementsSha256: await sha256(path.join(root, 'packaging', gpuRequirements)),
-      installerSha256: await sha256(path.join(root, 'scripts/runtime_setup.py')),
-    };
-    const identity = `cuda-${createHash('sha256').update(JSON.stringify(recipe)).digest('hex')}`;
-    await cp(path.join(root, 'packaging', gpuRequirements), path.join(setup, gpuRequirements));
-    await cp(path.join(root, 'scripts/runtime_setup.py'), path.join(setup, 'runtime_setup.py'));
-    await writeFile(path.join(setup, 'manifest.json'), JSON.stringify({ version: 1, identity, ...recipe }, null, 2) + '\n');
     await run([path.join(staging, 'ffmpeg', 'ffmpeg' + suffix), '-version'], root);
     await mkdir(path.join(staging, 'notices'));
     await cp(path.join(root, 'legal'), path.join(staging, 'notices/legal'), { recursive: true });
     await cp(path.join(root, 'LICENSE'), path.join(staging, 'notices/Worker-LICENSE'));
     await cp(path.join(root, 'THIRD_PARTY_NOTICES'), path.join(staging, 'notices/THIRD_PARTY_NOTICES'));
-    await cp(path.join(root, 'packaging', requirements), path.join(staging, 'notices/python-requirements.txt'));
-    const files = { python: await sha256(python), node: await sha256(node), ffmpeg: await sha256(path.join(staging, 'ffmpeg', 'ffmpeg' + suffix)), ffprobe: await sha256(path.join(staging, 'ffmpeg', 'ffprobe' + suffix)) };
+    const files = { node: await sha256(node), ffmpeg: await sha256(path.join(staging, 'ffmpeg', 'ffmpeg' + suffix)), ffprobe: await sha256(path.join(staging, 'ffmpeg', 'ffprobe' + suffix)) };
     const windowsCrtManifestSha256 = windows ? await sha256(path.join(staging, 'windows-crt/manifest.json')) : undefined;
-    await writeFile(path.join(staging, 'manifest.json'), JSON.stringify({ version: 2, profile: 'base', gpuRuntimeIdentity: identity, target, pythonVersion: lock.pythonVersion, nodeVersion: lock.nodeVersion, ffmpegRelease: lock.ffmpegRelease, requirementsSha256: await sha256(path.join(root, 'packaging', requirements)), windowsCrtManifestSha256, files }, null, 2) + '\n');
+    await writeFile(path.join(staging, 'manifest.json'), JSON.stringify({ version: 3, profile: 'native', target, nodeVersion: lock.nodeVersion, ffmpegRelease: lock.ffmpegRelease, windowsCrtManifestSha256, files }, null, 2) + '\n');
     const backup = `${destination}.previous-${crypto.randomUUID()}`;
     const exists = await Bun.file(path.join(destination, 'manifest.json')).exists();
     if (exists) await rename(destination, backup);

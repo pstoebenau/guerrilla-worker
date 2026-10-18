@@ -4,7 +4,7 @@ use crate::{
         Artifact,
     },
     emit,
-    engine::{training_config, Engine},
+    engine::Engine,
     process::{ManagedChild, Runtime},
 };
 use anyhow::{ensure, Context, Result};
@@ -32,6 +32,8 @@ pub struct Request {
     pub settings: Value,
     #[serde(default)]
     pub resume: bool,
+    #[serde(default)]
+    pub standalone: bool,
     #[serde(default)]
     pub selective_resume: bool,
     #[serde(default)]
@@ -147,7 +149,7 @@ impl Runner {
         );
         fs::create_dir_all(&request.output_path)?;
         let output = request.output_path.canonicalize()?;
-        let source = if request.input_path.is_file() {
+        let source = if request.input_path.is_file() || request.input_path.is_dir() {
             request.input_path.canonicalize()?
         } else {
             ensure!(
@@ -161,7 +163,10 @@ impl Runner {
             request.input_path.clone()
         };
         ensure!(
-            source != output && !source.starts_with(&output),
+            source != output
+                && !output.starts_with(&source)
+                && (!source.starts_with(&output)
+                    || request.standalone && source.starts_with(output.join(".worker/input"))),
             "Output must not contain the stored input"
         );
         if let Some(recorded) = &request.runtime_versions {
@@ -172,7 +177,7 @@ impl Runner {
         }
         let identity = Identity {
             backend: request.backend,
-            settings: request.settings.clone(),
+            settings: options.clone(),
             max_cap: request.max_cap,
             input_sha256: if request.selective_resume {
                 request
@@ -180,7 +185,7 @@ impl Runner {
                     .clone()
                     .context("Selective resume requires inputSha256")?
             } else {
-                hash(&source)?
+                artifacts::input_hash(&source)?
             },
             runtime_versions: versions.clone(),
         };
@@ -189,13 +194,12 @@ impl Runner {
             ensure!(request.resume, "An existing job requires resume");
             let mut state: State = serde_json::from_slice(&fs::read(&state_path)?)?;
             ensure!(state.version == 1, "Unsupported attempt manifest version");
-            let portable = request.selective_resume && state.checkpoints.is_empty();
             ensure!(
                 state.identity.backend == identity.backend
                     && state.identity.settings == identity.settings
                     && state.identity.max_cap == identity.max_cap
                     && state.identity.input_sha256 == identity.input_sha256
-                    && (portable || state.identity.runtime_versions == identity.runtime_versions),
+                    && state.identity.runtime_versions == identity.runtime_versions,
                 "Resume input, settings, cap or engine versions changed"
             );
             state.identity = identity;
@@ -349,7 +353,7 @@ impl Runner {
         }
         Ok(())
     }
-    fn stage<F>(&mut self, name: &str, resumable: bool, function: F) -> Result<PathBuf>
+    fn stage<F>(&mut self, name: &str, function: F) -> Result<PathBuf>
     where
         F: FnOnce(&mut Self, &Path) -> Result<()>,
     {
@@ -360,7 +364,7 @@ impl Runner {
             );
             return self.path(&stage.directory);
         }
-        let resumable = resumable && name == "training" && !self.state.checkpoints.is_empty();
+        let resumable = name == "training" && !self.state.checkpoints.is_empty();
         let previous = self.state.stages.get(name).cloned();
         if !resumable {
             if let Some(previous) = &previous {
@@ -396,10 +400,30 @@ impl Runner {
             json!({"stage":name,"status":"running","elapsedSeconds":0,"substep":description(name)}),
         );
         function(self, &folder)?;
+        let stage_log = self.output.join(format!(
+            "{}.log",
+            folder.file_name().unwrap().to_string_lossy()
+        ));
+        let log = if stage_log.is_file() {
+            concise_log(&stage_log)?
+        } else {
+            format!("{name} completed\n")
+        };
+        fs::write(folder.join("stage.log"), log)?;
+        for entry in fs::read_dir(&folder)? {
+            let path = entry?.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("log") {
+                fs::write(&path, concise_log(&path)?)?;
+            }
+        }
         let mut plan = None;
         if name == "training" {
             preserve_final(&folder, self.request.backend)?;
             self.poll_training(None)?;
+            ensure!(
+                !self.state.checkpoints.is_empty(),
+                "Training produced no full resume checkpoint"
+            );
             let retention = retention_plan(&self.output, &self.state)?;
             self.state.retention = Retention {
                 version: 1,
@@ -407,19 +431,10 @@ impl Runner {
             };
             plan = Some(retention);
         }
-        let mut files = manifest(&self.output, &folder)?
+        let files = manifest(&self.output, &folder)?
             .into_iter()
             .filter(|item| !excluded(&item.path, &self.state.retention.exclude_paths))
             .collect::<Vec<_>>();
-        if name == "densification" {
-            files.extend(manifest(
-                &self.output,
-                &folder.with_file_name(format!(
-                    "{}-dataset",
-                    folder.file_name().unwrap().to_string_lossy()
-                )),
-            )?);
-        }
         ensure!(!files.is_empty(), "{name} produced no artifacts");
         self.state.completed.insert(
             name.into(),
@@ -437,52 +452,6 @@ impl Runner {
         self.checkpoint(name, plan)?;
         self.prune_acknowledged(None)?;
         Ok(folder)
-    }
-    fn native(&mut self, mut request: Value, folder: &Path, python: Option<String>) -> Result<()> {
-        let control = self
-            .output
-            .join(".worker/native")
-            .join(format!("{}.json", uuid::Uuid::new_v4()));
-        if request["action"] == "densification" {
-            request["engineBin"] = json!(self.request.backend.api_bin()?);
-        }
-        if python.is_some() {
-            let report=crate::process::run_capture(&[crate::python(),"-c".into(),"import sys,sysconfig,json;print(json.dumps({'path':sysconfig.get_path('purelib'),'version':list(sys.version_info[:2])}))".into()],Duration::from_secs(30))?;
-            let runtime: Value = serde_json::from_str(report.trim())?;
-            request["pythonSitePackages"] = runtime["path"].clone();
-            request["pythonVersion"] = runtime["version"].clone();
-        }
-        save(&control, &request)?;
-        let args = vec![
-            python.unwrap_or_else(crate::python),
-            "-u".into(),
-            crate::pipeline_root()
-                .join("native_bindings.py")
-                .to_string_lossy()
-                .to_string(),
-            "--request".into(),
-            control.to_string_lossy().to_string(),
-        ];
-        let log = self.output.join(format!(
-            "{}.log",
-            folder.file_name().unwrap().to_string_lossy()
-        ));
-        let result = self.command(&args, &log, None);
-        let _ = fs::remove_file(control);
-        result?;
-        let text = fs::read_to_string(log)?;
-        let report: Value = serde_json::from_str(
-            text.lines()
-                .rev()
-                .find(|line| line.starts_with("{\"version\":"))
-                .context("Python binding omitted its typed result")?,
-        )?;
-        ensure!(
-            report["version"] == 1 && report["ok"] == true,
-            "Python binding rejected its operation: {}",
-            report["error"]
-        );
-        Ok(())
     }
     fn command(&mut self, args: &[String], log: &Path, timeout: Option<Duration>) -> Result<()> {
         self.runtime.check()?;
@@ -655,11 +624,12 @@ impl Runner {
                 continue;
             }
             let digest = hash(&native.source)?;
+            let config_digest = native.config.as_ref().map(|path| hash(path)).transpose()?;
             if self
                 .state
                 .checkpoints
                 .iter()
-                .any(|old| old.sha256 == digest)
+                .any(|old| old.sha256 == digest && old.config_sha256 == config_digest)
             {
                 continue;
             }
@@ -774,22 +744,7 @@ impl Runner {
         let deadline = Instant::now() + Duration::from_secs(300);
         let log = preview.with_extension("log");
         let result = (|| {
-            let source = if self.request.backend == Engine::Lichtfeld {
-                let ply = temporary.join("checkpoint.ply");
-                self.auxiliary(
-                    &[
-                        self.request.backend.path().to_string_lossy().to_string(),
-                        "convert".into(),
-                        checkpoint.preview.to_string_lossy().to_string(),
-                        ply.to_string_lossy().to_string(),
-                    ],
-                    &log,
-                    deadline,
-                )?;
-                ply
-            } else {
-                checkpoint.preview
-            };
+            let source = checkpoint.preview;
             let expected = gaussian_count(&source, self.request.max_cap)?;
             let candidate = temporary.join("scene.sog");
             let mut args = crate::converter()?;
@@ -892,35 +847,44 @@ impl Runner {
             self.restore(&[folder.join("final")])?;
             Some(self.request.backend.training_output(&folder)?.0)
         } else {
-            Some(match self.request.backend {
-                Engine::Spirula => self.spirula()?,
-                Engine::Lichtfeld => self.lichtfeld()?,
-            })
+            Some(self.spirula()?)
         };
         let expected = if let Some(finished) = finished {
             let sog = self.path(&finished.directory)?.join("result.sog");
-            self.restore(std::slice::from_ref(&sog))?;
-            gaussian_count(&sog, self.request.max_cap)?
+            let spz = self.path(&finished.directory)?.join("result.spz");
+            self.restore(&[sog.clone(), spz.clone()])?;
+            let count = gaussian_count(&sog, self.request.max_cap)?;
+            ensure!(
+                gaussian_count(&spz, self.request.max_cap)? == count,
+                "Export Gaussian counts disagree"
+            );
+            count
         } else {
             gaussian_count(ply.as_ref().unwrap(), self.request.max_cap)?
         };
-        let exported = self.stage("export", false, |runner, folder| {
+        let exported = self.stage("export", |runner, folder| {
             fs::create_dir_all(folder)?;
             let ply = ply.as_ref().context("Final PLY unavailable")?;
-            let mut command = crate::converter()?;
-            command.extend(["--gpu-backend".into(), crate::converter_backend()]);
-            if let Ok(gpu) = std::env::var("SPLAT_TRANSFORM_GPU") {
-                command.extend(["--gpu".into(), gpu]);
+            for extension in ["sog", "spz"] {
+                let mut command = crate::converter()?;
+                command.extend(["--gpu-backend".into(), crate::converter_backend()]);
+                if let Ok(gpu) = std::env::var("SPLAT_TRANSFORM_GPU") {
+                    command.extend(["--gpu".into(), gpu]);
+                }
+                if extension == "spz" {
+                    command.extend(["--spz-version".into(), "3".into()]);
+                }
+                let destination = folder.join(format!("result.{extension}"));
+                command.extend([
+                    ply.to_string_lossy().to_string(),
+                    destination.to_string_lossy().to_string(),
+                ]);
+                runner.command(&command, &folder.join(format!("{extension}.log")), None)?;
+                ensure!(
+                    gaussian_count(&destination, runner.request.max_cap)? == expected,
+                    "Export Gaussian counts disagree"
+                );
             }
-            command.extend([
-                ply.to_string_lossy().to_string(),
-                folder.join("result.sog").to_string_lossy().to_string(),
-            ]);
-            runner.command(&command, &folder.join("sog.log"), None)?;
-            ensure!(
-                gaussian_count(&folder.join("result.sog"), runner.request.max_cap)? == expected,
-                "Export Gaussian counts disagree"
-            );
             let sidecar = ply.with_extension("ppisp");
             if sidecar.is_file() {
                 copy_tree(&sidecar, &folder.join("result.ppisp"))?;
@@ -929,8 +893,7 @@ impl Runner {
         })?;
         let count = gaussian_count(&exported.join("result.sog"), self.request.max_cap)?;
         ensure!(count == expected, "Export Gaussian counts disagree");
-        self.state.result =
-            json!({"sog":relative(&self.output,&exported.join("result.sog"))?,"gaussians":count});
+        self.state.result = json!({"sog":relative(&self.output,&exported.join("result.sog"))?,"spz":relative(&self.output,&exported.join("result.spz"))?,"gaussians":count});
         self.state.status = "completed".into();
         self.save()?;
         let files = manifest(&self.output, &self.output)?
@@ -953,7 +916,18 @@ impl Runner {
                 extraction[key] = value.clone();
             }
         }
-        let selected = self.stage("selection", false, |runner, folder| {
+        let selected = self.stage("selection", |runner, folder| {
+            if runner.source.is_dir() {
+                let images = artifacts::input_images(&runner.source)?;
+                ensure!(
+                    images.len() >= 3,
+                    "At least three input images are required"
+                );
+                for image in images {
+                    copy_tree(&image, &folder.join(image.strip_prefix(&runner.source)?))?;
+                }
+                return Ok(());
+            }
             let mut args = vec![
                 executable.clone(),
                 "sam".into(),
@@ -991,7 +965,7 @@ impl Runner {
             );
             Ok(())
         })?;
-        let dataset = self.stage("reconstruction", true, |runner, folder| {
+        let dataset = self.stage("reconstruction", |runner, folder| {
             runner.restore(std::slice::from_ref(&selected))?;
             runner.command(
                 &[
@@ -1001,8 +975,6 @@ impl Runner {
                     selected.to_string_lossy().to_string(),
                     "-o".into(),
                     folder.to_string_lossy().to_string(),
-                    "--progress-dir".into(),
-                    folder.join("progress").to_string_lossy().to_string(),
                     "--no-masks".into(),
                 ],
                 &runner.output.join(format!(
@@ -1022,10 +994,54 @@ impl Runner {
                 "Spirula did not produce COLMAP reconstruction"
             );
             copy_tree(&selected, &folder.join("images"))?;
+            retain_dataset(folder, false)?;
             Ok(())
         })?;
-        let training = self.stage("training", true, |runner, folder| {
-            runner.restore(&[dataset.join("images"), dataset.join("sparse")])?;
+        let dataset = if self.options["densification"]["enabled"] == true {
+            self.stage("densification", |runner, folder| {
+                runner.restore(&[dataset.join("images"), dataset.join("sparse")])?;
+                copy_tree(&dataset.join("images"), &folder.join("images"))?;
+                copy_tree(&dataset.join("sparse"), &folder.join("sparse"))?;
+                let model = std::env::var_os("SPIRULA_ROMA_MODEL")
+                    .map(PathBuf::from)
+                    .context("Managed RoMa model is unavailable; run worker setup")?;
+                ensure!(model.is_file(), "Managed RoMa model is missing");
+                runner.command(
+                    &[
+                        executable.clone(),
+                        "dense".into(),
+                        folder.to_string_lossy().to_string(),
+                        "--preset".into(),
+                        "balanced".into(),
+                        "--checkpoint".into(),
+                        model.to_string_lossy().to_string(),
+                        "--precision".into(),
+                        "auto".into(),
+                        "--matching-space".into(),
+                        "rectified".into(),
+                        "--resume".into(),
+                        "false".into(),
+                        "--keep-cache".into(),
+                        "false".into(),
+                    ],
+                    &runner.output.join(format!(
+                        "{}.log",
+                        folder.file_name().unwrap().to_string_lossy()
+                    )),
+                    None,
+                )?;
+                dense_seed(folder)?;
+                retain_dataset(folder, true)
+            })?
+        } else {
+            dataset
+        };
+        let training = self.stage("training", |runner, folder| {
+            let mut inputs = vec![dataset.join("images"), dataset.join("sparse")];
+            if runner.options["densification"]["enabled"] == true {
+                inputs.push(dataset.join("dense"));
+            }
+            runner.restore(&inputs)?;
             fs::create_dir_all(folder)?;
             let checkpoint = runner
                 .state
@@ -1054,6 +1070,12 @@ impl Runner {
                     .as_u64()
                     .unwrap_or(30000)
                     .to_string(),
+                "--seed-pointcloud".into(),
+                if runner.options["densification"]["enabled"] == true {
+                    dense_seed(&dataset)?.to_string_lossy().to_string()
+                } else {
+                    "sparse".into()
+                },
                 "--save-full-checkpoint".into(),
                 "1".into(),
                 "--save-only-latest-checkpoint".into(),
@@ -1078,97 +1100,6 @@ impl Runner {
         })?;
         Ok(self.request.backend.training_output(&training)?.0)
     }
-    fn lichtfeld(&mut self) -> Result<PathBuf> {
-        let selected=self.stage("selection",false,|runner,folder|runner.native(json!({"action":"selection","source":runner.source,"output":folder,"options":runner.options["selection"]}),folder,None))?;
-        let reconstruction=self.stage("reconstruction",true,|runner,folder|{runner.restore(std::slice::from_ref(&selected))?;runner.native(json!({"action":"reconstruction","images":selected,"output":folder,"options":runner.options["reconstruction"]}),folder,None)})?;
-        let dense=self.stage("densification",true,|runner,folder|{
-            let result_file=reconstruction.join("colmap-result.json");runner.restore(std::slice::from_ref(&result_file))?;
-            let report:Value=serde_json::from_slice(&fs::read(result_file)?)?;let dataset=safe(&reconstruction,report["dataset_relative"].as_str().unwrap_or("dataset"))?;
-            runner.restore(&[dataset.join("images"),dataset.join("sparse")])?;
-            let staged=folder.with_file_name(format!("{}-dataset",folder.file_name().unwrap().to_string_lossy()));if !staged.exists(){copy_tree(&dataset,&staged)?;}
-            relocate_config(folder,&staged)?;
-            let python=if cfg!(windows){Some(runner.request.backend.path().parent().unwrap().join("python.exe").to_string_lossy().to_string())}else{None};
-            let mut options=runner.options["densification"].clone();options["sampson_thresh"]=json!(5.0);options["min_parallax_deg"]=json!(0.5);options["min_track_length"]=json!(1);
-            runner.native(json!({"action":"densification","dataset":staged,"output":folder,"maxCap":runner.request.max_cap,"options":options,"plugin":crate::densification_plugin()}),folder,python)
-        })?;
-        let dataset = dense.with_file_name(format!(
-            "{}-dataset",
-            dense.file_name().unwrap().to_string_lossy()
-        ));
-        let config = training_config(&self.options, self.request.max_cap);
-        let training = self.stage("training", true, |runner, folder| {
-            runner.restore(&[dataset.join("images"), dataset.join("sparse")])?;
-            let checkpoint = runner
-                .state
-                .checkpoints
-                .last()
-                .map(|item| runner.path(&item.path))
-                .transpose()?;
-            let executable = runner.request.backend.path().to_string_lossy().to_string();
-            let mut command = vec![
-                executable,
-                "--headless".into(),
-                "--train".into(),
-                "-d".into(),
-                dataset.to_string_lossy().to_string(),
-                "-o".into(),
-                folder.to_string_lossy().to_string(),
-                "--max-cap".into(),
-                runner.request.max_cap.to_string(),
-            ];
-            if let Some(checkpoint) = checkpoint {
-                runner.restore(std::slice::from_ref(&checkpoint))?;
-                command.extend(["--resume".into(), checkpoint.to_string_lossy().to_string()]);
-            } else {
-                if folder.exists() {
-                    fs::rename(
-                        folder,
-                        folder.with_file_name(format!(
-                            "{}-failed-{}",
-                            folder.file_name().unwrap().to_string_lossy(),
-                            uuid::Uuid::new_v4().simple()
-                        )),
-                    )?;
-                }
-                fs::create_dir_all(folder)?;
-                save(&folder.join("config.json"), &config)?;
-                command.extend([
-                    "--config".into(),
-                    folder.join("config.json").to_string_lossy().to_string(),
-                    "-r".into(),
-                    "1".into(),
-                    "--max-width".into(),
-                    "0".into(),
-                ]);
-                for (key, flag) in [
-                    ("gut", "--gut"),
-                    ("use_bilateral_grid", "--bilateral-grid"),
-                    ("mip_filter", "--enable-mip"),
-                    ("use_ppisp", "--ppisp"),
-                    ("enable_sparsity", "--enable-sparsity"),
-                    ("undistort", "--undistort"),
-                ] {
-                    if config[key] == true {
-                        command.push(flag.into());
-                    }
-                }
-            }
-            runner.command(&command, &folder.join("training.log"), None)?;
-            let final_ply = runner.request.backend.training_output(folder)?.0;
-            let expected = config["iterations"].as_u64().unwrap()
-                + if config["enable_sparsity"] == true {
-                    config["sparsify_steps"].as_u64().unwrap()
-                } else {
-                    0
-                };
-            ensure!(
-                final_ply.file_name().unwrap().to_string_lossy() == format!("splat_{expected}.ply"),
-                "LichtFeld did not finish configured training duration"
-            );
-            Ok(())
-        })?;
-        Ok(self.request.backend.training_output(&training)?.0)
-    }
 }
 
 fn description(stage: &str) -> &str {
@@ -1184,6 +1115,11 @@ fn tail(path: &Path, limit: u64) -> Result<String> {
     let mut bytes = vec![];
     file.read_to_end(&mut bytes)?;
     Ok(String::from_utf8_lossy(&bytes).to_string())
+}
+fn concise_log(path: &Path) -> Result<String> {
+    let text = tail(path, 8192)?;
+    let lines = text.lines().rev().take(80).collect::<Vec<_>>();
+    Ok(lines.into_iter().rev().collect::<Vec<_>>().join("\n") + "\n")
 }
 fn verify_checkpoint(root: &Path, engine: Engine, item: &ArchivedCheckpoint) -> Result<()> {
     let checkpoint = engine.checkpoint(safe(root, &item.path)?);
@@ -1201,7 +1137,11 @@ fn verify_checkpoint(root: &Path, engine: Engine, item: &ArchivedCheckpoint) -> 
     Ok(())
 }
 fn preserve_final(folder: &Path, engine: Engine) -> Result<()> {
-    let (ply, config) = engine.training_output(folder)?;
+    let (ply, config) = if folder.join("run").is_dir() {
+        engine.run_output(folder)?
+    } else {
+        engine.training_output(folder)?
+    };
     let final_dir = folder.join("final");
     if ply.starts_with(&final_dir) {
         return Ok(());
@@ -1214,42 +1154,59 @@ fn preserve_final(folder: &Path, engine: Engine) -> Result<()> {
     }
     Ok(())
 }
-fn relocate_config(folder: &Path, dataset: &Path) -> Result<()> {
-    let path = folder.join("config.json");
-    if !path.is_file() {
-        return Ok(());
+fn retain_dataset(folder: &Path, dense: bool) -> Result<()> {
+    for entry in fs::read_dir(folder)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == "images" || name == "sparse" || dense && name == "dense" {
+            continue;
+        }
+        remove_product(&entry.path())?;
     }
-    let mut config: Value = serde_json::from_slice(&fs::read(&path)?)?;
-    for (key, target, suffix) in [
-        (
-            "scene_root",
-            folder.to_path_buf(),
-            folder.file_name().unwrap().to_string_lossy().to_string(),
-        ),
-        (
-            "images_subdir",
-            dataset.join("images"),
-            format!("{}/images", dataset.file_name().unwrap().to_string_lossy()),
-        ),
-    ] {
-        let previous = config[key].as_str().context("Densification path missing")?;
-        ensure!(
-            previous
-                .replace('\\', "/")
-                .trim_end_matches('/')
-                .ends_with(&format!("/{suffix}")),
-            "Densification resume has unexpected {key}"
-        );
-        config[key] = json!(target);
+    if dense {
+        let root = folder.join("dense");
+        for entry in fs::read_dir(&root)? {
+            let entry = entry?;
+            if ["current.json", "generations", "roma.ply", "manifest.json"]
+                .iter()
+                .any(|name| entry.file_name() == *name)
+            {
+                continue;
+            }
+            remove_product(&entry.path())?;
+        }
     }
-    copy_tree(
-        &path,
-        &folder.join(format!(
-            "config-before-relocation-{}.json",
-            uuid::Uuid::new_v4()
-        )),
-    )?;
-    save(&path, &config)
+    Ok(())
+}
+fn remove_product(path: &Path) -> Result<()> {
+    ensure!(!path.is_symlink(), "Dataset products may not be symlinks");
+    if path.is_dir() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+fn dense_seed(dataset: &Path) -> Result<PathBuf> {
+    let root = dataset.join("dense");
+    let current: Value = serde_json::from_slice(&fs::read(root.join("current.json"))?)?;
+    let generation = current["generation"]
+        .as_str()
+        .context("Dense generation missing")?;
+    ensure!(
+        !generation.is_empty()
+            && generation
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')),
+        "Invalid dense generation"
+    );
+    let folder = root.join("generations").join(generation);
+    let cloud = folder.join("roma.ply");
+    ensure!(
+        cloud.is_file() && folder.join("manifest.json").is_file(),
+        "Dense generation products are missing"
+    );
+    Ok(cloud)
 }
 
 pub fn retention_plan(root: &Path, state: &State) -> Result<RetentionPlan> {
@@ -1324,6 +1281,24 @@ pub fn retention_plan(root: &Path, state: &State) -> Result<RetentionPlan> {
             {
                 plan.exclude_paths.push(relative(root, &previous)?);
             }
+        }
+    }
+    if folder.join("final").is_dir() && plan.latest_checkpoint.is_some() {
+        for entry in fs::read_dir(&folder)? {
+            let entry = entry?;
+            if [
+                "final",
+                "retained-checkpoints",
+                "previews",
+                "stage.log",
+                ".worker",
+            ]
+            .iter()
+            .any(|name| entry.file_name() == *name)
+            {
+                continue;
+            }
+            plan.exclude_paths.push(relative(root, &entry.path())?);
         }
     }
     let previews = folder.join("previews");

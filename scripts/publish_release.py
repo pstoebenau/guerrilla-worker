@@ -115,7 +115,7 @@ def publish(destination, assets, version, commit, repository, image=None):
         return
     notes = destination.parent / 'release-notes.md'
     docker_note = (f'- Linux NVIDIA Docker: `docker pull ghcr.io/{repository.lower()}:{tag}`. '
-                   'The matching image includes LichtFeld, Spirula, plugins, models and supporting runtimes. '
+                   'The matching image includes Spirula Vulkan, its dense reconstruction model and converter runtime. '
                    f'Immutable image: `{image}`.\n' if image else '')
     notes.write_text(
         f'Guerrilla Worker {version}, built from `{commit}`.\n\n'
@@ -128,10 +128,9 @@ def publish(destination, assets, version, commit, repository, image=None):
         'Copy the app from its DMG to Applications before opening it; app archives are also included. '
         'Builds use ad-hoc signing; after the first launch attempt, '
         'macOS may require System Settings > Privacy & Security > Open Anyway. Apple Developer ID notarization is not configured.\n\n'
-        'Windows/Linux GPU libraries and reconstruction models are downloaded and checksum-verified from Setup > GPU dependencies. '
-        'The app includes its base Python/Node/FFmpeg runtime and can be managed offline; first GPU setup needs internet and 25 GiB free. '
-        'Desktop LichtFeld and Spirula remain user-installed; '
-        'the current scan engines target NVIDIA Windows/Linux or Apple Silicon. '
+        'Spirula and its reconstruction model are installed and checksum-verified automatically on Windows, Linux and Apple Silicon macOS. '
+        'Use Setup > Install / repair runtime to prepare them in advance. Initial setup needs internet and about 1.2 GB of downloads. '
+        'The app bundles its Node/FFmpeg converter runtime. '
         'GPU scan acceptance is separate from these package checks.\n\n'
         'See `SHA256SUMS.txt` for download checksums. Licenses and third-party notices are included inside the packages '
         'and source archive; platform manifests and additional build evidence remain in the workflow artifacts. '

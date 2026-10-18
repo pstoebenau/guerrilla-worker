@@ -16,12 +16,12 @@ class NoticePackagingTests(unittest.TestCase):
         self.source = Path(self.directory.name) / 'source'
         self.target = Path(self.directory.name) / 'target'
         for name in ('THIRD_PARTY_NOTICES', 'README.md', 'SECURITY.md', 'docs/dependency-review.md',
-                     'docs/release-process.md', 'docs/release-notes-0.1.0.md', 'docs/model-terms.md',
+                     'docs/release-process.md', 'docs/model-terms.md',
                      'docs/linux-release-review.md',
-                     'packages/protocol/LICENSE', 'legal/COLMAP-LICENSE.txt',
+                     'packages/protocol/LICENSE',
                      'legal/RoMaV2-LICENSE.txt', 'legal/DINOv3-LICENSE.txt',
-                     'legal/LichtFeld-LICENSE.txt', 'legal/Spirula-LICENSE.txt',
-                     'legal/Densification-LICENSE.txt', 'legal/Node-LICENSE.txt'):
+                     'legal/Spirula-LICENSE.txt',
+                     'legal/Node-LICENSE.txt'):
             file = self.source / name
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_text('reviewed document')

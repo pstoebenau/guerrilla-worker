@@ -1,19 +1,12 @@
 # Packaged license documents
 
-The owner accepts GPL-3.0-only for original worker code, MIT for the protocol,
-and the upstream third-party terms described in docs/model-terms.md and
-docs/dependency-review.md. The unlicensed COLMAP UI plugin has been removed.
+The owner accepted GPL-3.0-only for worker code, MIT for the protocol, and the
+third-party terms recorded in [model terms](../docs/model-terms.md).
 
-manifest.json version 2 records exact SHA-256 checksums of upstream license
-documents. It verifies packaging integrity; it does not assert blanket legal
-certification. Release builds require the worker LICENSE, the manifest and all
-matching documents. Version 1 manifests remain readable for compatibility.
+`manifest.json` records SHA-256 checksums for upstream notices. Release packages
+must preserve these exact documents, the worker LICENSE and dependency notices.
+Checksums establish document integrity; they do not replace license obligations.
 
-The manifest includes COLMAP, RoMaV2, DINOv3, LichtFeld, Spirula, densification
-and Node. Docker release tooling can export binary notices, pinned source snapshots
-and dependency source/build material from the exact image build. See
-docs/linux-release-review.md for their scope and source access instructions.
-
-Desktop packages for Windows, Linux, and macOS use owner-installed engines and
-bundle Python, Node, FFmpeg, the export converter, and supporting libraries.
-Preserve the notices and corresponding source for those bundled dependencies.
+Spirula, RoMaV2/DINOv3, Node, FFmpeg and converter dependencies retain their own
+terms. Desktop runtime downloads use the same Spirula/model pins as containers.
+See [source and distribution constraints](../docs/linux-release-review.md).

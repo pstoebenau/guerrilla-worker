@@ -178,7 +178,7 @@ mod tests {
             prerelease,
             release("v7.0.0-beta.1", "Guerrilla Worker_7.0.0-beta.1_aarch64.dmg"),
             release(
-                "lichtfeld-linux-recipe-abc",
+                "engine-linux-recipe-abc",
                 "Guerrilla Worker_6.0.0_aarch64.dmg",
             ),
             release(

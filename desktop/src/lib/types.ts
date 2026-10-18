@@ -1,13 +1,9 @@
 export interface Profile {
   controlUrl: string;
   scratchDirectory: string;
-  pythonPath: string;
   ffmpegPath: string;
   nodePath: string;
   converterPath: string;
-  lichtfeldPath: string;
-  densificationPluginPath: string;
-  spirulaPath: string;
   startAtLogin: boolean;
 }
 
@@ -42,7 +38,7 @@ export interface DependencyCheck { name: string; available: boolean; message?: s
 export interface Preflight { ok: boolean; checks?: DependencyCheck[]; engines?: EngineStatus[]; gpus?: GpuStatus[]; message?: string }
 export interface Logs { lines: string[]; truncated?: boolean }
 export type WorkerAction = 'start' | 'stop' | 'drain' | 'disconnect';
-export type BrowseField = 'scratchDirectory' | 'lichtfeldPath' | 'densificationPluginPath' | 'spirulaPath';
+export type BrowseField = 'scratchDirectory';
 
 export function isRunning(status: WorkerStatus | null): boolean {
   if (status?.running !== undefined) return status.running;

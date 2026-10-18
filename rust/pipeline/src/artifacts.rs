@@ -1,4 +1,4 @@
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -26,6 +26,39 @@ pub fn hash(path: &Path) -> Result<String> {
             break;
         }
         digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+pub fn input_images(root: &Path) -> Result<Vec<PathBuf>> {
+    Ok(files(root)?
+        .into_iter()
+        .filter(|path| {
+            matches!(
+                path.extension()
+                    .and_then(|s| s.to_str())
+                    .map(str::to_ascii_lowercase)
+                    .as_deref(),
+                Some("jpg" | "jpeg" | "png" | "webp" | "tif" | "tiff" | "bmp" | "exr")
+            )
+        })
+        .collect())
+}
+pub fn input_hash(input: &Path) -> Result<String> {
+    if input.is_file() {
+        return hash(input);
+    }
+    let images = input_images(input)?;
+    ensure!(
+        images.len() >= 3,
+        "At least three input images are required"
+    );
+    let mut digest = Sha256::new();
+    for image in images {
+        digest.update(image.strip_prefix(input)?.to_string_lossy().as_bytes());
+        digest.update([0]);
+        digest.update(hash(&image)?.as_bytes());
+        digest.update([0]);
     }
     Ok(format!("{:x}", digest.finalize()))
 }
@@ -198,7 +231,43 @@ pub fn copy_tree(source: &Path, target: &Path) -> Result<()> {
 
 pub fn gaussian_count(path: &Path, cap: u64) -> Result<u64> {
     let count;
-    if path.extension().and_then(|s| s.to_str()) == Some("sog") {
+    if path.extension().and_then(|s| s.to_str()) == Some("spz") {
+        let mut stream = flate2::read::GzDecoder::new(File::open(path)?);
+        let mut header = [0u8; 16];
+        stream.read_exact(&mut header)?;
+        let magic = u32::from_le_bytes(header[0..4].try_into().unwrap());
+        let version = u32::from_le_bytes(header[4..8].try_into().unwrap());
+        count = u32::from_le_bytes(header[8..12].try_into().unwrap()) as u64;
+        let degree = header[12] as u64;
+        ensure!(
+            magic == 0x5053474e
+                && (1..=3).contains(&version)
+                && degree <= 3
+                && header[13] <= 24
+                && header[14] & !1 == 0
+                && header[15] == 0,
+            "Invalid SPZ header"
+        );
+        ensure!(
+            count > 0 && count <= cap,
+            "SPZ Gaussian count is outside 1..{cap}"
+        );
+        let stride = (if version == 1 { 6 } else { 9 })
+            + 3
+            + (if version == 3 { 4 } else { 3 })
+            + 1
+            + 3
+            + ((degree + 1).pow(2) - 1) * 3;
+        let expected = count * stride;
+        let actual = std::io::copy(
+            &mut Read::by_ref(&mut stream).take(expected + 1),
+            &mut std::io::sink(),
+        )?;
+        ensure!(
+            actual == expected,
+            "SPZ attributes are truncated or have trailing data"
+        );
+    } else if path.extension().and_then(|s| s.to_str()) == Some("sog") {
         let mut archive = zip::ZipArchive::new(File::open(path)?)?;
         let meta: Value = {
             let file = archive.by_name("meta.json")?;
@@ -256,47 +325,22 @@ pub fn excluded(path: &str, prefixes: &[String]) -> bool {
         .any(|prefix| path == prefix || path.starts_with(&(prefix.clone() + "/")))
 }
 
-pub fn validate_settings(backend: &str, settings: &Value, cap: u64) -> Result<Value> {
+pub fn validate_settings(backend: &str, settings: &Value, _cap: u64) -> Result<Value> {
+    ensure!(backend == "spirula", "Unknown backend");
     let supplied = settings.as_object().context("Settings must be an object")?;
-    if backend == "spirula" {
-        for (section, values) in supplied {
-            ensure!(
-                ["extraction", "reconstruction", "training"].contains(&section.as_str()),
-                "Unknown Spirula settings section"
-            );
-            let values = values
-                .as_object()
-                .context("Settings sections must be objects")?;
-            for (key, value) in values {
-                let (low, high) = match (section.as_str(), key.as_str()) {
-                    ("extraction", "skip" | "keep" | "max_frames") => (1., 100000.),
-                    ("extraction", "quality") => (0., 100.),
-                    ("extraction", "scale") => (0.01, 1.),
-                    ("training", "iterations") => (1., 1000000.),
-                    _ => bail!("Unsupported Spirula setting {section}.{key}"),
-                };
-                ensure!(
-                    key == "scale" || value.as_u64().is_some(),
-                    "{key} must be an integer"
-                );
-                let number = value.as_f64().context("Invalid numeric setting")?;
-                ensure!(number >= low && number <= high, "Invalid {key}");
-            }
-        }
-        return Ok(settings.clone());
-    }
-    ensure!(backend == "lichtfeld", "Unknown backend");
-    let schema: Value =
-        serde_json::from_str(include_str!("../../../pipeline/scan-settings.schema.json"))?;
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../../packages/protocol/scan-settings.schema.json"
+    ))?;
+    let properties = schema["properties"].as_object().unwrap();
     let mut result = json!({});
-    for (section, definition) in schema["properties"].as_object().unwrap() {
+    for (section, definition) in properties {
         result[section] = json!({});
         for (key, field) in definition["properties"].as_object().unwrap() {
             result[section][key] = field["default"].clone();
         }
     }
     for (section, values) in supplied {
-        let definition = schema["properties"]
+        let definition = properties
             .get(section)
             .context("Unknown settings section")?;
         for (key, value) in values
@@ -306,18 +350,12 @@ pub fn validate_settings(backend: &str, settings: &Value, cap: u64) -> Result<Va
             let field = definition["properties"]
                 .get(key)
                 .context("Unknown setting")?;
-            let kinds = match &field["type"] {
-                Value::Array(kinds) => kinds.clone(),
-                kind => vec![kind.clone()],
-            };
-            let valid = kinds.iter().any(|kind| match kind.as_str() {
-                Some("null") => value.is_null(),
-                Some("integer") => value.as_i64().is_some() || value.as_u64().is_some(),
+            let valid = match field["type"].as_str() {
+                Some("integer") => value.as_u64().is_some(),
                 Some("number") => value.is_number(),
                 Some("boolean") => value.is_boolean(),
-                Some("string") => value.is_string(),
                 _ => false,
-            });
+            };
             ensure!(valid, "Wrong type for {section}.{key}");
             if let Some(number) = value.as_f64() {
                 ensure!(
@@ -326,30 +364,9 @@ pub fn validate_settings(backend: &str, settings: &Value, cap: u64) -> Result<Va
                     "Out of range setting {key}"
                 );
             }
-            if let Some(choices) = field["enum"].as_array() {
-                ensure!(choices.contains(value), "Invalid setting {key}");
-            }
             result[section][key] = value.clone();
         }
     }
-    if let Some(value) = supplied.get("training").and_then(|v| v.get("max_cap")) {
-        ensure!(
-            value.as_u64() == Some(cap),
-            "Training max_cap must equal the requested maximum"
-        );
-    }
-    result["training"]["max_cap"] = json!(cap);
-    if let Some(end) = result["selection"]["end_seconds"].as_f64() {
-        ensure!(
-            end > result["selection"]["start_seconds"].as_f64().unwrap(),
-            "End time must exceed start time"
-        );
-    }
-    ensure!(
-        !(result["selection"]["preserve_coverage"] == true
-            && !result["selection"]["max_images"].is_null()),
-        "Preserve coverage cannot be combined with a maximum frame count"
-    );
     Ok(result)
 }
 
@@ -401,22 +418,57 @@ mod tests {
         assert!(gaussian_count(&sog, 4).is_err());
     }
     #[test]
+    fn spz_validates_count_payload_length_and_gzip_integrity() {
+        use flate2::{write::GzEncoder, Compression};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("scene.spz");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0x5053474eu32.to_le_bytes());
+        payload.extend_from_slice(&2u32.to_le_bytes());
+        payload.extend_from_slice(&4u32.to_le_bytes());
+        payload.extend_from_slice(&[0, 12, 0, 0]);
+        payload.resize(16 + 19 * 4, 0);
+        let write = |bytes: &[u8]| {
+            let mut stream = GzEncoder::new(File::create(&path).unwrap(), Compression::default());
+            stream.write_all(bytes).unwrap();
+            stream.finish().unwrap();
+        };
+        write(&payload);
+        assert_eq!(gaussian_count(&path, 4).unwrap(), 4);
+        assert!(gaussian_count(&path, 3).is_err());
+        write(&payload[..payload.len() - 1]);
+        assert!(gaussian_count(&path, 4).is_err());
+        payload.push(0);
+        write(&payload);
+        assert!(gaussian_count(&path, 4).is_err());
+        payload.pop();
+        write(&payload);
+        let mut compressed = fs::read(&path).unwrap();
+        let checksum = compressed.len() - 8;
+        compressed[checksum] ^= 1;
+        fs::write(&path, compressed).unwrap();
+        assert!(gaussian_count(&path, 4).is_err());
+    }
+    #[test]
     fn settings_validate_types_ranges_unknown_fields_and_cross_field_rules() {
-        assert!(
-            validate_settings("lichtfeld", &json!({"training":{"iterations":true}}), 4).is_err()
-        );
-        assert!(validate_settings(
-            "lichtfeld",
-            &json!({"selection":{"preserve_coverage":true,"max_images":3}}),
-            4
-        )
-        .is_err());
-        assert!(validate_settings("lichtfeld", &json!({"training":{"max_cap":5}}), 4).is_err());
-        assert!(validate_settings("spirula", &json!({"training":{"max_cap":4}}), 4).is_err());
-        assert!(validate_settings("spirula", &json!({"extraction":{"skip":0}}), 4).is_err());
+        for settings in [
+            json!({"training":{"iterations":true}}),
+            json!({"training":{"max_cap":4}}),
+            json!({"extraction":{"skip":0}}),
+            json!({"densification":{"enabled":1}}),
+            json!({"densification":{"preset":"fast"}}),
+            json!({"reconstruction":{"mode":"global"}}),
+        ] {
+            assert!(validate_settings("spirula", &settings, 4).is_err());
+        }
         assert_eq!(
-            validate_settings("lichtfeld", &json!({}), 4).unwrap()["training"]["max_cap"],
-            4
+            validate_settings("spirula", &json!({}), 4).unwrap()["densification"]["enabled"],
+            true
+        );
+        assert_eq!(
+            validate_settings("spirula", &json!({"densification":{"enabled":false}}), 4).unwrap()
+                ["densification"]["enabled"],
+            false
         );
     }
     #[test]

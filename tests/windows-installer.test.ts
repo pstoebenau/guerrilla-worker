@@ -15,12 +15,10 @@ test.skipIf(process.platform !== 'win32')('pinned Inno compiler builds a single 
     for (const relative of [
       'guerrilla-worker-desktop.exe', 'guerrilla-worker.exe', 'guerrilla-pipeline.exe',
       'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll', 'LICENSE', 'README.md',
-      'resources/runtime/manifest.json', 'resources/runtime/python/python.exe',
-      'resources/runtime/setup/manifest.json', 'resources/runtime/setup/runtime_setup.py',
+      'resources/runtime/manifest.json',
       'resources/runtime/node/node.exe', 'resources/runtime/ffmpeg/ffmpeg.exe',
       'resources/runtime/ffmpeg/ffprobe.exe',
       'resources/runtime/converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs',
-      'resources/pipeline/native_bindings.py', 'resources/pipeline/scan-settings.schema.json',
     ]) {
       const file = path.join(source, relative);
       await mkdir(path.dirname(file), { recursive: true });

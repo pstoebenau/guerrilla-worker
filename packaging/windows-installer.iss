@@ -53,7 +53,7 @@ Source: "{#AppSource}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#AppSource}\prerequisites\WebView2Runtime-manifest.json"; DestDir: "{app}\resources\runtime\notices"; Flags: ignoreversion
 
 [InstallDelete]
-; Remove this app's previous bundled runtime, including obsolete CUDA wheels.
+; Remove this app's previous bundled runtime, including obsolete dependency files.
 ; Per-user GPU runtimes, profiles and checkpoints live outside {app} and remain.
 Type: filesandordirs; Name: "{app}\resources\runtime"
 

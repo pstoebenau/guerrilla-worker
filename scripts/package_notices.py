@@ -23,12 +23,12 @@ def package(source, destination, require_license=False):
 
     for relative in ('THIRD_PARTY_NOTICES', 'README.md', 'SECURITY.md',
                      'docs/dependency-review.md', 'docs/release-process.md',
-                     'docs/release-notes-0.1.0.md', 'docs/model-terms.md',
+                     'docs/model-terms.md',
                      'docs/linux-release-review.md',
-                     'packages/protocol/LICENSE', 'legal/COLMAP-LICENSE.txt',
+                     'packages/protocol/LICENSE',
                      'legal/RoMaV2-LICENSE.txt', 'legal/DINOv3-LICENSE.txt',
-                     'legal/LichtFeld-LICENSE.txt', 'legal/Spirula-LICENSE.txt',
-                     'legal/Densification-LICENSE.txt', 'legal/Node-LICENSE.txt'):
+                     'legal/Spirula-LICENSE.txt',
+                     'legal/Node-LICENSE.txt'):
         copy(relative)
     if (source / 'LICENSE').is_file():
         copy('LICENSE')

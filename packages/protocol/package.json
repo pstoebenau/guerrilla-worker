@@ -15,8 +15,7 @@
   ],
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "bun test",
-    "prepack": "bun -e \"await Bun.write('scan-settings.schema.json', Bun.file('../../pipeline/scan-settings.schema.json'))\""
+    "test": "bun test"
   },
   "devDependencies": {
     "typescript": "^6.0.3"

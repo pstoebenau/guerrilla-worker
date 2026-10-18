@@ -6,19 +6,21 @@ mod progress;
 mod runner;
 
 use anyhow::{ensure, Context, Result};
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use engine::Engine;
 use serde_json::{json, Value};
-use std::{io::Write, path::PathBuf};
+use std::{fs, io::Write, path::PathBuf};
 
 #[derive(Parser)]
 #[command(about = "Portable Guerrilla worker execution core")]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
     #[arg(long)]
     request: Option<PathBuf>,
     #[arg(long)]
     preflight: bool,
-    #[arg(long, value_parser=["lichtfeld","spirula"])]
+    #[arg(long, value_parser=["spirula"])]
     engine: Option<String>,
     #[arg(long)]
     download: Option<String>,
@@ -30,9 +32,137 @@ struct Cli {
     retention_plan: Option<PathBuf>,
     #[arg(long)]
     compact_state: Option<PathBuf>,
-    #[arg(long, value_parser=["lichtfeld","spirula"])]
+    #[arg(long, value_parser=["spirula"])]
     runtime_versions: Option<String>,
 }
+#[derive(Subcommand)]
+enum Command {
+    Scan(ScanArgs),
+}
+#[derive(Args)]
+struct ScanArgs {
+    /// Local video, video URL, or image folder.
+    input: String,
+    #[arg(long)]
+    output: PathBuf,
+    #[arg(long)]
+    max_cap: u64,
+    #[arg(long)]
+    resume: bool,
+    #[arg(long)]
+    settings: Option<PathBuf>,
+    #[arg(long)]
+    no_densification: bool,
+}
+fn scan(args: ScanArgs, mut runtime: process::Runtime) -> Result<()> {
+    use fs2::FileExt;
+    use sha2::{Digest, Sha256};
+    let mut settings: Value = args
+        .settings
+        .as_ref()
+        .map(|path| -> Result<_> { Ok(serde_json::from_slice(&fs::read(path)?)?) })
+        .transpose()?
+        .unwrap_or_else(|| json!({}));
+    if args.no_densification {
+        ensure!(settings.is_object(), "Settings must be an object");
+        if settings.get("densification").is_none() {
+            settings["densification"] = json!({});
+        }
+        ensure!(
+            settings["densification"].is_object(),
+            "Densification settings must be an object"
+        );
+        settings["densification"]["enabled"] = json!(false);
+    }
+    let settings = artifacts::validate_settings("spirula", &settings, args.max_cap)?;
+    ensure!(
+        args.max_cap > 0 && args.max_cap <= 30000000,
+        "--max-cap must be within 1..30000000"
+    );
+    let output = std::path::absolute(&args.output)?;
+    ensure!(!output.is_symlink(), "Output may not be a symlink");
+    if args.resume {
+        ensure!(
+            output.join(".worker/input.json").is_file(),
+            "No scan to resume in this output folder"
+        );
+    }
+    if output.exists() && !args.resume {
+        ensure!(
+            fs::read_dir(&output)?.next().is_none(),
+            "Output must be new or empty; use --resume"
+        );
+    }
+    let remote = args.input.starts_with("https://") || args.input.starts_with("http://");
+    let local = (!remote)
+        .then(|| fs::canonicalize(&args.input))
+        .transpose()?;
+    if let Some(input) = &local {
+        ensure!(
+            input != &output && !output.starts_with(input) && !input.starts_with(&output),
+            "Input and output must be separate paths"
+        );
+    }
+    ensure!(
+        !output.join(".worker").is_symlink(),
+        "Scan control directory may not be a symlink"
+    );
+    fs::create_dir_all(output.join(".worker"))?;
+    let output = output.canonicalize()?;
+    let lock = fs::File::options()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(artifacts::safe(&output, ".worker/scan.lock")?)?;
+    lock.try_lock_exclusive()
+        .context("Another scan is using this output folder")?;
+    let source_identity = local
+        .as_ref()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|| args.input.clone());
+    let identity = format!("{:x}", Sha256::digest(source_identity.as_bytes()));
+    let identity_path = artifacts::safe(&output, ".worker/input.json")?;
+    if identity_path.is_file() {
+        let previous: Value = serde_json::from_slice(&fs::read(&identity_path)?)?;
+        ensure!(
+            args.resume && previous["sourceSha256"] == identity,
+            "Scan input changed; use a new output folder"
+        );
+    } else {
+        artifacts::save(&identity_path, &json!({"sourceSha256":identity}))?;
+    }
+    let source = if let Some(local) = local {
+        local
+    } else {
+        let source = artifacts::safe(&output, ".worker/input/source.mp4")?;
+        if !source.is_file() {
+            download::download(&args.input, &source, false, &runtime)?;
+        }
+        source
+    };
+    runtime.lock_gpu()?;
+    let preflight = Engine::Spirula.preflight()?;
+    let request = runner::Request {
+        scan_id: "local".into(),
+        attempt_id: "local".into(),
+        input_path: source,
+        output_path: output,
+        backend: Engine::Spirula,
+        max_cap: args.max_cap,
+        settings,
+        resume: args.resume,
+        standalone: true,
+        selective_resume: false,
+        input_sha256: None,
+        runtime_versions: None,
+        archive_ack: false,
+        background_archive: false,
+        archive_timeout_seconds: 3600,
+    };
+    runner::Runner::new(request, runtime, preflight["runtimeVersions"].clone())?.run()
+}
+
 pub fn emit(kind: &str, values: Value) {
     let mut event = values.as_object().cloned().unwrap_or_default();
     for key in ["message", "error"] {
@@ -54,32 +184,6 @@ pub fn emit(kind: &str, values: Value) {
     let _ = stream.write_all(b"\n");
     let _ = stream.flush();
 }
-pub fn pipeline_root() -> PathBuf {
-    std::env::var_os("GUERRILLA_PIPELINE_ROOT")
-        .or_else(|| std::env::var_os("PIPELINE_ROOT"))
-        .or_else(|| std::env::var_os("WORKER_PIPELINE_ROOT"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let exe = std::env::current_exe().unwrap_or_default();
-            let parent = exe.parent().unwrap_or_else(|| std::path::Path::new("."));
-            if parent.join("pipeline/native_bindings.py").is_file() {
-                parent.join("pipeline")
-            } else {
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../pipeline")
-            }
-        })
-}
-pub fn python() -> String {
-    std::env::var("PYTHON")
-        .or_else(|_| std::env::var("PYTHON_BIN"))
-        .unwrap_or_else(|_| {
-            if cfg!(windows) {
-                "python.exe".into()
-            } else {
-                "python3".into()
-            }
-        })
-}
 pub fn which(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths)
@@ -99,8 +203,16 @@ pub fn converter_backend() -> String {
     })
 }
 pub fn converter() -> Result<Vec<String>> {
-    let local = pipeline_root()
-        .join("docker/converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs");
+    let runtime = std::env::var_os("WORKER_RUNTIME_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .unwrap_or_default()
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join("runtime")
+        });
+    let local = runtime.join("converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs");
     let mut path = std::env::var_os("SPLAT_TRANSFORM_BIN")
         .map(PathBuf::from)
         .or_else(|| {
@@ -134,18 +246,6 @@ pub fn converter() -> Result<Vec<String>> {
         Ok(vec![path.to_string_lossy().to_string()])
     }
 }
-pub fn densification_plugin() -> PathBuf {
-    std::env::var_os("LICHTFELD_DENSIFICATION_PLUGIN")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(
-                std::env::var_os("HOME")
-                    .or_else(|| std::env::var_os("USERPROFILE"))
-                    .unwrap_or_default(),
-            )
-            .join(".lichtfeld/plugins/densification")
-        })
-}
 pub fn redact(message: &str) -> String {
     let urls = regex::Regex::new(r#"(?i)https?://[^\s\"'<>]+"#).unwrap();
     let bearer = regex::Regex::new(r"(?i)Bearer\s+[^\s]+").unwrap();
@@ -156,16 +256,9 @@ pub fn redact(message: &str) -> String {
         )
         .into_owned()
 }
-fn parse_engine(name: &str) -> Engine {
-    if name == "spirula" {
-        Engine::Spirula
-    } else {
-        Engine::Lichtfeld
-    }
-}
 fn run(cli: Cli) -> Result<()> {
-    if let Some(engine) = cli.runtime_versions {
-        println!("{}", parse_engine(&engine).versions()?);
+    if cli.runtime_versions.is_some() {
+        println!("{}", Engine::Spirula.versions()?);
         return Ok(());
     }
     if let Some(root) = cli.compact_state {
@@ -186,11 +279,8 @@ fn run(cli: Cli) -> Result<()> {
     }
     if cli.preflight {
         let mut report = json!({"backends":{}});
-        let engines = cli
-            .engine
-            .map(|name| vec![parse_engine(&name)])
-            .unwrap_or_else(|| vec![Engine::Lichtfeld, Engine::Spirula]);
-        for engine in engines {
+        {
+            let engine = Engine::Spirula;
             match engine.preflight() {
                 Ok(mut capability) => {
                     report["gpus"] = capability["gpus"].take();
@@ -206,6 +296,9 @@ fn run(cli: Cli) -> Result<()> {
         return Ok(());
     }
     let mut runtime = process::Runtime::new()?;
+    if let Some(Command::Scan(args)) = cli.command {
+        return scan(args, runtime);
+    }
     if let Some(url) = cli.download {
         let destination = cli
             .destination
@@ -225,8 +318,8 @@ fn run(cli: Cli) -> Result<()> {
     runner::Runner::new(request, runtime, preflight["runtimeVersions"].clone())?.run()
 }
 fn main() {
-    std::env::set_var("PYTHONDONTWRITEBYTECODE", "1");
-    std::env::set_var("PYTHONUNBUFFERED", "1");
+    std::env::set_var("SS_NO_AUTO_FETCH", "1");
+    std::env::set_var("SS_LANG", "en");
     let args = std::env::args().collect::<Vec<_>>();
     if args.get(1).map(String::as_str) == Some("--guard-parent") {
         let result = (|| {

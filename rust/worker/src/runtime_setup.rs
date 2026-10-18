@@ -1,74 +1,38 @@
-use crate::{daemon, profile::ContextPaths, protocol::redact};
-use anyhow::{bail, Context, Result};
-use serde_json::Value;
-use sha2::{Digest, Sha256};
-use std::{io::Write, process::Stdio};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use crate::{daemon, profile::ContextPaths};
+use anyhow::{bail, Result};
+use serde_json::{json, Value};
+use std::{io::Write, path::PathBuf};
 
+/// Explicit paths support bundled container distributions and isolated native fixtures.
+pub async fn ensure(paths: &ContextPaths) -> Result<()> {
+    if std::env::var_os("SPIRULA_BIN")
+        .map(PathBuf::from)
+        .is_some_and(|p| p.is_file())
+        && std::env::var_os("SPIRULA_ROMA_MODEL")
+            .map(PathBuf::from)
+            .is_some_and(|p| p.is_file())
+    {
+        return Ok(());
+    }
+    guerrilla_runtime::install(&paths.runtime_root(), &paths.state, |message| {
+        eprintln!("{message}")
+    })
+    .await?;
+    Ok(())
+}
 pub async fn install(paths: &ContextPaths) -> Result<Value> {
     if daemon::status(paths)?.running {
-        bail!("Stop the worker before installing GPU dependencies");
+        bail!("Stop the worker before repairing its runtime");
     }
-    let base = paths.runtime_root();
-    if !guerrilla_runtime::status(&base, &paths.state).supported {
-        bail!("This platform uses the bundled base runtime; NVIDIA setup is available on Windows and Linux x64");
-    }
-    let script = base.join("setup/runtime_setup.py");
-    let descriptor: Value =
-        serde_json::from_slice(&std::fs::read(base.join("setup/manifest.json"))?)?;
-    let hash = format!("{:x}", Sha256::digest(std::fs::read(&script)?));
-    if descriptor["installerSha256"].as_str() != Some(&hash) {
-        bail!("GPU setup helper failed integrity verification; reinstall the desktop app");
-    }
-    let mut command = tokio::process::Command::new(guerrilla_runtime::python(&base));
-    command
-        .arg("-I")
-        .arg(script)
-        .arg("--resources")
-        .arg(&base)
-        .arg("--data-directory")
-        .arg(&paths.state)
-        .arg("--parent-pid")
-        .arg(std::process::id().to_string())
-        .env_remove("WORKER_ENROLLMENT_TOKEN")
-        .env_remove("PYTHONHOME")
-        .env_remove("PYTHONPATH")
-        .env_remove("__PYVENV_LAUNCHER__")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .kill_on_drop(true);
-    #[cfg(windows)]
-    command.creation_flags(0x08000000);
-    let mut child = command
-        .spawn()
-        .context("Cannot start the bundled GPU setup helper")?;
-    let mut lines = BufReader::new(child.stdout.take().context("Missing setup output")?).lines();
-    let mut result = None;
-    let mut failure = None;
-    while let Some(line) = lines.next_line().await? {
-        if line.len() > 16_384 {
-            bail!("Invalid GPU setup response");
-        }
-        let mut event: Value = serde_json::from_str(&line).context("Invalid GPU setup progress")?;
-        if let Some(message) = event["message"].as_str() {
-            event["message"] = serde_json::json!(redact(message));
-        }
-        match event["type"].as_str() {
-            Some("runtime-setup-progress") => {
-                println!("{event}");
-                std::io::stdout().flush()?;
-            }
-            Some("runtime-setup-complete") => result = Some(event),
-            Some("runtime-setup-error") => failure = event["message"].as_str().map(str::to_owned),
-            _ => bail!("Unexpected GPU setup response"),
-        }
-    }
-    if !child.wait().await?.success() {
-        bail!(
+    let runtime = guerrilla_runtime::install(&paths.runtime_root(), &paths.state, |message| {
+        println!(
             "{}",
-            failure.unwrap_or_else(|| "GPU runtime setup failed; retry from Setup".into())
+            json!({"type":"runtime-setup-progress", "message":message})
         );
-    }
-    result.context("GPU runtime setup did not confirm completion")
+        let _ = std::io::stdout().flush();
+    })
+    .await?;
+    Ok(
+        json!({"type":"runtime-setup-complete", "installed":true, "root":runtime.root, "spirulaPath":runtime.executable, "modelPath":runtime.model}),
+    )
 }

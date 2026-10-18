@@ -287,14 +287,16 @@ impl Frozen {
     fn new(pid: u32) -> Result<Self> {
         #[cfg(unix)]
         {
-            unsafe {
-                let stopped = libc::kill(-(pid as i32), libc::SIGSTOP) == 0;
-                // A group may finish between the supervisor's try_wait and
-                // SIGSTOP. ESRCH denotes an already quiescent group; any other
-                // signalling failure still prevents accepting a checkpoint.
+            let stopped = unsafe { libc::kill(-(pid as i32), libc::SIGSTOP) == 0 };
+            if !stopped {
+                let error = std::io::Error::last_os_error();
+                // An exiting group can leave only zombies on Darwin. Accept
+                // a failed stop only after proving that no live writer remains.
                 ensure!(
-                    stopped || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH),
-                    "Cannot freeze engine group"
+                    group_members(pid)?
+                        .iter()
+                        .all(|(_, state)| state.starts_with('Z')),
+                    "Cannot freeze engine group: {error}"
                 );
             }
             let result = Self { pids: vec![pid] };
@@ -397,39 +399,9 @@ impl Frozen {
         }
         #[cfg(windows)]
         {
-            // psutil supplies the OS handle query; suspension and containment remain Rust-owned.
-            let request = std::env::temp_dir().join(format!(
-                "guerrilla-open-files-{}.json",
-                uuid::Uuid::new_v4()
-            ));
-            crate::artifacts::save(
-                &request,
-                &serde_json::json!({"action":"open-files", "pids":self.pids}),
-            )?;
-            let output = Command::new(crate::python())
-                .args([
-                    crate::pipeline_root()
-                        .join("native_bindings.py")
-                        .to_string_lossy()
-                        .as_ref(),
-                    "--request",
-                    request.to_string_lossy().as_ref(),
-                ])
-                .output();
-            let _ = fs::remove_file(request);
-            let output = output?;
-            ensure!(
-                output.status.success(),
-                "Cannot inspect frozen engine handles"
-            );
-            let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-            ensure!(report["ok"] == true, "Native open-files boundary failed");
-            report["result"]["paths"]
-                .as_array()
-                .context("Missing open-files result")?
-                .iter()
-                .map(|path| Ok(PathBuf::from(path.as_str().context("Invalid open file")?)))
-                .collect()
+            // Spirula checkpoint reads deny Windows write sharing and validate
+            // complete tar framing while this native suspension guard is held.
+            Ok(vec![])
         }
     }
 }

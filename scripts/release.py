@@ -10,12 +10,24 @@ import tarfile
 root = Path(__file__).resolve().parents[1]
 destination = Path(sys.argv[1]).resolve()
 destination.mkdir(parents=True, exist_ok=True)
-files = [root / name for name in ('package.json', 'bun.lock', 'tsconfig.json', 'Dockerfile', 'Dockerfile.engine', 'Dockerfile.runtime', '.dockerignore', '.gitignore', '.gitattributes', 'README.md', 'SECURITY.md', 'THIRD_PARTY_NOTICES')]
+files = [root / name for name in ('package.json', 'bun.lock', 'tsconfig.json', 'Dockerfile', 'Dockerfile.runtime', '.dockerignore', '.gitignore', '.gitattributes', 'README.md', 'SECURITY.md', 'THIRD_PARTY_NOTICES')]
 if (root / 'LICENSE').is_file():
     files.append(root / 'LICENSE')
-for folder, patterns in {'agent': ['*.ts'], 'tests': ['*.ts', '*.py'], 'packages/protocol': ['package.json', 'README.md', 'LICENSE', 'tsconfig.json', 'src/*.ts', 'scan-settings.schema.json'], 'pipeline': ['*.py', '*.json', 'requirements.txt', 'docker/*requirements.txt', 'docker/converter/package*.json', 'tests/*.py'], 'docs': ['*.md', '*.txt'], 'scripts': ['*.py', '*.mjs', '*.ts', '*.ps1'], 'windows': ['*.cs', '*.csproj', '*.iss', '*.txt'], '.github/workflows': ['*.yml'], 'legal': ['*.md', '*.txt', 'manifest.json'], 'patches': ['*.patch']}.items():
+for folder, patterns in {
+    'tests': ['*.ts', '*.py'],
+    'packages/protocol': ['package.json', 'README.md', 'LICENSE', 'tsconfig.json', 'src/*.ts', 'scan-settings.schema.json'],
+    'pipeline/docker/converter': ['package*.json'],
+    'docs': ['*.md', '*.txt'], 'scripts': ['*.py', '*.mjs', '*.ts', '*.ps1'],
+    '.github/workflows': ['*.yml'], 'legal': ['*.md', '*.txt', 'manifest.json'],
+    'rust': ['**/Cargo.toml', '**/src/*.rs', '**/src/**/*.rs', '**/tests/*.rs'],
+    'desktop': ['package.json', 'bun.lock', '*.json', '*.ts', '*.html', 'src/**/*', 'public/**/*',
+                'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock', 'src-tauri/*.json', 'src-tauri/*.rs',
+                'src-tauri/src/*.rs', 'src-tauri/capabilities/*.json', 'src-tauri/icons/*'],
+    'packaging': ['*.json', '*.iss', 'Dockerfile*'],
+}.items():
     for pattern in patterns:
-        files.extend((root / folder).glob(pattern))
+        files.extend(file for file in (root / folder).glob(pattern) if file.is_file())
+files.extend([root / 'Cargo.toml', root / 'Cargo.lock'])
 version = json.loads((root / 'package.json').read_text())['version']
 if not re.fullmatch(r'\d+\.\d+\.\d+', version):
     raise ValueError('Release version must be numeric major.minor.patch')

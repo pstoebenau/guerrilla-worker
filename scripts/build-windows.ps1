@@ -22,16 +22,12 @@ $output = $destinationPath.TrimEnd('\')
 if ($output -eq $source -or $output.StartsWith($source + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Installer output must be outside the prepared app folder.' }
 foreach ($required in @(
     'guerrilla-worker-desktop.exe', 'guerrilla-worker.exe', 'guerrilla-pipeline.exe', 'LICENSE', 'README.md',
-    'resources/runtime/manifest.json', 'resources/runtime/python/python.exe',
-    'resources/runtime/setup/manifest.json', 'resources/runtime/setup/runtime_setup.py',
+    'resources/runtime/manifest.json',
     'resources/runtime/node/node.exe', 'resources/runtime/ffmpeg/ffmpeg.exe',
-    'resources/runtime/ffmpeg/ffprobe.exe', 'resources/runtime/converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs',
-    'resources/pipeline/native_bindings.py', 'resources/pipeline/scan-settings.schema.json'
+    'resources/runtime/ffmpeg/ffprobe.exe', 'resources/runtime/converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs'
 )) {
     if (!(Test-Path -LiteralPath (Join-Path $source $required) -PathType Leaf)) { throw "Prepared app is missing $required" }
 }
-$engineFiles = @(Get-ChildItem -LiteralPath $source -Recurse -File | Where-Object { $_.Name -match '^(?i:spirula|LichtFeld[- ]Studio|LichtFeld-Studio)\.exe$' })
-if ($engineFiles.Count -gt 0) { throw 'Prepared app contains a scan engine executable. LichtFeld and Spirula must remain user-installed.' }
 $cache = Join-Path $env:LOCALAPPDATA 'Guerrilla/build-tools'
 $prerequisites = Join-Path $source 'prerequisites'
 foreach ($directory in @($output, $cache, $prerequisites)) { $null = New-Item -ItemType Directory -Path $directory -Force }

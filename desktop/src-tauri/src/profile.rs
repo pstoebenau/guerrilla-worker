@@ -10,19 +10,11 @@ pub struct Profile {
     pub control_url: String,
     pub scratch_directory: String,
     #[serde(default)]
-    pub python_path: String,
-    #[serde(default)]
     pub ffmpeg_path: String,
     #[serde(default)]
     pub node_path: String,
     #[serde(default)]
     pub converter_path: String,
-    #[serde(default)]
-    pub lichtfeld_path: String,
-    #[serde(default)]
-    pub densification_plugin_path: String,
-    #[serde(default)]
-    pub spirula_path: String,
     #[serde(default)]
     pub start_at_login: bool,
     #[serde(flatten)]
@@ -45,21 +37,6 @@ pub fn load_profile(path: &Path, directory: &Path) -> Result<Profile, String> {
             serde_json::json!({ "controlUrl": "https://guerrilla.dad", "scratchDirectory": directory.join("scratch"), "startAtLogin": false })
         }
     };
-    if raw.get("WORKER_CONTROL_URL").is_some() {
-        // Preserve the existing Windows tray worker's engine paths and scratch.
-        // Its selected Python environment is replaced by the bundled runtime.
-        let preference: serde_json::Value = fs::read(directory.join("tray.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
-        return serde_json::from_value(serde_json::json!({
-            "controlUrl": raw["WORKER_CONTROL_URL"], "scratchDirectory": directory.join("scratch"),
-            "lichtfeldPath": raw.get("LICHTFELD_BIN").and_then(|v| v.as_str()).unwrap_or_default(),
-            "spirulaPath": raw.get("SPIRULA_BIN").and_then(|v| v.as_str()).unwrap_or_default(),
-            "densificationPluginPath": raw.get("LICHTFELD_DENSIFICATION_PLUGIN").and_then(|v| v.as_str()).unwrap_or_default(),
-            "startAtLogin": preference.get("AutoStart").and_then(|v| v.as_bool()).unwrap_or(true),
-        })).map_err(|e| e.to_string());
-    }
     serde_json::from_value(raw).map_err(|e| format!("Cannot read worker profile: {e}"))
 }
 
@@ -235,131 +212,12 @@ pub fn validate_paths(profile: &Profile) -> Result<(), String> {
     if fs::symlink_metadata(scratch).is_ok_and(|entry| entry.file_type().is_symlink()) {
         return Err("Choose a real scratch folder, not a filesystem link.".into());
     }
-    for (label, value, directory) in [
-        ("LichtFeld", &profile.lichtfeld_path, false),
-        ("Spirula", &profile.spirula_path, false),
-        (
-            "Densification plugin",
-            &profile.densification_plugin_path,
-            true,
-        ),
-    ] {
-        if value.is_empty() {
-            continue;
-        }
-        let path = Path::new(value);
-        if !path.is_absolute()
-            || !(if directory {
-                path.is_dir()
-            } else {
-                path.is_file()
-            })
-        {
-            return Err(format!(
-                "Choose an existing absolute {} path for {label}.",
-                if directory { "folder" } else { "executable" }
-            ));
-        }
-    }
     Ok(())
-}
-
-fn installed_spirula_candidates(home: &Path) -> Vec<PathBuf> {
-    let mut candidates = vec![home.join("Applications/Spirula Studio.app/Contents/MacOS/spirula")];
-    // The CLI setup installs official engines here rather than in /Applications.
-    let mut runtimes: Vec<PathBuf> =
-        fs::read_dir(home.join(".local/share/guerrilla-worker/runtimes"))
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().starts_with("spirula-"))
-            .map(|entry| entry.path())
-            .collect();
-    runtimes.sort();
-    for runtime in runtimes.into_iter().rev() {
-        candidates.push(runtime.join("Spirula Studio.app/Contents/MacOS/spirula"));
-        candidates.push(runtime.join(if cfg!(windows) {
-            "spirula.exe"
-        } else {
-            "spirula"
-        }));
-    }
-    candidates
-}
-
-pub fn detect_engines(profile: &mut Profile) {
-    fn first(value: &mut String, candidates: Vec<PathBuf>) {
-        if value.is_empty()
-            && let Some(path) = candidates.into_iter().find(|p| p.exists())
-        {
-            *value = path.to_string_lossy().into_owned();
-        }
-    }
-    let home =
-        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
-    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
-    let mut lichtfeld = vec![];
-    let mut spirula = vec![];
-    if let Some(path) = std::env::var_os("LICHTFELD_BIN") {
-        lichtfeld.push(path.into());
-    }
-    if let Some(path) = std::env::var_os("SPIRULA_BIN") {
-        spirula.push(path.into());
-    }
-    if let Some(path) = local {
-        lichtfeld.push(path.join("Programs/LichtFeld Studio/bin/LichtFeld-Studio.exe"));
-    }
-    if let Some(home) = &home {
-        spirula.extend(installed_spirula_candidates(home));
-        lichtfeld.extend([
-            home.join("Applications/LichtFeld Studio.app/Contents/MacOS/LichtFeld-Studio"),
-            home.join(".local/bin/LichtFeld-Studio"),
-        ]);
-        first(
-            &mut profile.densification_plugin_path,
-            vec![home.join(".lichtfeld/plugins/densification")],
-        );
-    }
-    lichtfeld.push(PathBuf::from(
-        "/Applications/LichtFeld Studio.app/Contents/MacOS/LichtFeld-Studio",
-    ));
-    spirula.push(PathBuf::from(
-        "/Applications/Spirula Studio.app/Contents/MacOS/spirula",
-    ));
-    for path in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
-        lichtfeld.push(path.join(if cfg!(windows) {
-            "LichtFeld-Studio.exe"
-        } else {
-            "LichtFeld-Studio"
-        }));
-        spirula.push(path.join(if cfg!(windows) {
-            "spirula.exe"
-        } else {
-            "spirula"
-        }));
-    }
-    first(&mut profile.lichtfeld_path, lichtfeld);
-    first(&mut profile.spirula_path, spirula);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn detects_cli_installed_spirula_without_a_shell_path() {
-        let home = std::env::temp_dir().join(format!(
-            "guerrilla-spirula-detection-{}",
-            std::process::id()
-        ));
-        let binary = home.join(".local/share/guerrilla-worker/runtimes/spirula-2026.9.30/Spirula Studio.app/Contents/MacOS/spirula");
-        fs::create_dir_all(binary.parent().unwrap()).unwrap();
-        fs::write(&binary, "engine fixture").unwrap();
-        let detected = installed_spirula_candidates(&home)
-            .into_iter()
-            .find(|path| path.is_file());
-        assert_eq!(detected, Some(binary));
-        fs::remove_dir_all(home).unwrap();
-    }
     #[test]
     fn isolated_data_directory_rejects_relative_root_and_parent_traversal() {
         for path in ["", "relative/worker", "/", "/tmp/..", "/tmp/../worker"] {
@@ -395,24 +253,5 @@ mod tests {
         assert!(validate_paths(&p).is_ok());
         p.scratch_directory = "scratch".into();
         assert!(validate_paths(&p).is_err());
-    }
-    #[test]
-    fn old_windows_profile_keeps_engines_and_checkpoints() {
-        let directory =
-            std::env::temp_dir().join(format!("guerrilla-profile-test-{}", std::process::id()));
-        fs::create_dir_all(&directory).unwrap();
-        let config = directory.join("config.json");
-        fs::write(&config, r#"{"WORKER_CONTROL_URL":"https://example.com","PYTHON":"C:/old-python.exe","SPIRULA_BIN":"C:/spirula.exe","LICHTFELD_BIN":"C:/lichtfeld.exe"}"#).unwrap();
-        fs::write(directory.join("tray.json"), r#"{"AutoStart":false}"#).unwrap();
-        let profile = load_profile(&config, &directory).unwrap();
-        assert_eq!(profile.spirula_path, "C:/spirula.exe");
-        assert_eq!(profile.lichtfeld_path, "C:/lichtfeld.exe");
-        assert_eq!(
-            profile.scratch_directory,
-            directory.join("scratch").to_string_lossy()
-        );
-        assert!(!profile.start_at_login);
-        assert!(profile.python_path.is_empty());
-        fs::remove_dir_all(directory).unwrap();
     }
 }

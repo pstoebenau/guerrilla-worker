@@ -13,17 +13,14 @@
     "tauri": "bun scripts/tauri.ts",
     "build:docker": "bun scripts/build-docker.ts",
     "check": "tsc --noEmit",
-    "check:python": "pyright --project pipeline/pyrightconfig.json",
     "test": "bun test tests",
-    "test:rust": "cargo test --locked --workspace",
-    "test:python": "PYTHONPATH=pipeline bun scripts/python.mjs -m unittest discover -s pipeline/tests"
+    "test:rust": "cargo test --locked --workspace"
   },
   "dependencies": {
     "@guerrilla/worker-protocol": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "1.3.10",
-    "typescript": "5.9.3",
-    "pyright": "1.1.407"
+    "typescript": "5.9.3"
   }
 }

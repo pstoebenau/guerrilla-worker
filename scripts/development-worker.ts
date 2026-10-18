@@ -48,7 +48,6 @@ export async function runDevelopmentWorker(options: DevelopmentWorkerOptions = {
   if (args.includes('--prepare-only')) { console.log('Prepared independent worker runtime.'); return 0; }
   const execution = workerEnvironment({
     ...env,
-    SPLAT_TRANSFORM_BIN: env.SPLAT_TRANSFORM_BIN ?? path.join(sourceDirectory, 'pipeline/docker/converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs'),
     WORKER_CREDENTIAL_FILE: env.WORKER_CREDENTIAL_FILE ?? path.join(credentialDirectory, 'worker.json'),
     WORKER_SCRATCH: scratchDirectory,
     GPU_LOCK_PATH: env.GPU_LOCK_PATH ?? path.join(gpuDirectory, 'gpu-0.lock'),

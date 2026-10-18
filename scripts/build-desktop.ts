@@ -25,12 +25,7 @@ for (const binary of ['guerrilla-worker', 'guerrilla-pipeline']) {
   await cp(path.join(root, 'target/release', binary + suffix), path.join(tauri, 'binaries', `${binary}-${target}${suffix}`));
 }
 await vendorRuntime(path.join(tauri, 'resources/runtime'));
-const pipeline = path.join(tauri, 'resources/pipeline');
-await rm(pipeline, { recursive: true, force: true });
-await mkdir(pipeline, { recursive: true });
-for (const file of await readdir(path.join(root, 'pipeline'))) {
-  if (file.endsWith('.py') || file.endsWith('.json') || file.endsWith('.pyi')) await cp(path.join(root, 'pipeline', file), path.join(pipeline, file));
-}
+await rm(path.join(tauri, 'resources/pipeline'), { recursive: true, force: true });
 await run([process.execPath, 'install', '--frozen-lockfile'], app);
 await run([process.execPath, 'run', 'check'], app);
 const buildArguments = process.argv.slice(2);
@@ -54,8 +49,6 @@ if (nativeMacDmg) {
   await run(['python3', path.join(root, 'scripts/build_macos_dmg.py'), '--bundle', path.join(tauri, 'target/release/bundle'), '--version', version]);
 }
 if (process.platform === 'win32') {
-  // CUDA bindings can exceed a single NSIS/MSI payload. Inno's spanned data
-  // files package the complete native app without trimming runtime dependencies.
   const portable = path.join(root, 'dist/windows-app');
   await rm(portable, { recursive: true, force: true });
   await mkdir(portable, { recursive: true });
@@ -63,7 +56,6 @@ if (process.platform === 'win32') {
   for (const binary of ['guerrilla-worker', 'guerrilla-pipeline']) await cp(path.join(root, 'target/release', binary + suffix), path.join(portable, binary + suffix));
   await mkdir(path.join(portable, 'resources'));
   await cp(path.join(tauri, 'resources/runtime'), path.join(portable, 'resources/runtime'), { recursive: true });
-  await cp(pipeline, path.join(portable, 'resources/pipeline'), { recursive: true });
   await cp(path.join(root, 'LICENSE'), path.join(portable, 'LICENSE'));
   await cp(path.join(root, 'docs/windows-worker.md'), path.join(portable, 'README.md'));
   for (const file of await readdir(path.join(tauri, 'resources/runtime/windows-crt'))) {

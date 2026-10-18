@@ -1,11 +1,12 @@
-mod engine_downloads;
 mod enrollment;
 mod profile;
 mod updates;
 
 use profile::Profile;
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
@@ -48,10 +49,6 @@ fn read_profile(state: &DesktopState) -> Result<Profile, String> {
     let path = state.directory.join("config.json");
     let mut p = profile::load_profile(&path, &state.directory)?;
     let runtime = state.resources.join("runtime");
-    // Runtime paths are supplied by the distribution, not a user Python environment.
-    p.python_path = guerrilla_runtime::selected_python(&runtime, &state.directory)
-        .to_string_lossy()
-        .into_owned();
     p.node_path = runtime
         .join(if cfg!(windows) {
             "node/node.exe"
@@ -72,14 +69,12 @@ fn read_profile(state: &DesktopState) -> Result<Profile, String> {
         .join("converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs")
         .to_string_lossy()
         .into_owned();
-    profile::detect_engines(&mut p);
     Ok(p)
 }
 
 fn info(state: &DesktopState) -> Result<DesktopInfo, String> {
     let profile = read_profile(state)?;
     let runtime_available = state.worker.is_file()
-        && Path::new(&profile.python_path).is_file()
         && Path::new(&profile.ffmpeg_path).is_file()
         && Path::new(&profile.node_path).is_file()
         && Path::new(&profile.converter_path).is_file();
@@ -122,9 +117,6 @@ fn owned_command(
         "APPDATA",
         "PROGRAMFILES",
         "PROGRAMFILES(X86)",
-        "CUDA_PATH",
-        "CUDA_HOME",
-        "CUDA_VISIBLE_DEVICES",
         "VK_ICD_FILENAMES",
         "NVIDIA_DRIVER_CAPABILITIES",
         "DISPLAY",
@@ -147,7 +139,6 @@ fn owned_command(
         .args(["--config"])
         .arg(state.directory.join("config.json"))
         .arg(action)
-        .env("PIPELINE_ROOT", state.resources.join("pipeline"))
         .env("WORKER_RUNTIME_ROOT", state.resources.join("runtime"))
         .env(
             "WORKER_PIPELINE_BIN",
@@ -193,8 +184,8 @@ async fn cli(state: &DesktopState, action: &str, token: Option<String>) -> Resul
             .map_err(|_| "Cannot close enrollment input")?;
     }
     let output = tokio::time::timeout(
-        Duration::from_secs(if matches!(action, "preflight" | "enroll") {
-            180
+        Duration::from_secs(if matches!(action, "preflight" | "enroll" | "start") {
+            1900
         } else if action == "stop" {
             120
         } else {
@@ -335,8 +326,7 @@ async fn save_profile(
             return Err("Stop the worker before changing execution settings.".into());
         }
     }
-    // Only user engine paths and preferences may be changed through the webview.
-    profile.python_path = current.python_path;
+    // Runtime locations are supplied by the bundle; only preferences are editable.
     profile.ffmpeg_path = current.ffmpeg_path;
     profile.node_path = current.node_path;
     profile.converter_path = current.converter_path;
@@ -421,8 +411,7 @@ async fn worker_logs(state: tauri::State<'_, DesktopState>) -> Result<Value, Str
 #[tauri::command]
 async fn browse_path(app: tauri::AppHandle, field: String) -> Result<Option<String>, String> {
     let directory = match field.as_str() {
-        "scratchDirectory" | "densificationPluginPath" => true,
-        "lichtfeldPath" | "spirulaPath" => false,
+        "scratchDirectory" => true,
         _ => return Err("Unknown path setting".into()),
     };
     tauri::async_runtime::spawn_blocking(move || {
@@ -449,17 +438,6 @@ async fn browse_path(app: tauri::AppHandle, field: String) -> Result<Option<Stri
 }
 
 #[tauri::command]
-async fn detect_engines(state: tauri::State<'_, DesktopState>) -> Result<Value, String> {
-    let mut p = read_profile(&state)?;
-    p.lichtfeld_path.clear();
-    p.spirula_path.clear();
-    p.densification_plugin_path.clear();
-    profile::detect_engines(&mut p);
-    Ok(
-        json!({ "lichtfeldPath":p.lichtfeld_path, "spirulaPath":p.spirula_path, "densificationPluginPath":p.densification_plugin_path }),
-    )
-}
-#[tauri::command]
 async fn open_server(
     app: tauri::AppHandle,
     state: tauri::State<'_, DesktopState>,
@@ -478,13 +456,6 @@ async fn open_release(app: tauri::AppHandle, url: String) -> Result<(), String> 
     if !updates::valid_release_url(&url) {
         return Err("Invalid worker release URL".into());
     }
-    app.opener()
-        .open_url(url, None::<&str>)
-        .map_err(|e| e.to_string())
-}
-#[tauri::command]
-async fn open_engine_download(app: tauri::AppHandle, engine: String) -> Result<(), String> {
-    let url = engine_downloads::destination(&engine, std::env::consts::OS).await?;
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(|e| e.to_string())
@@ -586,11 +557,9 @@ pub fn run() {
             worker_action,
             worker_logs,
             browse_path,
-            detect_engines,
             open_server,
             check_for_updates,
             open_release,
-            open_engine_download,
             open_data_directory,
             quit_interface
         ])
@@ -815,7 +784,6 @@ mod integration_tests {
         };
         let mut profile = read_profile(&state).unwrap();
         profile.control_url = "http://127.0.0.1:9".into();
-        profile.spirula_path = "/missing-engine".into();
         profile::atomic_save(&directory.join("config.json"), &profile).unwrap();
         tauri::async_runtime::block_on(async {
             let status = cli(&state, "status", None).await.unwrap();
@@ -879,7 +847,7 @@ mod integration_tests {
                 write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
                 request
             });
-            // The desktop enrolls even with invalid engine paths and no runtime,
+            // The desktop enrolls before installing the runtime,
             // saves only the server setting, and never starts a worker process.
             let enrolled = enroll(&state, "private-enrollment-token".into(), origin)
                 .await

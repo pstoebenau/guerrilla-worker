@@ -106,10 +106,10 @@ pub async fn execute(
         .as_str()
         .context("Missing backend")?;
     if assignment.protocol_version != 2
-        || !matches!(backend, "lichtfeld" | "spirula")
+        || backend != "spirula"
         || assignment.request["maxCap"]
             .as_u64()
-            .filter(|v| *v > 0 && *v <= 9_007_199_254_740_991)
+            .filter(|v| *v > 0 && *v <= 30_000_000)
             .is_none()
         || [
             &assignment.fence.scan_id,
@@ -284,7 +284,7 @@ pub async fn execute(
                     files::write_private(&output.join(".worker/restored").join(id),b"verified")?;return Ok(());
                 }
                 if kind=="checkpoint" {
-                    files::private_dir(&output.join("logs"))?;std::fs::copy(job.join("worker.log"),output.join("logs/worker.log"))?;
+                    files::private_dir(&output.join("logs"))?;files::write_log_tail(&job.join("worker.log"),&output.join("logs/worker.log"))?;
                     let id=event["checkpointId"].as_str().context("Missing checkpoint identity")?;
                     archives.enqueue(id,sequence.fetch_add(1,Ordering::SeqCst)+1).await?;return Ok(());
                 }
@@ -334,12 +334,15 @@ pub async fn execute(
                 cleanup_pending = response.is_err();
             }
         }
-        if !cancel.is_cancelled() {
+        if !cancel.is_cancelled()
+            && files::write_log_tail(&job.join("worker.log"), &output.join("logs/worker.log"))
+                .is_ok()
+        {
             let _ = archive::archive_file(
                 client,
                 &assignment.fence,
                 archive::UploadFile {
-                    path: &job.join("worker.log"),
+                    path: &output.join("logs/worker.log"),
                     relative: "logs/worker.log",
                     role: "log",
                     checkpoint: None,
@@ -462,6 +465,39 @@ where
     }
     Ok(())
 }
+/// The standalone CLI shares the enrolled pipeline and its process-tree cleanup.
+pub async fn scan(paths: &ContextPaths, args: &[String]) -> Result<()> {
+    let mut command = paths.command();
+    command.arg("scan").args(args);
+    command
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command
+        .spawn()
+        .context("Could not start bundled pipeline")?;
+    let pid = child.id().context("Pipeline missing process id")?;
+    let status = tokio::select! {
+        result = child.wait() => result?,
+        _ = tokio::signal::ctrl_c() => {
+            terminate_tree(pid, false);
+            match tokio::time::timeout(Duration::from_secs(15), child.wait()).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    terminate_tree(pid, true);
+                    let _ = child.kill().await;
+                    child.wait().await?
+                }
+            }
+        }
+    };
+    if !status.success() {
+        bail!("Scan did not complete; see the scan output and retained logs");
+    }
+    Ok(())
+}
+
 fn terminate_tree(pid: u32, force: bool) {
     #[cfg(unix)]
     unsafe {

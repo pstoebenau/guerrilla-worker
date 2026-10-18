@@ -118,7 +118,6 @@ jobs:
         run: |
           bun install --frozen-lockfile
           bun run check
-          bun run check:python
           bun run build --verbose
       - name: Test the built worker, desktop and packaged integrations
         run: |
@@ -126,59 +125,30 @@ jobs:
           cargo test --release --locked --workspace
           cargo test --release --locked --manifest-path desktop/src-tauri/Cargo.toml --target-dir desktop/src-tauri/target --features tauri/custom-protocol
           python -m unittest discover -s tests -p 'test_*.py'
-          python - <<'PYTHON'
-          import os
-          from pathlib import Path
-          import subprocess
-          root = Path.cwd()
-          runtime = root / 'desktop/src-tauri/resources/runtime'
-          windows = os.name == 'nt'
-          executable = runtime / 'python' / ('python.exe' if windows else 'bin/python3')
-          environment = os.environ.copy()
-          environment.pop('PYTHONHOME', None)
-          environment['PYTHONPATH'] = str(root / 'pipeline')
-          environment['NODE_BIN'] = str(runtime / 'node' / ('node.exe' if windows else 'bin/node'))
-          environment['SPLAT_TRANSFORM_BIN'] = str(runtime / 'converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs')
-          environment['PATH'] = os.pathsep.join([str(Path(environment['NODE_BIN']).parent), str(runtime / 'ffmpeg'), environment.get('PATH', '')])
-          subprocess.run([str(executable), '-m', 'unittest', 'discover', '-s', 'pipeline/tests'], env=environment, check=True)
-          subprocess.run([str(executable), '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_runtime_setup.py'], env=environment, check=True)
-          PYTHON
-      - name: Verify optional GPU runtime setup and offline reuse
-        if: runner.os != 'macOS'
+      - name: Verify native runtime installation and offline reuse
         run: |
           python - <<'PYTHON'
-          import json
-          import os
+          import json, os, subprocess
           from pathlib import Path
-          import subprocess
           root = Path.cwd()
-          profile = Path(os.environ['RUNNER_TEMP']) / 'gpu-setup-profile/config.json'
-          environment = os.environ.copy()
-          environment['WORKER_RUNTIME_ROOT'] = str(root / 'desktop/src-tauri/resources/runtime')
+          profile = Path(os.environ['RUNNER_TEMP']) / 'native-setup-profile/config.json'
+          resources = root / 'desktop/src-tauri/resources/runtime'
+          environment = dict(os.environ, WORKER_RUNTIME_ROOT=str(resources))
+          if os.name == 'nt':
+              environment['PATH'] = os.pathsep.join([str(resources / 'windows-crt'), environment.get('PATH', '')])
           worker = root / 'target/release' / ('guerrilla-worker.exe' if os.name == 'nt' else 'guerrilla-worker')
           command = [str(worker), '--config', str(profile), 'setup-runtime']
-          subprocess.run(command, env=environment, check=True)
-          # Completed, verified setup must reuse the same runtime without downloading.
-          environment['HTTPS_PROXY'] = 'http://127.0.0.1:1'
-          environment['HTTP_PROXY'] = 'http://127.0.0.1:1'
-          output = subprocess.check_output(command, env=environment, text=True)
+          subprocess.run(command, env=environment, check=True, timeout=1800)
+          environment.update(HTTPS_PROXY='http://127.0.0.1:1', HTTP_PROXY='http://127.0.0.1:1')
+          output = subprocess.check_output(command, env=environment, text=True, timeout=1800)
           result = json.loads(output.splitlines()[-1])
-          assert result['installed'] is True
+          assert result['type'] == 'runtime-setup-complete'
+          assert Path(result['spirulaPath']).is_file() and Path(result['modelPath']).is_file()
           assert 'Downloading' not in output
-          # Exercise the relocated GPU Python and actual bindings, while the
-          # desktop continues to ship only its base runtime.
-          runtime = Path(result['directory'])
-          python = runtime / 'python' / ('python.exe' if os.name == 'nt' else 'bin/python3')
-          environment.pop('HTTPS_PROXY', None)
-          environment.pop('HTTP_PROXY', None)
-          environment['PYTHONPATH'] = str(root / 'pipeline')
-          base = root / 'desktop/src-tauri/resources/runtime'
-          environment['NODE_BIN'] = str(base / 'node' / ('node.exe' if os.name == 'nt' else 'bin/node'))
-          environment['SPLAT_TRANSFORM_BIN'] = str(base / 'converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs')
-          subprocess.run([str(python), '-m', 'unittest', 'discover', '-s', 'pipeline/tests'], env=environment, check=True)
-          assert not profile.exists()
-          assert not profile.with_name('credentials.json').exists()
-          assert not profile.parent.joinpath('scratch').exists()
+          version = subprocess.check_output([result['spirulaPath'], '--version'], env=environment, text=True, timeout=30)
+          installed = json.loads((Path(result['root']) / 'manifest.json').read_text())
+          assert version.split()[0] == installed['version']
+          assert not profile.exists() and not profile.with_name('credentials.json').exists()
           PYTHON
       - name: Smoke test Windows installer without enrollment or worker launch
         if: runner.os == 'Windows'
@@ -218,7 +188,7 @@ jobs:
           [IO.File]::WriteAllText($sentinel, 'preserved-checkpoint', [Text.UTF8Encoding]::new($false))
           $installLog = Join-Path $qaRoot 'install.log'
           $uninstallLog = Join-Path $qaRoot 'uninstall.log'
-          $trackedEnvironment = @('WORKER_CREDENTIAL_FILE', 'WORKER_PIPELINE_BIN', 'WORKER_RUNTIME_ROOT', 'WORKER_CRT_ROOT', 'PIPELINE_ROOT', 'WORKER_SCRATCH', 'LICHTFELD_BIN', 'SPIRULA_BIN')
+          $trackedEnvironment = @('WORKER_CREDENTIAL_FILE', 'WORKER_PIPELINE_BIN', 'WORKER_RUNTIME_ROOT', 'WORKER_CRT_ROOT', 'WORKER_SCRATCH')
           $previousEnvironment = @{}
           foreach ($name in $trackedEnvironment) { $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
           $uninstaller = Join-Path $installed 'unins000.exe'
@@ -228,7 +198,7 @@ jobs:
             if ($setup.ExitCode -ne 0) { throw "Installer failed ($($setup.ExitCode)); inspect $installLog" }
             # Reinstall must remove obsolete app-owned GPU files, rather than
             # mixing the base runtime with dependencies from older releases.
-            $obsolete = Join-Path $installed 'resources/runtime/python/obsolete-gpu-runtime.fixture'
+            $obsolete = Join-Path $installed 'resources/runtime/obsolete-runtime.fixture'
             [IO.File]::WriteAllText($obsolete, 'obsolete app-owned dependency')
             $upgrade = Start-Process -FilePath $installer.FullName -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$installed`"", "/LOG=`"$installLog`"") -Wait -PassThru
             if ($upgrade.ExitCode -ne 0 -or (Test-Path -LiteralPath $obsolete)) { throw 'Upgrade failed to replace the app-owned runtime cleanly.' }
@@ -236,25 +206,20 @@ jobs:
               'guerrilla-worker-desktop.exe', 'guerrilla-worker.exe', 'guerrilla-pipeline.exe',
               'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll', 'LICENSE', 'README.md',
               'resources/runtime/manifest.json', 'resources/runtime/windows-crt/manifest.json',
-              'resources/runtime/setup/manifest.json', 'resources/runtime/setup/runtime_setup.py',
-              'resources/runtime/python/python.exe', 'resources/runtime/node/node.exe',
+              'resources/runtime/node/node.exe',
               'resources/runtime/ffmpeg/ffmpeg.exe', 'resources/runtime/ffmpeg/ffprobe.exe',
-              'resources/runtime/converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs',
-              'resources/pipeline/native_bindings.py', 'resources/pipeline/scan-settings.schema.json'
+              'resources/runtime/converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs'
             )
             foreach ($relative in $requiredFiles) {
               if (!(Test-Path -LiteralPath (Join-Path $installed $relative) -PathType Leaf)) { throw "Installed app is missing $relative" }
             }
             $runtime = Join-Path $installed 'resources/runtime'
-            $pipeline = Join-Path $installed 'resources/pipeline'
             $profile = [ordered]@{
               controlUrl = 'https://example.invalid'; scratchDirectory = $scratch;
-              pythonPath = (Join-Path $runtime 'python/python.exe'); nodePath = (Join-Path $runtime 'node/node.exe');
+              nodePath = (Join-Path $runtime 'node/node.exe');
               ffmpegPath = (Join-Path $runtime 'ffmpeg/ffmpeg.exe');
               converterPath = (Join-Path $runtime 'converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs');
-              lichtfeldPath = (Join-Path $qaRoot 'not-installed/lichtfeld.exe');
-              spirulaPath = (Join-Path $qaRoot 'not-installed/spirula.exe');
-              densificationPluginPath = ''; startAtLogin = $false
+              startAtLogin = $false
             }
             [IO.File]::WriteAllText($config, ($profile | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
             $configHash = (Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash
@@ -262,22 +227,12 @@ jobs:
             $env:WORKER_PIPELINE_BIN = Join-Path $installed 'guerrilla-pipeline.exe'
             $env:WORKER_RUNTIME_ROOT = $runtime
             $env:WORKER_CRT_ROOT = Join-Path $runtime 'windows-crt'
-            $env:PIPELINE_ROOT = $pipeline
             $env:WORKER_SCRATCH = $scratch
-            $env:LICHTFELD_BIN = $profile.lichtfeldPath
-            $env:SPIRULA_BIN = $profile.spirulaPath
             $worker = Join-Path $installed 'guerrilla-worker.exe'
             $statusOutput = & $worker --config $config status
             if ($LASTEXITCODE -ne 0) { throw 'Installed worker status command failed.' }
             $status = ($statusOutput -join "`n") | ConvertFrom-Json
             if ($status.state -ne 'unenrolled' -or $status.connected -or $status.running) { throw 'Fresh installed worker must be unenrolled, disconnected and stopped.' }
-            $preflightOutput = & $worker --config $config preflight
-            if ($LASTEXITCODE -ne 0) { throw 'Installed pipeline dependency report failed.' }
-            $preflight = ($preflightOutput -join "`n") | ConvertFrom-Json
-            foreach ($backend in @('lichtfeld', 'spirula')) {
-              $capability = $preflight.backends.PSObject.Properties[$backend]
-              if ($null -eq $capability -or $capability.Value.available) { throw 'Missing user-installed engines must remain unavailable.' }
-            }
             if (Test-Path -LiteralPath $env:WORKER_CREDENTIAL_FILE) { throw 'Status/preflight unexpectedly created enrollment.' }
             Assert-FreshWorkerAccount
             $remove = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$uninstallLog`"") -Wait -PassThru
@@ -431,4 +386,3 @@ jobs:
           printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           docker buildx imagetools create --tag "$image:latest" "$RELEASE_IMAGE"
-# Desktop engines remain owner-installed. The matching Linux image bundles them.

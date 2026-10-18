@@ -134,28 +134,36 @@ pub fn parse(stage: &str, text: &str) -> Value {
                 }
             }
             "densification" => {
-                if let Some(capture) = expression(r"\[\s*(\d+(?:\.\d+)?)%\]\s*(.*)").captures(line)
-                {
-                    if let Some(current) = number(&capture[1]).filter(|value| *value <= 100.) {
-                        let message = capture[2].to_lowercase();
-                        let label = if message.contains("merg") {
-                            "Merging dense point chunks"
-                        } else if message.contains("writing") || message.contains("done!") {
-                            "Writing dense point cloud"
-                        } else if message.contains("matching") {
-                            "Matching image pairs"
-                        } else {
-                            "Preparing dense reconstruction"
-                        };
-                        update =
-                            json!({"substep":label,"current":current,"total":100,"unit":"percent"});
-                        if let Some(chunk) = expression(r"chunk (\d+)/(\d+)").captures(&message) {
-                            update["substep"] = json!(format!(
-                                "Matching image pairs · chunk {} of {}",
-                                &chunk[1], &chunk[2]
-                            ));
+                for (prefix, label, unit) in [
+                    ("Preparing views", "Preparing dense reconstruction", "views"),
+                    ("Matching image pairs", "Matching image pairs", "pairs"),
+                    ("Refining points", "Refining dense points", "points"),
+                    ("Fusing points", "Merging dense points", "percent"),
+                    ("Removing outliers", "Removing dense outliers", "points"),
+                    (
+                        "Exporting the point cloud",
+                        "Writing dense point cloud",
+                        "points",
+                    ),
+                ] {
+                    let pattern = format!(r"^{}: (\d[\d,]*)/(\d[\d,]*)", prefix);
+                    if let Some(capture) = expression(&pattern).captures(line.trim()) {
+                        update = counter(&capture, label, unit);
+                    } else if line.trim().starts_with(prefix) {
+                        update = json!({"substep":label});
+                        if unit == "percent" {
+                            if let Some(capture) = expression(r": (\d+)%$").captures(line.trim()) {
+                                if let Some(current) =
+                                    number(&capture[1]).filter(|value| *value <= 100.)
+                                {
+                                    update = json!({"substep":label,"current":current,"total":100,"unit":"percent"});
+                                }
+                            }
                         }
                     }
+                }
+                if line.starts_with("Loading the RoMa model") {
+                    update = json!({"substep":"Loading the RoMa model"});
                 }
             }
             "reconstruction" => {
@@ -220,8 +228,8 @@ mod tests {
     fn stages_translate_only_known_diagnostics() {
         assert_eq!(parse("selection", "scanned 10/100 frames")["total"], 100.);
         assert_eq!(
-            parse("densification", "[ 25.0%] matching chunk 1/4")["substep"],
-            "Matching image pairs · chunk 1 of 4"
+            parse("densification", "Matching image pairs: 1/4")["current"],
+            1.
         );
         assert_eq!(
             parse("reconstruction", "bundle adjustment")["substep"],

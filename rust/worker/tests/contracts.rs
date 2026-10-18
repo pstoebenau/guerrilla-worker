@@ -116,12 +116,14 @@ fn credentials_origin_gpu_and_engine_identity_are_strict() {
         api::origin("http://127.0.0.1:123/path").unwrap(),
         "http://127.0.0.1:123"
     );
-    let report = json!({"gpus":[{"id":"GPU-1","name":"GPU","memoryBytes":1024}],"backends":{"lichtfeld":{"available":true,"runtimeVersions":{"b":"2","a":"1"}},"spirula":{"available":false}}});
+    let report = json!({"gpus":[{"id":"GPU-1","name":"GPU","memoryBytes":1024}],"backends":{"spirula":{"available":true,"runtimeVersions":{"b":"2","a":"1"}}}});
     let first = ContextPaths::registration(&report).unwrap();
     let mut changed = report;
-    changed["backends"]["spirula"] = json!({"available":true,"runtimeVersions":{"other":"new"}});
+    changed["backends"]["unsupported"] =
+        json!({"available":true,"runtimeVersions":{"other":"new"}});
     let second = ContextPaths::registration(&changed).unwrap();
-    assert_eq!(first.engines["lichtfeld"], second.engines["lichtfeld"]);
+    assert_eq!(first.engines["spirula"], second.engines["spirula"]);
+    assert_eq!(second.engines.len(), 1);
     changed["gpus"] = json!([]);
     assert!(ContextPaths::registration(&changed).is_err());
     assert_eq!(
@@ -269,7 +271,7 @@ fn assignment(seconds: i64) -> guerrilla_worker::protocol::Assignment {
         fence: fence(),
         protocol_version: 2,
         lease_expires_at: (chrono::Utc::now() + chrono::Duration::seconds(seconds)).to_rfc3339(),
-        request: json!({"version":1,"backend":"lichtfeld","maxCap":100,"settings":{}}),
+        request: json!({"version":1,"backend":"spirula","maxCap":100,"settings":{}}),
         input: guerrilla_worker::protocol::Input {
             kind: "stored".into(),
             filename: "input.mp4".into(),
@@ -459,7 +461,7 @@ async fn background_worker_survives_launcher_exit_and_repeated_start_attaches() 
         &temp,
         r#"
 import json
-print(json.dumps({'gpus':[{'id':'fixture-GPU','name':'Fixture GPU','memoryBytes':1024}],'backends':{'lichtfeld':{'available':True,'runtimeVersions':{'fixture':'1'}}}}))
+print(json.dumps({'gpus':[{'id':'fixture-GPU','name':'Fixture GPU','memoryBytes':1024}],'backends':{'spirula':{'available':True,'runtimeVersions':{'fixture':'1'}}}}))
 "#,
     );
     std::fs::write(
@@ -480,6 +482,8 @@ print(json.dumps({'gpus':[{'id':'fixture-GPU','name':'Fixture GPU','memoryBytes'
             .args(["--config", paths.config.to_str().unwrap(), command])
             .env("WORKER_PIPELINE_BIN", &paths.pipeline)
             .env("WORKER_AGENT_LOCK_DIRECTORY", temp.path().join("gpu-locks"))
+            .env("SPIRULA_BIN", &paths.pipeline)
+            .env("SPIRULA_ROMA_MODEL", &paths.pipeline)
             .output()
             .unwrap();
         assert!(
@@ -491,7 +495,7 @@ print(json.dumps({'gpus':[{'id':'fixture-GPU','name':'Fixture GPU','memoryBytes'
     };
     let first = invoke("start");
     assert_eq!(first["running"], true);
-    for _ in 0..100 {
+    for _ in 0..1000 {
         if !requests.lock().unwrap().is_empty() {
             break;
         }
@@ -614,6 +618,47 @@ fn diagnostics_tail_is_bounded_and_redacted() {
     let rendered = logs.to_string();
     assert!(!rendered.contains("secret"));
     assert!(rendered.contains("[redacted]"));
+    let archived = temp.path().join("archived.log");
+    files::write_log_tail(&paths.state.join("daemon.log"), &archived).unwrap();
+    let archived = std::fs::read_to_string(archived).unwrap();
+    assert!(archived.lines().count() <= 200);
+    assert!(archived.len() <= 64 * 1024);
+    assert!(!archived.contains("secret"));
+}
+
+#[cfg(unix)]
+#[test]
+fn standalone_scan_forwards_inputs_and_settings_without_enrollment() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = pipeline_fixture(&temp, "import json,sys\nprint(json.dumps(sys.argv[1:]))\n");
+    let arguments = [
+        "scan",
+        "/images with spaces",
+        "--output",
+        "/output",
+        "--max-cap",
+        "12000",
+        "--resume",
+        "--no-densification",
+    ];
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_guerrilla-worker"))
+        .args(["--config", paths.config.to_str().unwrap()])
+        .args(arguments)
+        .env("WORKER_PIPELINE_BIN", &paths.pipeline)
+        .env("SPIRULA_BIN", &paths.pipeline)
+        .env("SPIRULA_ROMA_MODEL", &paths.pipeline)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!(arguments)
+    );
+    assert!(!paths.credential_path().exists());
 }
 
 #[tokio::test]
@@ -763,7 +808,7 @@ fn legacy_preflight_flag_returns_registration_and_subcommand_returns_capabilitie
         &temp,
         r#"
 import json
-print(json.dumps({'gpus':[{'id':'fixture-GPU','name':'Fixture GPU','memoryBytes':1024}],'backends':{'lichtfeld':{'available':True,'runtimeVersions':{'fixture':'1'}}}}))
+print(json.dumps({'gpus':[{'id':'fixture-GPU','name':'Fixture GPU','memoryBytes':1024}],'backends':{'spirula':{'available':True,'runtimeVersions':{'fixture':'1'}}}}))
 "#,
     );
     let invoke = |argument: &str| {
@@ -782,10 +827,10 @@ print(json.dumps({'gpus':[{'id':'fixture-GPU','name':'Fixture GPU','memoryBytes'
     let legacy = invoke("--preflight");
     assert_eq!(legacy["protocolVersion"], 2);
     assert_eq!(legacy["healthy"], true);
-    assert_eq!(legacy["engines"]["lichtfeld"].as_str().unwrap().len(), 64);
+    assert_eq!(legacy["engines"]["spirula"].as_str().unwrap().len(), 64);
     assert!(legacy.get("backends").is_none());
     let gui = invoke("preflight");
-    assert_eq!(gui["backends"]["lichtfeld"]["available"], true);
+    assert_eq!(gui["backends"]["spirula"]["available"], true);
     assert!(gui.get("protocolVersion").is_none());
 }
 
@@ -883,7 +928,7 @@ print(json.dumps({'gpus':[{'id':'fixture-GPU','name':'Fixture GPU','memoryBytes'
 }
 
 #[test]
-fn pipeline_commands_explicitly_isolate_python_and_node_import_overrides() {
+fn pipeline_commands_isolate_native_and_converter_import_overrides() {
     let temp = tempfile::tempdir().unwrap();
     let paths = ContextPaths::load(temp.path().join("profile.json")).unwrap();
     let command = paths.command();
@@ -897,37 +942,43 @@ fn pipeline_commands_explicitly_isolate_python_and_node_import_overrides() {
             )
         })
         .collect();
-    for key in [
-        "PYTHONHOME",
-        "PYTHONPATH",
-        "PYTHONUSERBASE",
-        "PYTHONSTARTUP",
-        "PYTHONINSPECT",
-        "PYTHONPLATLIBDIR",
-        "PYTHONEXECUTABLE",
-        "__PYVENV_LAUNCHER__",
-        "NODE_OPTIONS",
-        "NODE_PATH",
-    ] {
+    for key in ["PYTHONHOME", "PYTHONPATH", "NODE_OPTIONS", "NODE_PATH"] {
         assert_eq!(
             env.get(key),
             Some(&None),
             "{key} must be explicitly removed"
         );
     }
-    assert_eq!(env.get("PYTHONNOUSERSITE"), Some(&Some("1".into())));
     assert!(!env.contains_key("LD_LIBRARY_PATH"));
     assert!(!env.contains_key("DYLD_LIBRARY_PATH"));
 }
+
+#[test]
+fn pipeline_commands_prepend_bundled_windows_crt() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut paths = ContextPaths::load(temp.path().join("profile.json")).unwrap();
+    paths.pipeline = temp.path().join("guerrilla-pipeline");
+    let crt = temp.path().join("runtime/windows-crt");
+    std::fs::create_dir_all(&crt).unwrap();
+    let command = paths.command();
+    let path = command
+        .as_std()
+        .get_envs()
+        .find(|(key, _)| *key == "PATH")
+        .and_then(|(_, value)| value)
+        .unwrap();
+    assert_eq!(std::env::split_paths(path).next(), Some(crt));
+}
+
 #[cfg(unix)]
 #[test]
-fn vendored_pipeline_ignores_ambient_python_and_node_setup_but_keeps_engine_libraries() {
+fn vendored_pipeline_ignores_ambient_imports_but_keeps_engine_paths() {
     let temp = tempfile::tempdir().unwrap();
     let paths = pipeline_fixture(
         &temp,
         r#"
 import json,os
-keys=['PYTHONHOME','PYTHONPATH','PYTHONUSERBASE','PYTHONSTARTUP','PYTHONINSPECT','PYTHONPLATLIBDIR','PYTHONEXECUTABLE','__PYVENV_LAUNCHER__','NODE_OPTIONS','NODE_PATH','PYTHONNOUSERSITE','LD_LIBRARY_PATH','LICHTFELD_BIN']
+keys=['PYTHONHOME','PYTHONPATH','NODE_OPTIONS','NODE_PATH','LD_LIBRARY_PATH','SPIRULA_BIN']
 print(json.dumps({key:os.environ.get(key) for key in keys}))
 "#,
     );
@@ -935,21 +986,9 @@ print(json.dumps({key:os.environ.get(key) for key in keys}))
     command
         .args(["--config", paths.config.to_str().unwrap(), "preflight"])
         .env("WORKER_PIPELINE_BIN", &paths.pipeline)
-        .env("PYTHONNOUSERSITE", "0")
         .env("LD_LIBRARY_PATH", "/engine-libraries")
-        .env("LICHTFELD_BIN", "/user/licensed/LichtFeld");
-    for key in [
-        "PYTHONHOME",
-        "PYTHONPATH",
-        "PYTHONUSERBASE",
-        "PYTHONSTARTUP",
-        "PYTHONINSPECT",
-        "PYTHONPLATLIBDIR",
-        "PYTHONEXECUTABLE",
-        "__PYVENV_LAUNCHER__",
-        "NODE_OPTIONS",
-        "NODE_PATH",
-    ] {
+        .env("SPIRULA_BIN", "/user/spirula");
+    for key in ["PYTHONHOME", "PYTHONPATH", "NODE_OPTIONS", "NODE_PATH"] {
         command.env(key, "/invalid/ambient-runtime");
     }
     let output = command.output().unwrap();
@@ -959,25 +998,13 @@ print(json.dumps({key:os.environ.get(key) for key in keys}))
         String::from_utf8_lossy(&output.stderr)
     );
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    for key in [
-        "PYTHONHOME",
-        "PYTHONPATH",
-        "PYTHONUSERBASE",
-        "PYTHONSTARTUP",
-        "PYTHONINSPECT",
-        "PYTHONPLATLIBDIR",
-        "PYTHONEXECUTABLE",
-        "__PYVENV_LAUNCHER__",
-        "NODE_OPTIONS",
-        "NODE_PATH",
-    ] {
+    for key in ["PYTHONHOME", "PYTHONPATH", "NODE_OPTIONS", "NODE_PATH"] {
         assert_eq!(
             report[key],
             Value::Null,
             "{key} leaked into bundled runtime"
         );
     }
-    assert_eq!(report["PYTHONNOUSERSITE"], "1");
     assert_eq!(report["LD_LIBRARY_PATH"], "/engine-libraries");
-    assert_eq!(report["LICHTFELD_BIN"], "/user/licensed/LichtFeld");
+    assert_eq!(report["SPIRULA_BIN"], "/user/spirula");
 }

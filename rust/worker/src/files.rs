@@ -92,6 +92,37 @@ pub fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     fs::rename(&temp, path)?;
     Ok(())
 }
+
+/// Retain enough recent output to diagnose a failed attempt without archiving every progress line.
+pub fn write_log_tail(source: &Path, destination: &Path) -> Result<()> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = fs::File::open(source)?;
+    let offset = file.metadata()?.len().saturating_sub(64 * 1024);
+    file.seek(SeekFrom::Start(offset))?;
+    let mut bytes = Vec::new();
+    file.take(64 * 1024).read_to_end(&mut bytes)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let text = if offset > 0 {
+        text.split_once('\n').map(|(_, rest)| rest).unwrap_or("")
+    } else {
+        &text
+    };
+    let lines: Vec<_> = text
+        .lines()
+        .rev()
+        .take(200)
+        .map(crate::protocol::redact)
+        .collect();
+    write_private(
+        destination,
+        lines
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n")
+            .as_bytes(),
+    )
+}
 pub fn hash(path: &Path) -> Result<(u64, String)> {
     let mut file = fs::File::open(path)?;
     let mut hash = Sha256::new();

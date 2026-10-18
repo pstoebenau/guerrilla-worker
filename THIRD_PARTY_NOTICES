@@ -1,31 +1,16 @@
-Guerrilla Worker local release candidate
+Guerrilla Worker
 
-Original worker source: GPL-3.0-only, accepted by the owner; see LICENSE.
-The separate packages/protocol contract is MIT licensed; see its LICENSE.
+Worker code: GPL-3.0-only; see LICENSE. The separate protocol is MIT licensed.
+Third-party components keep their own terms:
 
-External components are obtained by Dockerfile from their exact pinned sources.
-They are not relicensed by this project. See docs/dependency-review.md for exact
-versions, source links, obligations and unresolved redistribution blockers.
+Spirula Studio v2026.10.16: GPL-3.0; legal/Spirula-LICENSE.txt.
+RoMaV2 v2.0.1: MIT, with DINOv3 materials under Meta's separate agreement;
+legal/RoMaV2-LICENSE.txt and legal/DINOv3-LICENSE.txt.
+PlayCanvas splat-transform 3.10.1: MIT; legal/SplatTransform-LICENSE.txt.
+Converter dependency versions are pinned in pipeline/docker/converter/package-lock.json.
+Node.js: legal/Node-LICENSE.txt. FFmpeg and OS package notices accompany their distributions.
 
-LichtFeld Studio: GNU GPL version 3 license text at pinned source.
-Spirula Studio: GNU GPL version 3 license text at pinned release.
-PlayCanvas splat-transform 3.10.1: MIT; see legal/SplatTransform-LICENSE.txt.
-Converter dependencies are pinned by pipeline/docker/converter/package-lock.json;
-their installed notices are included in the Linux binary-notices archive.
-LichtFeld densification plugin: GNU GPL version 3 license text at pinned source.
-Vendored RoMaV2: MIT, Copyright (c) 2025 Johan Edstedt.
-DINOv3: Meta DINOv3 License, updated August 19, 2025; separate restricted terms.
-COLMAP/pycolmap: BSD-3-Clause; see legal/COLMAP-LICENSE.txt.
-Reconstruction uses Guerrilla code calling pycolmap directly. The separately
-authored LichtFeld COLMAP plugin is neither required nor included.
-
-DINOv3 restrictions apply to the DINO materials; see the complete agreement in
-legal/DINOv3-LICENSE.txt and the usage summary in docs/model-terms.md.
-RoMaV2 code notices are in legal/RoMaV2-LICENSE.txt.
-
-The release includes upstream source snapshots, the build's dependency source
-material and a binary-notices archive collected from installed packages. See
-docs/linux-release-review.md for source access and the scope of these assets.
-NVIDIA, Python, Node, Bun, Ubuntu, FFmpeg and package terms are not superseded
-by the worker LICENSE. The license manifest verifies document checksums rather
-than asserting a blanket legal certification.
+Spirula and RoMa model assets are downloaded from official releases and verified
+against pinned SHA-256 digests. Desktop packages include the notices above;
+container release evidence records installed package notices and versions.
+See docs/model-terms.md and docs/linux-release-review.md for distribution constraints.

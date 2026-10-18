@@ -1,11 +1,8 @@
 # syntax=docker/dockerfile:1
-# Reusable Linux dependencies and self-contained pinned engine runtime.
-# Desktop installers keep engines user-installed; this Docker image includes them.
-ARG CUDA_VERSION=12.8.1
 FROM ubuntu:24.04 AS spirula-download
 ARG TARGETARCH
-ARG SPIRULA_VERSION=2026.9.30
-ARG SPIRULA_SHA256=123d6d0b826388abb64129b6fcf2a8d34fe0662a57ba34e53212a148c891431d
+ARG SPIRULA_VERSION=2026.10.16
+ARG SPIRULA_SHA256=df5bb7acbfea63c16497c229b70c7a05ed13c22807554dee83cd6415aa411bf3
 RUN test "${TARGETARCH}" = amd64 \
     && apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip \
     && rm -rf /var/lib/apt/lists/*
@@ -17,127 +14,30 @@ RUN mkdir -p /opt/spirula && curl -fL --retry 3 \
     && executable="$(find /opt/spirula -type f -name spirula | head -1)" \
     && test -n "$executable" && chmod +x "$executable" \
     && if [ "$executable" != /opt/spirula/spirula ]; then ln -s "$executable" /opt/spirula/spirula; fi
-RUN printf '{"spirulaRelease":"v%s","spirulaArchiveSha256":"%s"}\n' \
-    "$SPIRULA_VERSION" "$SPIRULA_SHA256" > /opt/spirula/runtime-versions.json
-
-FROM ubuntu:24.04 AS densification-source
-ARG DENSIFICATION_PLUGIN_COMMIT=ab0b04e35b12bff65ee87bdaacfa3177c21521d6
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /opt/plugins \
-    && git init /opt/plugins/densification \
-    && git -C /opt/plugins/densification remote add origin https://github.com/shadygm/lichtfeld-densification-plugin.git \
-    && git -C /opt/plugins/densification fetch --depth 1 origin ${DENSIFICATION_PLUGIN_COMMIT} \
-    && git -C /opt/plugins/densification checkout --detach FETCH_HEAD \
-    && git -C /opt/plugins/densification submodule update --init --recursive \
-    && test "$(git -C /opt/plugins/densification rev-parse HEAD)" = "$DENSIFICATION_PLUGIN_COMMIT" \
-    && test -s /opt/plugins/densification/RoMaV2/src/romav2/romav2.py \
-    && git -C /opt/plugins/densification submodule status --recursive > /opt/plugins/densification/guerrilla-submodule-status.txt
+ARG ROMAV2_SHA256=1557dec0d21b62366465f7ff4d5fdf228cc695d0582e196ad2b80e05230828b7
+RUN mkdir -p /opt/models \
+    && curl -fL --retry 3 https://github.com/Parskatt/RoMaV2/releases/download/v2.0.1/romav2.0.1.pt -o /opt/models/romav2.0.1.pt \
+    && echo "${ROMAV2_SHA256}  /opt/models/romav2.0.1.pt" | sha256sum -c -
 
 FROM node:22.22.0-bookworm-slim AS converter
 WORKDIR /opt/converter
 COPY pipeline/docker/converter/package*.json ./
 RUN npm ci --omit=dev --ignore-scripts && node node_modules/@playcanvas/splat-transform/bin/cli.mjs --version
 
-FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04 AS common-runtime
-ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
-    NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,video \
-    PATH=/opt/venv/bin:${PATH}
+FROM ubuntu:24.04 AS spirula-runtime
+ENV DEBIAN_FRONTEND=noninteractive NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,video
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-venv ca-certificates ffmpeg libglib2.0-0t64 libgomp1 libgl1 \
+    ca-certificates ffmpeg libglib2.0-0t64 libgomp1 libgl1 libstdc++6 libgcc-s1 \
     libgtk-3-0t64 libx11-6 libxext6 libxrender1 libxi6 libxrandr2 libxinerama1 \
     libxcursor1 libsm6 libice6 libwayland-client0 libwayland-cursor0 libwayland-egl1 \
     libxkbcommon0 libegl1 libdecor-0-0 libdbus-1-3 libvulkan1 libopengl0 libgfortran5 \
-    vulkan-tools mesa-vulkan-drivers curl unzip \
-    && rm -rf /var/lib/apt/lists/* && python3 -m venv /opt/venv
-COPY packaging/python-linux-cuda.txt /opt/pipeline/requirements.txt
-RUN pip install --no-cache-dir --require-hashes --only-binary=:all: -r /opt/pipeline/requirements.txt
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=converter /usr/local/bin/node /usr/local/bin/node
 COPY --from=converter /opt/converter /opt/converter
-ENV SPLAT_TRANSFORM_BIN=/opt/converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs \
-    SPLAT_TRANSFORM_GPU_BACKEND=vulkan TORCH_HOME=/opt/models \
-    WORKER_AGENT_LOCK_DIRECTORY=/gpu GPU_LOCK_PATH=/gpu/pipeline.lock
-WORKDIR /opt/pipeline
-RUN node "$SPLAT_TRANSFORM_BIN" --version && node --version
-
-# RoMa and DINOv3 assets belong to the reconstruction dependency bundle, not
-# to an engine binary. Existing accepted model terms remain in docs/model-terms.md.
-FROM common-runtime AS model-runtime
-ARG ROMAV2_SHA256=3516ccdbbd8eb89d50dfc0bc4562ccdcc2c60b7908e1819d5aae0cbe1bf979bc
-RUN mkdir -p /opt/models/hub/checkpoints \
-    && curl -fL --retry 3 https://github.com/Parskatt/RoMaV2/releases/download/weights/romav2.pt \
-       -o /opt/models/hub/checkpoints/romav2.pt \
-    && echo "${ROMAV2_SHA256}  /opt/models/hub/checkpoints/romav2.pt" | sha256sum -c -
-# RoMa's pinned DINOv3 feature backbone loads repository code through torch.hub.
-# Bake that source too, so a cold worker needs no first-job GitHub download.
-ARG DINOV3_COMMIT=adc254450203739c8149213a7a69d8d905b4fcfa
-ARG DINOV3_SHA256=923e23a8cea28c9255fb3c2674ecea3dafc9dcc23259754ab7b91dd02f14d38a
-RUN curl -fL --retry 3 https://github.com/facebookresearch/dinov3/zipball/${DINOV3_COMMIT} \
-      -o /tmp/dinov3.zip \
-    && echo "${DINOV3_SHA256}  /tmp/dinov3.zip" | sha256sum -c - \
-    && unzip -q /tmp/dinov3.zip -d /tmp/dinov3 \
-    && mv /tmp/dinov3/facebookresearch-dinov3-* /opt/models/hub/facebookresearch_dinov3_${DINOV3_COMMIT} \
-    && touch /opt/models/hub/trusted_list \
-    && rm /tmp/dinov3.zip && rmdir /tmp/dinov3
-RUN pip freeze --all > /opt/pipeline/python-environment.txt \
-    && python -c "import hashlib,json; from pathlib import Path; json.dump({'reconstructionEngine':'guerrilla-pycolmap','pythonEnvironmentSha256':hashlib.sha256(Path('/opt/pipeline/python-environment.txt').read_bytes()).hexdigest()},open('/opt/pipeline/runtime-versions.json','w'))"
-
-
-# The typed build helper downloads and verifies the existing public release into
-# this named context. Binding avoids persisting the compressed archive in layers.
-FROM common-runtime AS lichtfeld-engine
-ARG TARGETARCH
-ARG LICHTFELD_SHA256
-ARG LICHTFELD_METADATA_SHA256=9dd22e1bb5a752687c5fe4c6450bd855713f57ba9c90278ad5a928ba956d8b43
-ARG LICHTFELD_CHECKSUMS_SHA256=35b6bca717fbbe0df64f6fe8cefee944a3da9ac77ed2713734950a54e1319cfd
-ARG LICHTFELD_RECIPE=d3e6d99ee12c02d9c87998f68ee09decdb45c3caea03197a410bdaae98b135c5
-ARG LICHTFELD_RELEASE_URL
-RUN --mount=type=bind,from=lichtfeld-artifact,source=/,target=/artifact,readonly \
-    test "${TARGETARCH}" = amd64 && test "${#LICHTFELD_SHA256}" = 64 \
-    && echo "${LICHTFELD_SHA256}  /artifact/lichtfeld-linux-amd64.tar.gz" | sha256sum -c - \
-    && echo "${LICHTFELD_METADATA_SHA256}  /artifact/engine-artifact.json" | sha256sum -c - \
-    && echo "${LICHTFELD_CHECKSUMS_SHA256}  /artifact/SHA256SUMS.txt" | sha256sum -c - \
-    && python -c "import json,os; from pathlib import Path; m=json.loads(Path('/artifact/engine-artifact.json').read_text()); assert m['version']==1 and m['platform']=='linux-amd64' and m['cpuBaseline']=='x86-64-v3' and m['archive']=='lichtfeld-linux-amd64.tar.gz' and m['sha256']==os.environ['LICHTFELD_SHA256'] and m['recipe']==os.environ['LICHTFELD_RECIPE']" \
-    && tar -xzf /artifact/lichtfeld-linux-amd64.tar.gz -C /opt --no-same-owner \
-    && test -x /opt/lichtfeld/bin/run_lichtfeld.sh && test -s /opt/lichtfeld/bin/LichtFeld-Studio \
-    && test -s /opt/lichtfeld/bin/lichtfeld.cpython-312-x86_64-linux-gnu.so \
-    && mkdir -p /opt/lichtfeld/artifact-metadata \
-    && cp /artifact/engine-artifact.json /artifact/SHA256SUMS.txt /opt/lichtfeld/artifact-metadata/ \
-    && printf '%s\n' "$LICHTFELD_RELEASE_URL" > /opt/lichtfeld/artifact-metadata/release-url.txt
-
-# Explicit engine-free target remains useful for development, but is never the
-# normal combined image selected by build:docker.
-FROM model-runtime AS engine-free-runtime
-
-FROM common-runtime AS spirula-runtime
 COPY --from=spirula-download /opt/spirula /opt/spirula
-ENV SPIRULA_BIN=/opt/spirula/spirula
-RUN cp /opt/spirula/runtime-versions.json /opt/pipeline/runtime-versions.json \
-    && pip freeze --all > /opt/pipeline/python-environment.txt \
-    && /opt/spirula/spirula train --help >/dev/null
-
-FROM model-runtime AS lichtfeld-runtime
-COPY --from=lichtfeld-engine /opt/lichtfeld /opt/lichtfeld
-ARG DENSIFICATION_PLUGIN_COMMIT=ab0b04e35b12bff65ee87bdaacfa3177c21521d6
-COPY --from=densification-source /opt/plugins /opt/plugins
-ENV LICHTFELD_BIN=/opt/lichtfeld/bin/run_lichtfeld.sh \
-    LICHTFELD_DENSIFICATION_PLUGIN=/opt/plugins/densification \
-    LD_LIBRARY_PATH=/opt/lichtfeld/lib:${LD_LIBRARY_PATH}
-ARG LICHTFELD_SHA256
-ARG LICHTFELD_CHECKSUMS_SHA256=35b6bca717fbbe0df64f6fe8cefee944a3da9ac77ed2713734950a54e1319cfd
-ARG LICHTFELD_RECIPE=d3e6d99ee12c02d9c87998f68ee09decdb45c3caea03197a410bdaae98b135c5
-ARG LICHTFELD_RELEASE_URL
-ARG ROMAV2_SHA256=3516ccdbbd8eb89d50dfc0bc4562ccdcc2c60b7908e1819d5aae0cbe1bf979bc
-ARG DINOV3_COMMIT=adc254450203739c8149213a7a69d8d905b4fcfa
-ARG DINOV3_SHA256=923e23a8cea28c9255fb3c2674ecea3dafc9dcc23259754ab7b91dd02f14d38a
-RUN python -c "import hashlib,json,os; from pathlib import Path; p=Path('/opt/pipeline/runtime-versions.json'); v=json.loads(p.read_text()); v.update({'lichtfeldArtifactSha256':os.environ['LICHTFELD_SHA256'],'lichtfeldChecksumsSha256':os.environ['LICHTFELD_CHECKSUMS_SHA256'],'lichtfeldRecipe':os.environ['LICHTFELD_RECIPE'],'lichtfeldReleaseUrl':os.environ.get('LICHTFELD_RELEASE_URL',''),'lichtfeldDensificationPluginCommit':os.environ['DENSIFICATION_PLUGIN_COMMIT'],'romaWeightsSha256':os.environ['ROMAV2_SHA256'],'dinov3Commit':os.environ['DINOV3_COMMIT'],'dinov3SourceSha256':os.environ['DINOV3_SHA256']}); p.write_text(json.dumps(v,sort_keys=True)+'\n')" \
-    && python -c "import pycolmap,torch; assert pycolmap.__version__=='4.0.2' and pycolmap.has_cuda; assert torch.__version__=='2.7.1+cu128'"
-
-# The default enrolled image includes both engines; source/API bindings,
-# supporting libraries, plugins and cached model weights are already installed.
-FROM lichtfeld-runtime AS combined-runtime
-COPY --from=spirula-download /opt/spirula /opt/spirula
-ENV SPIRULA_BIN=/opt/spirula/spirula
-RUN python -c "import json; from pathlib import Path; p=Path('/opt/pipeline/runtime-versions.json'); v=json.loads(p.read_text()); v.update(json.loads(Path('/opt/spirula/runtime-versions.json').read_text())); p.write_text(json.dumps(v,sort_keys=True)+'\n')"
-COPY packaging/tests/test_container_engines.py /tmp/test_container_engines.py
-RUN python /tmp/test_container_engines.py && rm /tmp/test_container_engines.py
+COPY --from=spirula-download /opt/models /opt/models
+ENV SPIRULA_BIN=/opt/spirula/spirula SPIRULA_ROMA_MODEL=/opt/models/romav2.0.1.pt \
+    NODE_BIN=/usr/local/bin/node SPLAT_TRANSFORM_BIN=/opt/converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs \
+    SPLAT_TRANSFORM_GPU_BACKEND=vulkan WORKER_AGENT_LOCK_DIRECTORY=/gpu GPU_LOCK_PATH=/gpu/pipeline.lock
+RUN node "$SPLAT_TRANSFORM_BIN" --version && "$SPIRULA_BIN" --version \
+    && "$SPIRULA_BIN" dense --help >/dev/null

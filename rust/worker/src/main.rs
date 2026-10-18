@@ -20,6 +20,12 @@ struct Cli {
 enum Command {
     /// Download and verify GPU libraries and models into this profile's runtime directory.
     SetupRuntime,
+    /// Scan a video, URL, or image folder without enrolling a worker.
+    #[command(disable_help_flag = true)]
+    Scan {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     Status,
     Preflight,
     Enroll {
@@ -62,8 +68,17 @@ async fn run() -> Result<()> {
     } else {
         cli.command.unwrap_or(Command::Run)
     };
+    if matches!(command, Command::Run | Command::Start)
+        || matches!(&command, Command::Scan { args } if !args.iter().any(|arg| arg == "--help" || arg == "-h"))
+    {
+        guerrilla_worker::runtime_setup::ensure(&paths).await?;
+    }
     let value = match command {
         Command::SetupRuntime => guerrilla_worker::runtime_setup::install(&paths).await?,
+        Command::Scan { args } => {
+            guerrilla_worker::execution::scan(&paths, &args).await?;
+            return Ok(());
+        }
         Command::Status => serde_json::to_value(daemon::status(&paths)?)?,
         Command::Preflight => {
             let report = paths.preflight().await?;

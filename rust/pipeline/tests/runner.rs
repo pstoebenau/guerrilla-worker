@@ -36,6 +36,7 @@ impl Fixture {
         let binary = root.path().join("guerrilla-pipeline");
         fs::copy(env!("CARGO_BIN_EXE_guerrilla-pipeline"), &binary).unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(root.path().join("roma.pt"), b"fixture model").unwrap();
         let fixture = Self {
             root,
             input,
@@ -58,6 +59,7 @@ impl Fixture {
         let mut command = Command::new(self.root.path().join("guerrilla-pipeline"));
         command
             .env("SPIRULA_BIN", &self.engine)
+            .env("SPIRULA_ROMA_MODEL", self.root.path().join("roma.pt"))
             .env("LICHTFELD_BIN", self.root.path().join("absent-lichtfeld"))
             .env("SPLAT_TRANSFORM_BIN", &self.converter)
             .env("PYTHON", "python3")
@@ -124,7 +126,7 @@ fn completed_selective_resume_only_restores_export() {
     assert!(success, "{events:?}");
     let state = fixture.state();
     let input_sha = state["identity"]["inputSha256"].clone();
-    for name in ["selection", "reconstruction", "training"] {
+    for name in ["selection", "reconstruction", "densification", "training"] {
         fs::remove_dir_all(fixture.output.join(state["stages"][name].as_str().unwrap())).unwrap();
     }
     fs::remove_file(&fixture.input).unwrap();
@@ -494,7 +496,9 @@ fn interrupted_training_selectively_restores_checkpoint_and_relocated_dataset() 
     let final_state: Value =
         serde_json::from_slice(&fs::read(relocated.join("platform-state.json")).unwrap()).unwrap();
     let training = relocated.join(final_state["stages"]["training"].as_str().unwrap());
-    assert!(training.join("run/resumed-from").is_file());
+    let config = fs::read_to_string(training.join("final/config.json")).unwrap();
+    assert!(config.contains("\"resumed\": true"));
+    assert!(config.contains("Infinity"));
     assert!(restored.iter().any(|path| path.ends_with("/images")));
     assert!(restored
         .iter()
@@ -608,4 +612,237 @@ fn failed_latest_preview_preserves_the_previous_successful_preview() {
     assert!(!exclusions
         .iter()
         .any(|path| fixture.output.join(path.as_str().unwrap()) == previous));
+}
+
+#[test]
+fn native_dense_owns_its_dataset_and_discards_caches() {
+    let fixture = Fixture::new();
+    let (success, events) = fixture.run();
+    assert!(success, "{events:?}");
+    let state = fixture.state();
+    let reconstruction = fixture
+        .output
+        .join(state["stages"]["reconstruction"].as_str().unwrap());
+    let dense = fixture
+        .output
+        .join(state["stages"]["densification"].as_str().unwrap());
+    assert!(!reconstruction.join("dense").exists());
+    assert!(reconstruction.join("images/0.jpg").is_file());
+    assert!(dense.join("images/0.jpg").is_file());
+    assert!(dense.join("sparse/0/cameras.bin").is_file());
+    assert!(dense.join("dense/current.json").is_file());
+    assert!(dense
+        .join("dense/generations/fixture-generation/roma.ply")
+        .is_file());
+    for name in [
+        "selection",
+        "reconstruction",
+        "densification",
+        "training",
+        "export",
+    ] {
+        let stage = &state["completed"][name];
+        assert!(stage["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file["path"].as_str().unwrap().ends_with("/stage.log")));
+        let log = fixture
+            .output
+            .join(stage["directory"].as_str().unwrap())
+            .join("stage.log");
+        assert!(fs::metadata(log).unwrap().len() <= 8193);
+    }
+    for name in ["cache", "progress", "perf"] {
+        assert!(!dense.join("dense").join(name).exists());
+    }
+    let result = events.last().unwrap();
+    assert!(fixture
+        .output
+        .join(result["sog"].as_str().unwrap())
+        .is_file());
+    assert!(fixture
+        .output
+        .join(result["spz"].as_str().unwrap())
+        .is_file());
+    assert_eq!(result["gaussians"], 4);
+}
+
+#[test]
+fn disabled_dense_trains_from_completed_sparse_dataset() {
+    let fixture = Fixture::new();
+    fixture
+        .write(json!({"settings":{"densification":{"enabled":false},"training":{"iterations":2}}}));
+    let (success, events) = fixture.run();
+    assert!(success, "{events:?}");
+    let state = fixture.state();
+    assert!(state["completed"].get("densification").is_none());
+    assert!(state["completed"].get("reconstruction").is_some());
+    assert!(!events.iter().any(|event| event["stage"] == "densification"));
+}
+
+#[test]
+fn interrupted_dense_restarts_and_preserves_completed_reconstruction() {
+    let fixture = Fixture::new();
+    let output = fixture
+        .command()
+        .env("FIXTURE_FAIL_DENSE", "1")
+        .args(["--request", fixture.request.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let before = fixture.state();
+    assert!(before["completed"].get("reconstruction").is_some());
+    assert!(before["completed"].get("densification").is_none());
+    let partial = fixture
+        .output
+        .join(before["stages"]["densification"].as_str().unwrap());
+    fixture.write(json!({"resume":true}));
+    let (success, events) = fixture.run();
+    assert!(success, "{events:?}");
+    assert_eq!(
+        fixture.state()["completed"]["reconstruction"],
+        before["completed"]["reconstruction"]
+    );
+    assert_ne!(
+        fixture.state()["stages"]["densification"],
+        before["stages"]["densification"]
+    );
+    assert!(!partial.exists());
+}
+
+#[test]
+fn incomplete_or_inference_only_training_checkpoints_cannot_complete() {
+    for key in ["FIXTURE_INFERENCE_ONLY", "FIXTURE_TRUNCATE_CHECKPOINT"] {
+        let fixture = Fixture::new();
+        let output = fixture
+            .command()
+            .env(key, "1")
+            .args(["--request", fixture.request.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{key}");
+        let events = String::from_utf8(output.stdout).unwrap();
+        assert!(events.contains("no full resume checkpoint"), "{events}");
+        assert!(fixture.state()["completed"].get("training").is_none());
+        assert!(fixture.state()["completed"].get("reconstruction").is_some());
+    }
+}
+
+#[test]
+fn spz_count_mismatch_prevents_completion() {
+    let fixture = Fixture::new();
+    let output = fixture
+        .command()
+        .env("FIXTURE_SPZ_DELTA", "-1")
+        .args(["--request", fixture.request.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("Export Gaussian counts disagree"));
+    assert!(fixture.state()["completed"].get("export").is_none());
+}
+
+#[test]
+fn standalone_image_folder_scan_resumes_and_rejects_changed_source() {
+    let fixture = Fixture::new();
+    let images = fixture.root.path().join("photos");
+    fs::create_dir_all(&images).unwrap();
+    for index in 0..3 {
+        fs::write(images.join(format!("{index}.jpg")), b"input image").unwrap();
+    }
+    let args = [
+        "scan",
+        images.to_str().unwrap(),
+        "--output",
+        fixture.output.to_str().unwrap(),
+        "--max-cap",
+        "4",
+        "--no-densification",
+    ];
+    let output = fixture
+        .command()
+        .env("FIXTURE_FAIL_SELECTION", "1")
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let state = fixture.state();
+    assert!(state["completed"].get("densification").is_none());
+    assert_eq!(state["result"]["gaussians"], 4);
+    let output = fixture
+        .command()
+        .args(args)
+        .arg("--resume")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    fs::write(images.join("0.jpg"), b"changed input").unwrap();
+    let output = fixture
+        .command()
+        .args(args)
+        .arg("--resume")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .contains("Resume input, settings, cap or engine versions changed"));
+}
+
+#[test]
+fn standalone_video_url_download_is_durable_and_reused_on_resume() {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
+    let fixture = Fixture::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut request = [0; 4096];
+        let _ = socket.read(&mut request);
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: 14\r\nConnection: close\r\n\r\nsource fixture").unwrap();
+    });
+    let url = format!("http://{address}/video");
+    let args = [
+        "scan",
+        &url,
+        "--output",
+        fixture.output.to_str().unwrap(),
+        "--max-cap",
+        "4",
+    ];
+    let output = fixture.command().args(args).output().unwrap();
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        fs::read(fixture.output.join(".worker/input/source.mp4")).unwrap(),
+        b"source fixture"
+    );
+    let output = fixture
+        .command()
+        .args(args)
+        .arg("--resume")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }

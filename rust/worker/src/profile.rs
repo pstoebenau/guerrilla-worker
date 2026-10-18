@@ -15,13 +15,9 @@ use std::{
 pub struct Profile {
     pub control_url: String,
     pub scratch_directory: String,
-    pub python_path: String,
     pub ffmpeg_path: String,
     pub node_path: String,
     pub converter_path: String,
-    pub lichtfeld_path: String,
-    pub densification_plugin_path: String,
-    pub spirula_path: String,
     pub start_at_login: bool,
 }
 #[derive(Clone)]
@@ -114,55 +110,19 @@ impl ContextPaths {
     }
     pub fn command(&self) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(&self.pipeline);
-        command
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .env("PYTHONDONTWRITEBYTECODE", "1")
-            .env("PYTHONUNBUFFERED", "1")
-            .env("PYTHONNOUSERSITE", "1");
-        // Bundled bindings and converter imports must not depend on the user's shell setup.
-        // Keep engine paths and native-library search paths inherited for user-installed engines.
+        command.stdin(Stdio::null()).kill_on_drop(true);
         for key in [
-            "PYTHONHOME",
-            "PYTHONPATH",
-            "PYTHONUSERBASE",
-            "PYTHONSTARTUP",
-            "PYTHONINSPECT",
-            "PYTHONPLATLIBDIR",
-            "PYTHONEXECUTABLE",
-            "__PYVENV_LAUNCHER__",
             "NODE_OPTIONS",
             "NODE_PATH",
+            "PYTHONHOME",
+            "PYTHONPATH",
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
         ] {
             command.env_remove(key);
         }
         let runtime = self.runtime_root();
-        let installed = guerrilla_runtime::installed(&runtime, &self.state);
-        let managed_python = self.profile.python_path
-            == guerrilla_runtime::python(&runtime).to_string_lossy()
-            || self.profile.python_path.is_empty() && std::env::var_os("PYTHON").is_none()
-            || installed.as_ref().is_some_and(|gpu| {
-                self.profile.python_path == guerrilla_runtime::python(gpu).to_string_lossy()
-            });
-        let gpu = installed.filter(|_| managed_python);
-        let selected_python = gpu
-            .as_ref()
-            .map(|root| {
-                guerrilla_runtime::python(root)
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .unwrap_or_else(|| self.profile.python_path.clone());
-        let configs = [
-            (
-                "PYTHON",
-                &selected_python,
-                if cfg!(windows) {
-                    "python/python.exe"
-                } else {
-                    "python/bin/python3"
-                },
-            ),
+        for (key, value, fallback) in [
             (
                 "FFMPEG",
                 &self.profile.ffmpeg_path,
@@ -186,38 +146,26 @@ impl ContextPaths {
                 &self.profile.converter_path,
                 "converter/node_modules/@playcanvas/splat-transform/bin/cli.mjs",
             ),
-        ];
-        for (key, value, fallback) in configs {
-            if !value.is_empty() {
-                command.env(key, value);
-            } else if std::env::var_os(key).is_none() && runtime.join(fallback).exists() {
-                command.env(key, runtime.join(fallback));
-            }
-        }
-        for (key, value) in [
-            ("LICHTFELD_BIN", &self.profile.lichtfeld_path),
-            (
-                "LICHTFELD_DENSIFICATION_PLUGIN",
-                &self.profile.densification_plugin_path,
-            ),
-            ("SPIRULA_BIN", &self.profile.spirula_path),
         ] {
             if !value.is_empty() {
                 command.env(key, value);
+            } else if std::env::var_os(key).is_none() && runtime.join(fallback).is_file() {
+                command.env(key, runtime.join(fallback));
             }
         }
-        command.env_remove("WORKER_GPU_RUNTIME_ROOT");
-        let model_runtime = gpu.as_ref().unwrap_or(&runtime);
-        if let Some(gpu) = &gpu {
-            command.env("WORKER_GPU_RUNTIME_ROOT", gpu);
-        }
-        if model_runtime.join("models").exists() && std::env::var_os("TORCH_HOME").is_none() {
-            command.env("TORCH_HOME", model_runtime.join("models"));
+        if let Some(managed) = guerrilla_runtime::runtime(&runtime, &self.state) {
+            if std::env::var_os("SPIRULA_BIN").is_none() {
+                command.env("SPIRULA_BIN", managed.executable);
+            }
+            if std::env::var_os("SPIRULA_ROMA_MODEL").is_none() {
+                command.env("SPIRULA_ROMA_MODEL", managed.model);
+            }
         }
         if runtime.join("windows-crt").is_dir() {
             command.env("WORKER_CRT_ROOT", runtime.join("windows-crt"));
         }
         let mut paths: Vec<PathBuf> = [
+            runtime.join("windows-crt"),
             runtime.join("ffmpeg"),
             runtime.join(if cfg!(windows) { "node" } else { "node/bin" }),
         ]
@@ -273,17 +221,15 @@ impl ContextPaths {
             bail!("Exactly one usable hardware GPU is required");
         }
         let mut engines = std::collections::BTreeMap::new();
-        for engine in ["spirula", "lichtfeld"] {
-            let capability = &report["backends"][engine];
-            if capability["available"] == true {
-                let versions: std::collections::BTreeMap<String, String> =
-                    serde_json::from_value(capability["runtimeVersions"].clone())
-                        .context("Engine runtime identity missing")?;
-                engines.insert(
-                    engine.into(),
-                    hex::encode(Sha256::digest(serde_json::to_vec(&versions)?)),
-                );
-            }
+        let capability = &report["backends"]["spirula"];
+        if capability["available"] == true {
+            let versions: std::collections::BTreeMap<String, String> =
+                serde_json::from_value(capability["runtimeVersions"].clone())
+                    .context("Engine runtime identity missing")?;
+            engines.insert(
+                "spirula".into(),
+                hex::encode(Sha256::digest(serde_json::to_vec(&versions)?)),
+            );
         }
         Ok(Registration {
             healthy: !engines.is_empty(),

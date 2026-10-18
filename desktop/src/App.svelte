@@ -85,18 +85,17 @@
   }
   async function selectPage(next: Page) { page = next; token = ''; document.getElementById('main-content')?.scrollTo({ top: 0 }); if (next === 'logs') await refresh(); }
   async function installRuntime() {
-    await perform('Installing GPU dependencies…', async () => {
+    await perform('Installing runtime…', async () => {
       installingRuntime = true;
       try {
         info = await api.installGpuRuntime();
-        if (profile) profile.pythonPath = info.profile.pythonPath;
         check = null;
-        notice = 'GPU dependencies are installed and verified. Save and check dependencies to test your selected engine.';
+        notice = 'Spirula and its reconstruction model are installed and verified.';
       } finally { installingRuntime = false; }
     });
   }
-  function showDialog(node: HTMLDialogElement) { node.showModal(); return { destroy: () => node.close() }; }
-  function engineName(name: string) { return name.toLowerCase() === 'lichtfeld' ? 'LichtFeld' : name.toLowerCase() === 'spirula' ? 'Spirula' : name; }
+  function showDialog(node: HTMLDialogElement) { node.showModal(); return () => node.close(); }
+  function engineName(name: string) { return name.toLowerCase() === 'spirula' ? 'Spirula' : name; }
   function stageName(stage?: string) { return stage ? stage.replace(/[_-]/g, ' ').replace(/^./, c => c.toUpperCase()) : 'Waiting for a job'; }
 
   onMount(() => {
@@ -135,7 +134,7 @@
     <div class="connection"><span class="dot" class:online={status?.connected}></span><span>{nativeAvailable ? status?.connected ? 'Connected' : 'Not connected' : 'Browser preview'}</span></div>
   </header>
   <nav aria-label="Worker navigation">
-    {#each [{ id: 'overview', title: 'Overview', icon: 'overview' }, { id: 'setup', title: 'Setup', icon: 'settings' }, { id: 'logs', title: 'Logs', icon: 'logs' }] as item}
+    {#each [{ id: 'overview', title: 'Overview', icon: 'overview' }, { id: 'setup', title: 'Setup', icon: 'settings' }, { id: 'logs', title: 'Logs', icon: 'logs' }] as item (item.id)}
       <button class:active={page === item.id} aria-current={page === item.id ? 'page' : undefined} onclick={() => selectPage(item.id as Page)}><Icon name={item.icon as IconName} size={15} />{item.title}</button>
     {/each}
     <button class="server-link" disabled={!nativeAvailable || !!busy} onclick={() => perform('Opening server…', api.openServer)}>Open server <Icon name="external" size={13} /></button>
@@ -178,50 +177,36 @@
               {#if status.jobId}<p class="job-id">Job {status.jobId}</p>{/if}
             {:else}<div class="empty-job"><div><strong>{running ? 'Waiting for the next job' : 'No active job'}</strong></div></div>{/if}
           </section>
-          <div class="machine-columns"><section><div class="section-heading"><h3><Icon name="gpu" size={17} />Graphics</h3></div>{#if displayGpus.length}{#each displayGpus as gpu}<div class="resource-row"><strong>{gpu.name}</strong><span>{gpu.memoryMb ? `${(gpu.memoryMb / 1024).toFixed(1)} GB VRAM` : 'Detected'}</span></div>{/each}{:else}<p class="muted">{check ? 'No compatible GPU detected.' : 'Not checked yet.'}</p>{/if}</section>
-          <section><div class="section-heading"><h3><Icon name="engine" size={17} />Engines</h3><button class="text-button" disabled={!!busy || unavailable} onclick={() => perform('Checking dependencies…', async () => { check = await api.preflight(); })}>Check</button></div>{#if displayEngines.length}{#each displayEngines as engine}<div class="resource-row"><strong>{engineName(engine.name)}</strong><span class:ready={engine.available}>{engine.available ? 'Available' : 'Unavailable'}</span></div>{/each}{:else}<p class="muted">Not checked yet.</p>{/if}</section></div>
+          <div class="machine-columns"><section><div class="section-heading"><h3><Icon name="gpu" size={17} />Graphics</h3></div>{#if displayGpus.length}{#each displayGpus as gpu (gpu.uuid ?? gpu.name)}<div class="resource-row"><strong>{gpu.name}</strong><span>{gpu.memoryMb ? `${(gpu.memoryMb / 1024).toFixed(1)} GB VRAM` : 'Detected'}</span></div>{/each}{:else}<p class="muted">{check ? 'No compatible GPU detected.' : 'Not checked yet.'}</p>{/if}</section>
+          <section><div class="section-heading"><h3><Icon name="engine" size={17} />Engines</h3><button class="text-button" disabled={!!busy || unavailable} onclick={() => perform('Checking dependencies…', async () => { check = await api.preflight(); })}>Check</button></div>{#if displayEngines.length}{#each displayEngines as engine (engine.name)}<div class="resource-row"><strong>{engineName(engine.name)}</strong><span class:ready={engine.available}>{engine.available ? 'Available' : 'Unavailable'}</span></div>{/each}{:else}<p class="muted">Not checked yet.</p>{/if}</section></div>
           <footer class="workspace-footer"><span>Jobs keep running while the app is in the tray.</span><button class="text-button" disabled={!nativeAvailable || !!busy} onclick={() => perform('Stopping jobs and quitting…', api.quit)}>Quit and stop all jobs</button></footer>
 
         {:else if page === 'setup'}
           {#if profile}
-            <section class="settings-section enrollment"><div class="section-heading"><h3>Enrollment</h3>{#if info?.enrolled}<span class="ready">Enrolled</span>{/if}</div><p class="field-help">Server: {profile.controlUrl}</p>{#if info?.enrolled}<p class="muted">Worker {status?.workerId ?? 'identity saved'}. Disconnect removes this computer’s enrollment and keeps checkpoints.</p><button disabled={!!busy || running} onclick={() => disconnectOpen = true}>Disconnect worker…</button>{:else}<label for="token">Enrollment token</label><input id="token" type="password" autocomplete="off" spellcheck="false" maxlength="4096" bind:value={token} disabled={!!busy || !nativeAvailable} placeholder="Paste a token from the server’s Workers page"/><p class="field-help">The token is used once for enrollment and is never saved in settings.</p><div class="actions"><button class="primary" disabled={!!busy || !nativeAvailable || !token.trim()} onclick={() => { const secret = token; token = ''; void perform('Enrolling worker…', async () => { status = await api.enroll(secret, profile!.controlUrl); await reloadInfo(); await selectPage('overview'); notice = 'Worker enrolled. Configure engines and start the worker when ready.'; }); }}>Enroll worker</button><button disabled={!!busy || !nativeAvailable} onclick={() => perform('Opening server…', api.openServer)}>Open server ↗</button></div>{/if}</section>
+            <section class="settings-section enrollment"><div class="section-heading"><h3>Enrollment</h3>{#if info?.enrolled}<span class="ready">Enrolled</span>{/if}</div><p class="field-help">Server: {profile.controlUrl}</p>{#if info?.enrolled}<p class="muted">Worker {status?.workerId ?? 'identity saved'}. Disconnect removes this computer’s enrollment and keeps checkpoints.</p><button disabled={!!busy || running} onclick={() => disconnectOpen = true}>Disconnect worker…</button>{:else}<label for="token">Enrollment token</label><input id="token" type="password" autocomplete="off" spellcheck="false" maxlength="4096" bind:value={token} disabled={!!busy || !nativeAvailable} placeholder="Paste a token from the server’s Workers page"/><p class="field-help">The token is used once for enrollment and is never saved in settings.</p><div class="actions"><button class="primary" disabled={!!busy || !nativeAvailable || !token.trim()} onclick={() => { const secret = token; token = ''; void perform('Enrolling worker…', async () => { status = await api.enroll(secret, profile!.controlUrl); await reloadInfo(); await selectPage('overview'); notice = 'Worker enrolled. Start the worker when ready.'; }); }}>Enroll worker</button><button disabled={!!busy || !nativeAvailable} onclick={() => perform('Opening server…', api.openServer)}>Open server ↗</button></div>{/if}</section>
             <form onsubmit={(e) => { e.preventDefault(); void perform('Saving settings…', async () => { await save(); notice = 'Settings saved.'; }); }}>
 
               {#if info?.gpuRuntime.supported}
-                <section class="settings-section"><div class="section-heading"><div><h3>GPU dependencies</h3><p>{info.gpuRuntime.installed ? 'GPU libraries and reconstruction models are installed on this computer.' : 'Install GPU libraries and reconstruction models for NVIDIA scanning. Downloads need internet and at least 27 GB of free disk space.'}</p></div></div><div class="actions"><button type="button" disabled={!!busy || running || unavailable} onclick={installRuntime}>{info.gpuRuntime.installed ? 'Verify installation' : 'Install GPU dependencies'}</button><span class="muted">{info.gpuRuntime.installed ? 'Installed and verified' : 'One-time setup · several GB'}</span></div></section>
+                <section class="settings-section"><div class="section-heading"><div><h3>Spirula runtime</h3><p>{info.gpuRuntime.installed ? 'Spirula and its reconstruction model are installed on this computer.' : 'Install Spirula and its reconstruction model for scanning. The initial download is about 1.2 GB.'}</p></div></div><div class="actions"><button type="button" disabled={!!busy || running || unavailable} onclick={installRuntime}>Install / repair runtime</button><span class="muted">{info.gpuRuntime.installed ? 'Installed' : 'Internet required for initial setup'}</span></div></section>
               {/if}
 
-              <section class="settings-section"><div class="section-heading"><div><h3>Installed engines</h3><p>Link an engine installed on this computer. Common locations are detected automatically; choose Detect to search again.</p></div><button type="button" class="text-button" disabled={!!busy || running} onclick={() => perform('Detecting engines…', async () => { const found = await api.detect(); if (profile) { for (const key of ['lichtfeldPath', 'spirulaPath', 'densificationPluginPath'] as const) if (found[key]) profile[key] = found[key]; } notice = 'Detection complete. Review the engine paths below.'; })}>Detect</button></div>
-                <p class="field-help">Need an engine? Download it for {info?.platform === 'macos' ? 'Apple Silicon macOS' : info?.platform === 'windows' ? 'Windows x64' : 'Linux x64'}, install it, then return here to link it. You only need one compatible engine.</p>
-                <div class="engine-download-links">
-                  <button type="button" class="text-button" disabled={!!busy || !nativeAvailable} onclick={() => perform('Opening Spirula downloads…', () => api.openEngineDownload('spirula'))}>Download Spirula ↗</button>
-                  {#if info?.platform === 'windows' || info?.platform === 'linux'}
-                    <button type="button" class="text-button" disabled={!!busy || !nativeAvailable} onclick={() => perform('Opening LichtFeld…', () => api.openEngineDownload('lichtfeld'))}>{info.platform === 'windows' ? 'Download LichtFeld (paid portal)' : 'LichtFeld Linux installation'} ↗</button>
-                    <button type="button" class="text-button" disabled={!!busy || !nativeAvailable} onclick={() => perform('Opening plugin instructions…', () => api.openEngineDownload('densification'))}>LichtFeld densification plugin ↗</button>
-                  {/if}
-                </div>
-                <p class="field-help">If detection misses your engine, choose Browse… next to its executable below, or paste the full local path. On macOS, the Spirula executable is inside Spirula Studio.app/Contents/MacOS/spirula. For LichtFeld densification, select the installed plugin folder too. Choose Save and check dependencies when ready.</p>
-                {#each [{ field: 'lichtfeldPath', label: 'LichtFeld executable', optional: false }, { field: 'spirulaPath', label: 'Spirula executable', optional: false }, { field: 'densificationPluginPath', label: 'LichtFeld densification folder', optional: true }] as setting}
-                  <div class="path-field"><label for={setting.field}>{setting.label}{setting.optional ? ' (optional)' : ''}</label><div><input id={setting.field} bind:value={profile[setting.field as BrowseField]} disabled={!!busy || running} placeholder="Select an existing installation"/><button type="button" disabled={!!busy || running} onclick={() => browse(setting.field as BrowseField)}>Browse…</button></div></div>
-                {/each}
-              </section>
               <section class="settings-section"><div class="section-heading"><h3>Startup</h3></div><label class="checkbox-label"><input type="checkbox" bind:checked={profile.startAtLogin} disabled={!!busy || running}/><span>Start worker when I log in</span></label></section>
-            {#if check}<section class="check-results"><h3>Dependency check</h3>{#if check.message}<p>{check.message}</p>{/if}{#each [...(check.checks ?? []), ...(check.engines ?? [])] as result}<div class="resource-row"><div><strong>{engineName(result.name)}</strong>{#if result.message}<p>{result.message}</p>{/if}</div><span class:ready={result.available}>{result.available ? 'Available' : 'Needs attention'}</span></div>{/each}{#if !check.gpus?.length}<p class="muted">No compatible GPU was detected.</p>{/if}</section>{/if}
+            {#if check}<section class="check-results"><h3>Dependency check</h3>{#if check.message}<p>{check.message}</p>{/if}{#each [...(check.checks ?? []), ...(check.engines ?? [])] as result (result.name)}<div class="resource-row"><div><strong>{engineName(result.name)}</strong>{#if result.message}<p>{result.message}</p>{/if}</div><span class:ready={result.available}>{result.available ? 'Available' : 'Needs attention'}</span></div>{/each}{#if !check.gpus?.length}<p class="muted">No compatible GPU was detected.</p>{/if}</section>{/if}
               <details class="advanced-settings" bind:open={advancedOpen}>
                 <summary>Advanced <span>Server and storage</span></summary>
               <div class="advanced-field"><label for="server">Server URL</label><input id="server" type="url" oninvalid={() => advancedOpen = true} bind:value={profile.controlUrl} disabled={!!busy || running || info?.enrolled} required placeholder="https://guerrilla.dad"/><p class="field-help">{info?.enrolled ? 'Stop and disconnect to change servers.' : 'The server that assigns jobs to this worker.'}</p></div>
                 <div class="path-field"><label for="scratch">Scratch folder</label><div><input id="scratch" bind:value={profile.scratchDirectory} disabled={!!busy || running} required oninvalid={() => advancedOpen = true}/><button type="button" disabled={!!busy || running} onclick={() => browse('scratchDirectory')}>Browse…</button></div><p class="field-help">Working files and retained checkpoints. Leave this at its default unless you need a different disk.</p></div>
               </details>
 
-              <div class="actions save-actions"><button type="submit" class="primary" disabled={!!busy || running}>Save settings</button><button type="button" disabled={!!busy || running || unavailable} onclick={() => perform('Checking dependencies…', async () => { await save(); check = await api.preflight(); notice = check.ok ? 'Dependency check complete. A supported engine is available.' : 'Dependency check needs attention. Review the results below.'; })}>Save and check dependencies</button>{#if running}<span class="muted">Stop the worker to change settings.</span>{/if}</div>
+              <div class="actions save-actions"><button type="submit" class="primary" disabled={!!busy || running}>Save settings</button><button type="button" disabled={!!busy || running || unavailable} onclick={() => perform('Checking dependencies…', async () => { await save(); check = await api.preflight(); notice = check.ok ? 'Dependency check complete. Spirula is ready.' : 'Dependency check needs attention. Review the results below.'; })}>Save and check dependencies</button>{#if running}<span class="muted">Stop the worker to change settings.</span>{/if}</div>
             </form>
 
 
-          {:else}<section class="setup-unavailable"><h2>Setup requires the desktop app</h2><p>Choose a server, select your engines, and paste an enrollment token there.</p></section>{/if}
+          {:else}<section class="setup-unavailable"><h2>Setup requires the desktop app</h2><p>Choose a server, install the runtime, and paste an enrollment token there.</p></section>{/if}
 
         {:else}
           <div class="section-heading"><h3>Worker logs <span class="log-count">{logs.length} / 200 lines</span></h3><button disabled={!!busy || !nativeAvailable} onclick={() => perform('Refreshing logs…', async () => { const result = await api.logs(); logs = result.lines.slice(-200); logsLoaded = true; })}>Refresh</button></div>
-          <!-- svelte-ignore a11y_no_noninteractive_tabindex (Scrollable output must be keyboard accessible.) -->
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
           <pre class="log-output" role="region" tabindex="0" aria-label="Worker log output">{logs.length ? logs.join('\n') : logsLoaded ? 'No worker output yet.' : nativeAvailable ? 'Loading worker logs…' : 'Worker logs are available in the desktop app.'}</pre>
           <div class="workspace-footer"><span>{info?.profileDirectory ?? 'Logs stay on this computer.'}</span><button class="text-button" disabled={!nativeAvailable || !!busy} onclick={() => perform('Opening data folder…', api.openData)}>Open data folder ↗</button></div>
         {/if}
@@ -232,7 +217,7 @@
     <span>{info ? `v${info.version}` : 'Guerrilla Worker'}</span>
     {#if busy}<span class="pending" role="status">{busy}</span>{/if}
     <div class="theme-switch" role="group" aria-label="Appearance">
-      {#each [{ value: 'light', icon: 'sun', label: 'Light' }, { value: 'system', icon: 'monitor', label: 'System' }, { value: 'dark', icon: 'moon', label: 'Dark' }] as option}
+      {#each [{ value: 'light', icon: 'sun', label: 'Light' }, { value: 'system', icon: 'monitor', label: 'System' }, { value: 'dark', icon: 'moon', label: 'Dark' }] as option (option.value)}
         <button aria-label={`${option.label} theme`} title={`${option.label} theme`} aria-pressed={theme === option.value} onclick={() => setTheme(option.value as Theme)}><Icon name={option.icon as IconName} size={14} /></button>
       {/each}
     </div>
@@ -240,5 +225,5 @@
 </div>
 
 {#if disconnectOpen || stopOpen}
-  <dialog class="modal" aria-labelledby="confirm-title" aria-describedby="confirm-description" use:showDialog oncancel={() => { disconnectOpen = false; stopOpen = false; }}><h2 id="confirm-title">{disconnectOpen ? 'Disconnect this worker?' : 'Stop the current job?'}</h2><p id="confirm-description">{disconnectOpen ? 'Saved enrollment will be removed. Checkpoints stay on this computer. You can revoke the old identity on the server’s Workers page.' : 'Execution will stop using the worker’s shutdown process. Verified checkpoints remain available for recovery. To finish this job first, choose pause instead.'}</p><div class="actions"><button class="primary" onclick={() => doAction(disconnectOpen ? 'disconnect' : 'stop')}>{disconnectOpen ? 'Disconnect' : 'Stop worker'}</button><button onclick={() => { disconnectOpen = false; stopOpen = false; }}>Cancel</button>{#if stopOpen}<button onclick={() => doAction('drain')}>Finish job, then pause</button>{/if}</div></dialog>
+  <dialog class="modal" aria-labelledby="confirm-title" aria-describedby="confirm-description" {@attach showDialog} oncancel={() => { disconnectOpen = false; stopOpen = false; }}><h2 id="confirm-title">{disconnectOpen ? 'Disconnect this worker?' : 'Stop the current job?'}</h2><p id="confirm-description">{disconnectOpen ? 'Saved enrollment will be removed. Checkpoints stay on this computer. You can revoke the old identity on the server’s Workers page.' : 'Execution will stop using the worker’s shutdown process. Verified checkpoints remain available for recovery. To finish this job first, choose pause instead.'}</p><div class="actions"><button class="primary" onclick={() => doAction(disconnectOpen ? 'disconnect' : 'stop')}>{disconnectOpen ? 'Disconnect' : 'Stop worker'}</button><button onclick={() => { disconnectOpen = false; stopOpen = false; }}>Cancel</button>{#if stopOpen}<button onclick={() => doAction('drain')}>Finish job, then pause</button>{/if}</div></dialog>
 {/if}

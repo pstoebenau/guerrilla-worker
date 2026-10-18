@@ -13,10 +13,12 @@ test('malformed status cannot silently show idle', () => {
   expect(() => parseStatus({ state: 'anything', connected: true })).toThrow('unknown state');
 });
 test('preflight reports missing engine reasons and requires one GPU', () => {
-  const raw = { backends: { lichtfeld: { available: false, error: 'Engine not installed' }, spirula: { available: true } }, gpus: [{ name: 'GPU', memoryBytes: 8 * 1024 ** 3 }] };
+  const raw = { backends: { spirula: { available: true } }, gpus: [{ name: 'GPU', memoryBytes: 8 * 1024 ** 3 }] };
   const report = parsePreflight(raw);
   expect(report.ok).toBe(true);
-  expect(report.engines?.[0]?.message).toBe('Engine not installed');
+  const missing = parsePreflight({ backends: { spirula: { available: false, error: 'Spirula runtime is missing' } }, gpus: raw.gpus });
+  expect(missing.ok).toBe(false);
+  expect(missing.engines?.[0]?.message).toBe('Spirula runtime is missing');
   expect(parsePreflight({ ...raw, gpus: [] }).ok).toBe(false);
   expect(parsePreflight({ ...raw, gpus: [...raw.gpus, ...raw.gpus] }).ok).toBe(false);
 });

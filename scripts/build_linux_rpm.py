@@ -1,4 +1,4 @@
-"""Stream the complete Tauri DEB filesystem into an RPM without buffering CUDA in RAM."""
+"""Stream the complete Tauri DEB filesystem into an RPM without buffering the complete payload in RAM."""
 import argparse
 from pathlib import Path
 import re
@@ -36,7 +36,7 @@ Requires: gtk3, webkit2gtk4.1
 
 %description
 Guerrilla Worker management app with native sidecars and supporting runtimes.
-LichtFeld and Spirula are installed separately by the owner.
+Spirula and its reconstruction model are installed automatically on first use.
 
 %files
 %defattr(-,root,root,-)

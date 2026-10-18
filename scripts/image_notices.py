@@ -5,7 +5,6 @@ Run through inventory.py, which saves this stream outside the checkout.
 """
 import gzip
 import hashlib
-import importlib.metadata
 import io
 import json
 from pathlib import Path
@@ -45,36 +44,20 @@ def add_document(archive, path, root, records, problems):
 
 
 def main():
-    records, problems, packages = {}, [], []
+    records, problems = {}, []
+    prefix = Path(sys.argv[1]) if len(sys.argv) > 1 else Path('/')
     with gzip.GzipFile(fileobj=sys.stdout.buffer, mode='wb', mtime=0) as zipped, \
             tarfile.open(fileobj=zipped, mode='w|') as archive:
-        for root in map(Path, ['/usr/share/doc', '/opt/lichtfeld', '/opt/spirula',
-                               '/opt/plugins', '/opt/converter/node_modules', '/usr/local/cuda']):
+        for relative in ['usr/share/doc', 'opt/spirula', 'opt/converter/node_modules']:
+            root = prefix / relative
             if not root.exists():
                 problems.append({'path': str(root), 'reason': 'Notice root absent'})
                 continue
             for path in sorted(root.rglob('*')):
                 if notice_name(path) and not path.is_dir():
                     add_document(archive, path, root, records, problems)
-        for dist in sorted(importlib.metadata.distributions(), key=lambda d: d.metadata['Name'].lower()):
-            package = {'name': dist.metadata['Name'], 'version': dist.version,
-                       'license': dist.metadata.get('License-Expression') or dist.metadata.get('License'),
-                       'notices': []}
-            root = Path(dist.locate_file('')).resolve()
-            for relative in dist.files or []:
-                path = Path(dist.locate_file(relative))
-                if notice_name(path) or any(part.lower() in ('licenses', 'licences') for part in relative.parts):
-                    if add_document(archive, path, root, records, problems):
-                        package['notices'].append(str(relative))
-                # Metadata retains upstream URLs, license classifiers and notices
-                # even for old wheels without a separate license file.
-                elif path.name == 'METADATA':
-                    add_document(archive, path, root, records, problems)
-            if not package['notices']:
-                problems.append({'package': package['name'], 'reason': 'No separate wheel notice found; inspect metadata/upstream'})
-            packages.append(package)
         report = json.dumps({'version': 1, 'redistributionReviewed': False,
-                             'files': records, 'pythonPackages': packages,
+                             'files': records,
                              'findings': problems}, indent=2).encode()
         info = tarfile.TarInfo('notice-inventory.json')
         info.size = len(report)

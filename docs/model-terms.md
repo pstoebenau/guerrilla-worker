@@ -1,4 +1,4 @@
-﻿# Bundled model terms
+# Bundled model terms
 
 Guerrilla worker code is GPL-3.0-only. The protocol is MIT. Bundled third-party
 code and models retain their own licenses; the worker license does not replace
@@ -30,7 +30,7 @@ Source: https://github.com/facebookresearch/dinov3/blob/adc254450203739c8149213a
 The RoMaV2 MIT license is preserved in `legal/RoMaV2-LICENSE.txt`. Our release
 assessment applies the repository's MIT grant to the author's code and released
 model contributions, with upstream's explicit exception for DINOv3 components.
-The exact `romav2.pt` weights are pinned by checksum in Dockerfile. Preserve both
+The exact `romav2.0.1.pt` weights are pinned by checksum in the native runtime installer and container recipe. Preserve both
 the MIT notice and the DINOv3 agreement; the checkpoint is not described as
 entirely MIT. See `docs/linux-release-review.md` for the assessment and evidence.
 

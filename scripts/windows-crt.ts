@@ -1,4 +1,4 @@
-import { access, mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { windowsPowerShellEnvironment } from './windows-powershell';
 
@@ -10,7 +10,6 @@ interface CrtFile {
   signer: string;
   signerThumbprint: string;
   sha256: string;
-  keptNewerPythonRuntime: boolean;
 }
 interface CrtManifest {
   schemaVersion: 1;
@@ -31,8 +30,6 @@ $ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 try {
 $stage = $env:GUERRILLA_CRT_STAGE_DIRECTORY
-$python = Join-Path $stage 'python'
-if (!(Test-Path -LiteralPath (Join-Path $python 'python.exe') -PathType Leaf)) { throw 'Extract the vendored Windows Python before preparing its app-local CRT.' }
 $candidateRoots = @()
 if ($env:VCToolsRedistDir) { $candidateRoots += [pscustomobject]@{ Path = $env:VCToolsRedistDir; Discovery = 'VCToolsRedistDir' } }
 $programFiles86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
@@ -100,26 +97,13 @@ foreach ($file in ($sourceFiles | Sort-Object Name)) {
   $signature = CheckedSignature $file.FullName
   $sourceVersion = NumericVersion $file.VersionInfo.FileVersion
   $selected = $file
-  $keptNewer = $false
-  $pythonFile = Join-Path $python $file.Name
-  if (Test-Path -LiteralPath $pythonFile -PathType Leaf) {
-    $existing = Get-Item -LiteralPath $pythonFile
-    $existingSignature = CheckedSignature $existing.FullName
-    $existingVersion = NumericVersion $existing.VersionInfo.FileVersion
-    if ($existingVersion -gt $sourceVersion) {
-      # Preserve newer bundled CPython runtime DLLs instead of downgrading them.
-      $selected = $existing; $signature = $existingSignature; $keptNewer = $true
-    }
-  }
   $target = Join-Path $destination $file.Name
   Copy-Item -LiteralPath $selected.FullName -Destination $target -Force
-  if ($selected.FullName -ne $pythonFile) { Copy-Item -LiteralPath $selected.FullName -Destination $pythonFile -Force }
   $hash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
-  if ((Get-FileHash -LiteralPath $pythonFile -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hash) { throw 'App-local CRT copy verification failed.' }
   $records += [ordered]@{
     fileName = $file.Name; source = $selected.FullName; sourceFileVersion = $selected.VersionInfo.FileVersion;
     productVersion = $selected.VersionInfo.ProductVersion; signer = $signature.SignerCertificate.Subject;
-    signerThumbprint = $signature.SignerCertificate.Thumbprint; sha256 = $hash; keptNewerPythonRuntime = $keptNewer
+    signerThumbprint = $signature.SignerCertificate.Thumbprint; sha256 = $hash
   }
 }
 [ordered]@{
@@ -147,7 +131,7 @@ function parseManifest(value: unknown): CrtManifest {
       || typeof file.signer !== 'string' || !/(^|,\s*)CN=Microsoft (?:Corporation|Windows Software Compatibility Publisher)(,|$)/.test(file.signer)
       || !/(^|,\s*)O=Microsoft Corporation(,|$)/.test(file.signer)
       || typeof file.source !== 'string' || typeof file.sourceFileVersion !== 'string' || typeof file.productVersion !== 'string'
-      || typeof file.signerThumbprint !== 'string' || typeof file.keptNewerPythonRuntime !== 'boolean') throw new Error('Invalid Windows CRT file identity');
+      || typeof file.signerThumbprint !== 'string') throw new Error('Invalid Windows CRT file identity');
   }
   for (const required of ['msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll']) {
     if (!manifest.files.some((file: CrtFile) => file.fileName.toLowerCase() === required)) throw new Error(`Missing app-local runtime ${required}`);
@@ -159,7 +143,6 @@ function parseManifest(value: unknown): CrtManifest {
 export async function vendorWindowsCrt(stagingRuntime: string): Promise<void> {
   if (process.platform !== 'win32') return;
   if (!path.isAbsolute(stagingRuntime)) throw new Error('Windows CRT staging directory must be absolute');
-  await access(path.join(stagingRuntime, 'python', 'python.exe'));
   const encodedScript = Buffer.from(vendorScript, 'utf16le').toString('base64');
   const child = Bun.spawn(['powershell.exe', '-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-EncodedCommand', encodedScript], {
     env: { ...windowsPowerShellEnvironment(), GUERRILLA_CRT_STAGE_DIRECTORY: stagingRuntime },
