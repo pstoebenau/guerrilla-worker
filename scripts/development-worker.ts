@@ -61,5 +61,5 @@ export async function runDevelopmentWorker(options: DevelopmentWorkerOptions = {
 
 if (import.meta.main) {
   try { process.exitCode = await runDevelopmentWorker({ args: process.argv.slice(2) }); }
-  finally { if (process.connected) process.disconnect(); }
+  finally { if (process.connected) process.disconnect?.(); }
 }
