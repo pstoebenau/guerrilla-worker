@@ -189,7 +189,7 @@ impl Runner {
             ensure!(request.resume, "An existing job requires resume");
             let mut state: State = serde_json::from_slice(&fs::read(&state_path)?)?;
             ensure!(state.version == 1, "Unsupported attempt manifest version");
-            let portable = request.selective_resume && state.stage_checkpoints.is_empty();
+            let portable = request.selective_resume && state.checkpoints.is_empty();
             ensure!(
                 state.identity.backend == identity.backend
                     && state.identity.settings == identity.settings
@@ -199,6 +199,9 @@ impl Runner {
                 "Resume input, settings, cap or engine versions changed"
             );
             state.identity = identity;
+            state
+                .stage_checkpoints
+                .retain(|stage, _| stage == "training");
             if !request.selective_resume {
                 for stage in state.completed.values() {
                     verify(&output, &stage.files)?;
@@ -311,6 +314,10 @@ impl Runner {
     }
     fn checkpoint(&mut self, stage: &str, plan: Option<RetentionPlan>) -> Result<()> {
         if !self.request.archive_ack {
+            if let Some(plan) = plan {
+                self.pending.clear();
+                self.pending.push((String::new(), plan));
+            }
             return Ok(());
         }
         let checkpoint_id = uuid::Uuid::new_v4().simple().to_string();
@@ -353,7 +360,17 @@ impl Runner {
             );
             return self.path(&stage.directory);
         }
+        let resumable = resumable && name == "training" && !self.state.checkpoints.is_empty();
         let previous = self.state.stages.get(name).cloned();
+        if !resumable {
+            if let Some(previous) = &previous {
+                let previous = self.path(previous)?;
+                if previous.is_dir() {
+                    fs::remove_dir_all(previous)?;
+                }
+            }
+            self.state.stage_checkpoints.remove(name);
+        }
         let folder = if let Some(previous) = previous.filter(|_| resumable) {
             self.path(&previous)?
         } else {
@@ -507,8 +524,6 @@ impl Runner {
                 self.last_checkpoint = Instant::now();
                 if self.state.stage == "training" {
                     self.poll_training(Some(&mut process))?;
-                } else if self.state.stage == "densification" {
-                    self.poll_dense(&mut process)?;
                 }
             }
             self.prune_acknowledged(Some(&mut process))?;
@@ -701,6 +716,7 @@ impl Runner {
                     files: {
                         let mut files = manifest(&self.output, &snapshot)?;
                         files.extend(manifest(&self.output, &folder.join("previews"))?);
+                        files.retain(|file| !excluded(&file.path, &plan.exclude_paths));
                         files
                     },
                 },
@@ -806,70 +822,6 @@ impl Runner {
         }
         Ok(())
     }
-    fn poll_dense(&mut self, process: &mut ManagedChild) -> Result<()> {
-        let folder = self.path(
-            self.state
-                .stages
-                .get("densification")
-                .context("Densification path missing")?,
-        )?;
-        let frozen = process.freeze()?;
-        let open_paths = frozen.open_paths()?;
-        let mut paths = vec![];
-        for path in artifacts::files(&folder)? {
-            if open_paths.contains(&path) {
-                continue;
-            }
-            if path.extension().and_then(|s| s.to_str()) == Some("npz") {
-                if valid_chunk(&path)? {
-                    paths.push(path)
-                }
-            } else if path.file_name().and_then(|s| s.to_str()) == Some("config.json")
-                || path.starts_with(folder.join("sparse/0"))
-            {
-                paths.push(path)
-            }
-        }
-        if !paths
-            .iter()
-            .any(|p| p.extension().and_then(|s| s.to_str()) == Some("npz"))
-            || !paths
-                .iter()
-                .any(|p| p.file_name().and_then(|s| s.to_str()) == Some("config.json"))
-        {
-            return Ok(());
-        }
-        let files = paths
-            .into_iter()
-            .map(|path| {
-                Ok(Artifact {
-                    path: relative(&self.output, &path)?,
-                    size: path.metadata()?.len(),
-                    sha256: hash(&path)?,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        if self
-            .state
-            .stage_checkpoints
-            .get("densification")
-            .is_some_and(|stage| stage.files == files)
-        {
-            return Ok(());
-        }
-        self.state.stage_checkpoints.insert(
-            "densification".into(),
-            Stage {
-                directory: relative(&self.output, &folder)?,
-                files,
-            },
-        );
-        self.save()?;
-        // Freeze remains held until worker has cloned the referenced mutable chunk files.
-        self.checkpoint("densification", None)?;
-        drop(frozen);
-        Ok(())
-    }
     fn prune_acknowledged(&mut self, mut process: Option<&mut ManagedChild>) -> Result<()> {
         if self.pending.is_empty() {
             return Ok(());
@@ -877,7 +829,9 @@ impl Runner {
         let acknowledged = self
             .pending
             .iter()
-            .filter(|(id, _)| self.output.join(".archive-acks").join(id).is_file())
+            .filter(|(id, _)| {
+                !self.request.archive_ack || self.output.join(".archive-acks").join(id).is_file()
+            })
             .map(|(id, plan)| (id.clone(), plan.clone()))
             .collect::<Vec<_>>();
         if acknowledged.is_empty() {
@@ -1080,10 +1034,7 @@ impl Runner {
                 .map(|item| runner.path(&item.path))
                 .transpose()?;
             if checkpoint.is_none() && folder.join("run").exists() {
-                fs::rename(
-                    folder.join("run"),
-                    folder.join(format!("failed-run-{}", uuid::Uuid::new_v4().simple())),
-                )?;
+                fs::remove_dir_all(folder.join("run"))?;
             }
             let mut args = vec![
                 executable.clone(),
@@ -1263,24 +1214,6 @@ fn preserve_final(folder: &Path, engine: Engine) -> Result<()> {
     }
     Ok(())
 }
-fn valid_chunk(path: &Path) -> Result<bool> {
-    let mut archive = match zip::ZipArchive::new(File::open(path)?) {
-        Ok(archive) => archive,
-        Err(_) => return Ok(false),
-    };
-    for name in ["xyz.npy", "rgb.npy", "metadata_json.npy"] {
-        if archive.by_name(name).is_err() {
-            return Ok(false);
-        }
-    }
-    for index in 0..archive.len() {
-        let mut file = archive.by_index(index)?;
-        if std::io::copy(&mut file, &mut std::io::sink()).is_err() {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
 fn relocate_config(folder: &Path, dataset: &Path) -> Result<()> {
     let path = folder.join("config.json");
     if !path.is_file() {
@@ -1391,6 +1324,23 @@ pub fn retention_plan(root: &Path, state: &State) -> Result<RetentionPlan> {
             {
                 plan.exclude_paths.push(relative(root, &previous)?);
             }
+        }
+    }
+    let previews = folder.join("previews");
+    let keep_preview = artifacts::files(&previews)?
+        .into_iter()
+        .rev()
+        .find(|path| {
+            path.extension().and_then(|s| s.to_str()) == Some("sog")
+                && gaussian_count(path, state.identity.max_cap).is_ok()
+        })
+        .and_then(|path| path.file_stem().and_then(|s| s.to_str()).map(str::to_owned));
+    for previous in artifacts::files(&previews)? {
+        if keep_preview
+            .as_ref()
+            .is_none_or(|keep| previous.file_stem().and_then(|s| s.to_str()) != Some(keep.as_str()))
+        {
+            plan.exclude_paths.push(relative(root, &previous)?);
         }
     }
     plan.exclude_paths.sort();

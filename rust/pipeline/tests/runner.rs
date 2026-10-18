@@ -514,3 +514,98 @@ fn copy_fixture(source: &std::path::Path, target: &std::path::Path) {
         fs::copy(source, target).unwrap();
     }
 }
+
+#[test]
+fn interrupted_preprocessing_restarts_with_a_new_directory() {
+    let fixture = Fixture::new();
+    let output = fixture
+        .command()
+        .env("FIXTURE_FAIL_SELECTION", "1")
+        .args(["--request", fixture.request.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let old = fixture.state()["stages"]["selection"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(fixture.output.join(&old).join("partial.jpg").is_file());
+    fixture.write(json!({"resume":true}));
+    let (success, events) = fixture.run();
+    assert!(success, "{events:?}");
+    assert_ne!(fixture.state()["stages"]["selection"], old);
+    assert!(!fixture.output.join(&old).exists());
+}
+
+#[test]
+fn retention_keeps_only_the_latest_preview_and_full_checkpoint() {
+    let fixture = Fixture::new();
+    let (success, events) = fixture.run();
+    assert!(success, "{events:?}");
+    let state = fixture.state();
+    let previews = fixture
+        .output
+        .join(state["stages"]["training"].as_str().unwrap())
+        .join("previews");
+    let latest = fs::read_dir(&previews)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().and_then(|s| s.to_str()) == Some("sog"))
+        .unwrap();
+    let obsolete = previews.join("step-000000000-obsolete.sog");
+    fs::write(&obsolete, b"obsolete preview").unwrap();
+    fs::write(obsolete.with_extension("log"), b"obsolete preview log").unwrap();
+    let output = fixture
+        .command()
+        .args(["--retention-plan", fixture.output.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let exclusions = plan["excludePaths"].as_array().unwrap();
+    assert!(exclusions.iter().any(|path| path
+        .as_str()
+        .unwrap()
+        .ends_with("step-000000000-obsolete.sog")));
+    assert!(exclusions.iter().any(|path| path
+        .as_str()
+        .unwrap()
+        .ends_with("step-000000000-obsolete.log")));
+    assert!(!exclusions
+        .iter()
+        .any(|path| fixture.output.join(path.as_str().unwrap()) == latest));
+    assert_eq!(state["checkpoints"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn failed_latest_preview_preserves_the_previous_successful_preview() {
+    let fixture = Fixture::new();
+    let (success, events) = fixture.run();
+    assert!(success, "{events:?}");
+    let state = fixture.state();
+    let previews = fixture
+        .output
+        .join(state["stages"]["training"].as_str().unwrap())
+        .join("previews");
+    let previous = fs::read_dir(&previews)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().and_then(|s| s.to_str()) == Some("sog"))
+        .unwrap();
+    let failed = previews.join("step-999999999-failed.sog");
+    fs::write(&failed, b"invalid interrupted preview").unwrap();
+    let output = fixture
+        .command()
+        .args(["--retention-plan", fixture.output.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let plan: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let exclusions = plan["excludePaths"].as_array().unwrap();
+    assert!(exclusions
+        .iter()
+        .any(|path| fixture.output.join(path.as_str().unwrap()) == failed));
+    assert!(!exclusions
+        .iter()
+        .any(|path| fixture.output.join(path.as_str().unwrap()) == previous));
+}

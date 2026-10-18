@@ -19,6 +19,9 @@ if args == ['--version']:
 elif args[:2] == ['sam', 'extract']:
     output = Path(option('--out'))
     output.mkdir(parents=True)
+    if os.environ.get('FIXTURE_FAIL_SELECTION') == '1':
+        (output / 'partial.jpg').write_bytes(b'partial')
+        sys.exit(1)
     for index in range(3):
         (output / f'{index}.jpg').write_bytes(b'fixture image')
 elif args[:2] == ['sfm', 'auto']:
