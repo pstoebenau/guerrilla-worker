@@ -304,8 +304,10 @@ mod tests {
             archive.append_data(&mut header, name, contents).unwrap();
         }
         archive.finish().unwrap();
-        assert!(Engine::Spirula
-            .valid_checkpoint(&Engine::Spirula.checkpoint(directory), 4)
-            .unwrap());
+        let checkpoint = Engine::Spirula.checkpoint(directory);
+        #[cfg(windows)]
+        assert!(!Engine::Spirula.valid_checkpoint(&checkpoint, 4).unwrap());
+        drop(archive);
+        assert!(Engine::Spirula.valid_checkpoint(&checkpoint, 4).unwrap());
     }
 }
