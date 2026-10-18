@@ -44,7 +44,7 @@ export async function runDevelopmentWorker(options: DevelopmentWorkerOptions = {
       credentialDirectory, scratchDirectory, gpuDirectory, workerImage, containerName, gpuDevice: env.WORKER_GPU_DEVICE,
     }, args), { env, cwd: sourceDirectory, containerName })).code;
   }
-  const runtime = await prepareDevelopmentRuntime(sourceDirectory, env.WORKER_RUNTIME_DIRECTORY ?? path.join(state, 'runtimes'));
+  const runtime = await prepareDevelopmentRuntime(sourceDirectory, env.WORKER_RUNTIME_DIRECTORY ?? path.join(state, 'runtimes'), env);
   if (args.includes('--prepare-only')) { console.log('Prepared independent worker runtime.'); return 0; }
   const execution = workerEnvironment({
     ...env,
@@ -54,11 +54,10 @@ export async function runDevelopmentWorker(options: DevelopmentWorkerOptions = {
     GPU_LOCK_PATH: env.GPU_LOCK_PATH ?? path.join(gpuDirectory, 'gpu-0.lock'),
     GPU_LOCK_WAIT: env.GPU_LOCK_WAIT ?? '1',
   }, sourceDirectory);
-  execution.PIPELINE_ROOT = path.join(runtime, 'pipeline');
-  execution.WORKER_BUNDLE = path.join(runtime, 'worker.mjs');
-  const node = Bun.which('node');
-  if (!node) throw new Error('Node.js is required for the worker.');
-  return (await runDevelopmentCommand(node, [execution.WORKER_BUNDLE, ...args], { env: execution, cwd: runtime, ipc: true })).code;
+  const suffix = process.platform === 'win32' ? '.exe' : '';
+  execution.WORKER_RUNTIME_ROOT = env.WORKER_RUNTIME_ROOT ?? path.join(sourceDirectory, 'dist/runtime');
+  execution.WORKER_PIPELINE_BIN = path.join(runtime, 'guerrilla-pipeline' + suffix);
+  return (await runDevelopmentCommand(path.join(runtime, 'guerrilla-worker' + suffix), args, { env: execution, cwd: runtime })).code;
 }
 
 if (import.meta.main) {
