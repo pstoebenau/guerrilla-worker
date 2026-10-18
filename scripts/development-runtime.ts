@@ -21,8 +21,11 @@ export async function snapshotDevelopmentBinaries(binaryDirectory: string, runti
     }
     try { await rename(staging, runtime); }
     catch (error) {
-      if (!['EEXIST', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
-      await access(path.join(runtime, names[1]!));
+      const code = (error as NodeJS.ErrnoException).code;
+      // Windows reports EPERM when another build already published this directory.
+      if (!['EEXIST', 'ENOTEMPTY'].includes(code ?? '') && !(process.platform === 'win32' && code === 'EPERM')) throw error;
+      try { await access(path.join(runtime, names[1]!)); }
+      catch { throw error; }
     }
   } finally { await rm(staging, { recursive: true, force: true }); }
   return runtime;
