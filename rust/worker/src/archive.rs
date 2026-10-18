@@ -111,7 +111,7 @@ pub async fn archive_file(
     let before = std::fs::metadata(path)?;
     let mut allocation = body(
         fence,
-        json!({"action":"allocate","clientId":client_id,"relativePath":relative,"role":role,"size":size,"sha256":sha256,"reuseVerified":true}),
+        json!({"action":"allocate","clientId":client_id,"relativePath":relative,"role":role,"size":size,"sha256":sha256,"reuseUploaded":true}),
     );
     if let Some(id) = checkpoint {
         allocation["checkpointId"] = id.into();
@@ -298,7 +298,12 @@ async fn checkpoint(
     let exclusions = exclusions(&state)?;
     let mut retained: BTreeMap<_, _> = inherited
         .iter()
-        .filter(|f| required.contains(&f.relative_path) && !excluded(&f.relative_path, &exclusions))
+        .filter(|f| {
+            f.role != "checkpoint"
+                && f.relative_path != "platform-state.json"
+                && required.contains(&f.relative_path)
+                && !excluded(&f.relative_path, &exclusions)
+        })
         .map(|f| (f.relative_path.clone(), f))
         .collect();
     let mut paths = required;
@@ -367,11 +372,11 @@ async fn checkpoint(
         current += size;
         report(queue, "uploading", snapshot, current, total).await;
     }
-    report(queue, "verifying", snapshot, total, total).await;
+    report(queue, "completing", snapshot, total, total).await;
     let inherited_ids: Vec<_> = retained.values().map(|f| &f.artifact_id).collect();
     let mut commit = body(
         fence,
-        json!({"checkpointId":snapshot.id,"sequence":snapshot.sequence,"artifactIds":ids}),
+        json!({"checkpointId":snapshot.id,"sequence":snapshot.sequence,"artifactIds":ids,"state":state}),
     );
     if !inherited_ids.is_empty() {
         commit["inheritedArtifactIds"] = json!(inherited_ids);

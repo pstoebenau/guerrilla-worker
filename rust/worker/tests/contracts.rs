@@ -226,6 +226,7 @@ async fn multipart_upload_keeps_fence_identity_and_completes_verified_parts() {
     assert_eq!(allocation["scanId"], "scan");
     assert_eq!(allocation["size"], 7);
     assert_eq!(allocation["sha256"], files::hash(&path).unwrap().1);
+    assert_eq!(allocation["reuseUploaded"], true);
     let completion = &requests
         .iter()
         .find(|r| r.0 == "/api/worker/complete")
@@ -350,6 +351,14 @@ print(json.dumps({'type':'completed'}),flush=True)
         .position(|r| r.0 == "/api/worker/finish")
         .unwrap();
     assert!(commit < finish);
+    assert_eq!(
+        records[commit].1["state"]["completed"]["export"]["files"][0]["path"],
+        "export.spz"
+    );
+    assert_eq!(
+        records[commit].1["inheritedArtifactIds"],
+        json!(["inherited"])
+    );
     let events: Vec<_> = records
         .iter()
         .filter(|r| r.0 == "/api/worker/events")
@@ -360,7 +369,7 @@ print(json.dumps({'type':'completed'}),flush=True)
         .map(|e| e["sequence"].as_u64().unwrap())
         .collect();
     assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]));
-    for state in ["queued", "uploading", "verifying", "saved"] {
+    for state in ["queued", "uploading", "completing", "saved"] {
         assert!(events
             .iter()
             .any(|e| e["kind"] == "upload" && e["progress"]["status"] == state));
@@ -605,6 +614,90 @@ fn diagnostics_tail_is_bounded_and_redacted() {
     let rendered = logs.to_string();
     assert!(!rendered.contains("secret"));
     assert!(rendered.contains("[redacted]"));
+}
+
+#[tokio::test]
+async fn successive_checkpoints_reuse_completed_data_and_send_frozen_inline_state() {
+    let base: Arc<Mutex<String>> = Default::default();
+    let server_base = base.clone();
+    let uploaded: Arc<Mutex<std::collections::BTreeMap<String, String>>> = Default::default();
+    let known = uploaded.clone();
+    let (url, requests, task) = server(move |route, payload| {
+        let response = if route == "/api/worker/artifacts" {
+            let value: Value = serde_json::from_slice(payload).unwrap();
+            let key = format!("{}:{}", value["relativePath"], value["sha256"]);
+            let mut known = known.lock().unwrap();
+            if value["reuseUploaded"] == true && known.contains_key(&key) {
+                json!({"artifactId":known[&key],"method":"reuse"})
+            } else {
+                let id = format!("artifact-{}", known.len());
+                known.insert(key, id.clone());
+                json!({"artifactId":id,"method":"put","url":format!("{}/upload/{id}",server_base.lock().unwrap())})
+            }
+        } else if route == "/api/worker/checkpoint" {
+            let value: Value = serde_json::from_slice(payload).unwrap();
+            if !value["state"]["completed"].is_object() {
+                return (400, b"{}".to_vec());
+            }
+            json!({"ok":true})
+        } else { json!({"ok":true}) };
+        (200, serde_json::to_vec(&response).unwrap())
+    }).await;
+    *base.lock().unwrap() = url.clone();
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("run");
+    std::fs::create_dir_all(output.join("selection")).unwrap();
+    std::fs::write(output.join("selection/frame.jpg"), b"unchanged frame").unwrap();
+    let mut state = json!({"completed":{"selection":{"directory":"selection","files":[{"path":"selection/frame.jpg"}]}},"step":1});
+    let inherited_state = Artifact {
+        artifact_id: "old-state".into(),
+        relative_path: "platform-state.json".into(),
+        role: "checkpoint".into(),
+        size: 0,
+        sha256: String::new(),
+        url: "http://unused.invalid".into(),
+    };
+    let queue = archive::BackgroundArchive::new(
+        api::Client::new(&url, "credential").unwrap(),
+        fence(),
+        output.clone(),
+        vec![inherited_state],
+        CancellationToken::new(),
+    );
+    for step in 1..=2 {
+        state["step"] = json!(step);
+        std::fs::write(output.join("platform-state.json"), state.to_string()).unwrap();
+        queue
+            .enqueue(&format!("checkpoint-{step}"), step)
+            .await
+            .unwrap();
+        // Computation can update live state after the ready acknowledgment.
+        std::fs::write(output.join("platform-state.json"), b"{\"mutated\":true}").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), queue.drain())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let records = requests.lock().unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|(route, _)| route.starts_with("/upload/"))
+            .count(),
+        3
+    );
+    let commits: Vec<_> = records
+        .iter()
+        .filter(|(route, _)| route == "/api/worker/checkpoint")
+        .collect();
+    assert_eq!(commits.len(), 2);
+    assert_eq!(commits[0].1["state"]["step"], 1);
+    assert_eq!(commits[1].1["state"]["step"], 2);
+    assert!(commits
+        .iter()
+        .all(|(_, value)| value["inheritedArtifactIds"].is_null()));
+    drop(records);
+    task.abort();
 }
 
 #[cfg(unix)]
