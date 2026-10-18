@@ -9,6 +9,11 @@ use std::{
 };
 use tempfile::TempDir;
 
+#[allow(dead_code)]
+#[path = "../src/process.rs"]
+mod process_fixture;
+fn emit(_kind: &str, _values: Value) {}
+
 struct Fixture {
     root: TempDir,
     input: PathBuf,
@@ -844,5 +849,225 @@ fn standalone_video_url_download_is_durable_and_reused_on_resume() {
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+// Runs in its own test process so SIGKILL cannot be caught by Rust unwinding.
+#[test]
+#[ignore = "subprocess fixture for the frozen-parent death regression"]
+fn frozen_parent_fixture() {
+    use std::time::{Duration, Instant};
+    let Some(root) = std::env::var_os("GUERRILLA_FROZEN_FIXTURE") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let mut runtime = process_fixture::Runtime::new().unwrap();
+    runtime.lock_gpu().unwrap();
+    let script = r#"import json,os,signal,subprocess,sys,time
+from pathlib import Path
+signal.signal(signal.SIGTERM,signal.SIG_IGN)
+writer='''import signal,sys,time
+signal.signal(signal.SIGTERM,signal.SIG_IGN)
+stream=open(sys.argv[1],'ab',buffering=0)
+print('ready',flush=True)
+while True:
+    stream.write(b'x')
+    time.sleep(.005)
+'''
+child=subprocess.Popen([sys.executable,'-c',writer,str(Path(sys.argv[1]).with_name('counter'))],stdout=subprocess.PIPE,text=True)
+assert child.stdout.readline().strip()=='ready'
+Path(sys.argv[1]).write_text(json.dumps([os.getpid(),child.pid]))
+time.sleep(60)
+"#;
+    let mut child = process_fixture::ManagedChild::spawn_for_test(
+        &[
+            "python3".into(),
+            "-c".into(),
+            script.into(),
+            root.join("pids.json").to_string_lossy().into_owned(),
+        ],
+        &root.join("engine.log"),
+        std::path::Path::new(env!("CARGO_BIN_EXE_guerrilla-pipeline")),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !root.join("pids.json").is_file() {
+        assert!(Instant::now() < deadline, "Engine fixture did not launch");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let _frozen = child.freeze().unwrap();
+    fs::write(
+        root.join("frozen.json"),
+        serde_json::to_vec(&json!({"guardian":child.child.id()})).unwrap(),
+    )
+    .unwrap();
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+struct FrozenHelper {
+    root: tempfile::TempDir,
+    child: std::process::Child,
+    pids: Vec<u32>,
+    guardian: u32,
+}
+impl FrozenHelper {
+    fn launch() -> Self {
+        use std::time::{Duration, Instant};
+        let root = tempfile::tempdir().unwrap();
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "frozen_parent_fixture",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("GUERRILLA_FROZEN_FIXTURE", root.path())
+            .env("GPU_LOCK_PATH", root.path().join("gpu.lock"))
+            .env_remove("WORKER_PARENT_PID")
+            .env_remove("GPU_LOCK_WAIT")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut helper = Self {
+            root,
+            child,
+            pids: vec![],
+            guardian: 0,
+        };
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !helper.root.path().join("frozen.json").is_file() {
+            assert!(
+                helper.child.try_wait().unwrap().is_none(),
+                "Frozen helper exited early"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "Frozen helper did not become ready"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        helper.pids =
+            serde_json::from_slice(&fs::read(helper.root.path().join("pids.json")).unwrap())
+                .unwrap();
+        let frozen: Value =
+            serde_json::from_slice(&fs::read(helper.root.path().join("frozen.json")).unwrap())
+                .unwrap();
+        helper.guardian = frozen["guardian"].as_u64().unwrap() as u32;
+        for pid in &helper.pids {
+            assert!(
+                process_state(*pid).starts_with('T'),
+                "Engine writer {pid} is not frozen"
+            );
+        }
+        assert!(
+            !process_state(helper.guardian).starts_with('T'),
+            "Guardian must remain runnable during snapshots"
+        );
+        helper
+    }
+}
+impl Drop for FrozenHelper {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if self.guardian > 0 {
+            unsafe {
+                libc::kill(-(self.guardian as i32), libc::SIGKILL);
+            }
+        }
+        if let Some(engine) = self.pids.first() {
+            unsafe {
+                libc::kill(-(*engine as i32), libc::SIGKILL);
+            }
+        }
+    }
+}
+fn process_state(pid: u32) -> String {
+    let result = Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&result.stdout).trim().to_string()
+}
+#[test]
+fn killing_parent_during_snapshot_freeze_stops_tree_and_releases_gpu() {
+    use std::time::{Duration, Instant};
+    let mut helper = FrozenHelper::launch();
+    unsafe {
+        libc::kill(helper.child.id() as i32, libc::SIGKILL);
+    }
+    helper.child.wait().unwrap();
+    let released_by = Instant::now() + Duration::from_secs(10);
+    let lock = fs::File::options()
+        .read(true)
+        .write(true)
+        .open(helper.root.path().join("gpu.lock"))
+        .unwrap();
+    loop {
+        let live = helper
+            .pids
+            .iter()
+            .chain(std::iter::once(&helper.guardian))
+            .any(|pid| {
+                let state = process_state(*pid);
+                !state.is_empty() && !state.starts_with('Z')
+            });
+        let released = fs2::FileExt::try_lock_exclusive(&lock).is_ok();
+        if released {
+            for pid in helper.pids.iter().chain(std::iter::once(&helper.guardian)) {
+                let state = process_state(*pid);
+                assert!(
+                    state.is_empty() || state.starts_with('Z'),
+                    "GPU lock released while {pid} is live: {state}"
+                );
+            }
+            fs2::FileExt::unlock(&lock).unwrap();
+        }
+        if !live && released {
+            break;
+        }
+        assert!(
+            Instant::now() < released_by,
+            "Frozen tree remained live or kept the GPU lock"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+#[test]
+fn engine_leader_exit_does_not_resume_frozen_descendant_writers() {
+    use std::time::{Duration, Instant};
+    let mut helper = FrozenHelper::launch();
+    let counter = helper.root.path().join("counter");
+    let frozen_bytes = fs::read(&counter).unwrap();
+    unsafe {
+        libc::kill(helper.pids[0] as i32, libc::SIGKILL);
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let state = process_state(helper.pids[1]);
+        assert!(
+            state.is_empty() || state.starts_with('T') || state.starts_with('Z'),
+            "Guardian resumed a writer while its parent still holds a snapshot freeze: {state}"
+        );
+        assert_eq!(
+            fs::read(&counter).unwrap(),
+            frozen_bytes,
+            "Frozen checkpoint inputs changed during guardian cleanup"
+        );
+        if state.is_empty() || state.starts_with('Z') {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Guardian did not clean up the engine's descendants"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        helper.child.try_wait().unwrap().is_none(),
+        "Snapshot parent should still be alive"
     );
 }

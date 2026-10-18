@@ -96,16 +96,26 @@ impl Runtime {
 
 pub struct ManagedChild {
     pub child: Child,
+    #[cfg(unix)]
+    engine_group: Option<u32>,
     #[cfg(windows)]
     job: WindowsJob,
 }
 impl ManagedChild {
     pub fn spawn(arguments: &[String], log: &Path) -> Result<Self> {
+        Self::spawn_with_guardian(arguments, log, &std::env::current_exe()?)
+    }
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub fn spawn_for_test(arguments: &[String], log: &Path, guardian: &Path) -> Result<Self> {
+        Self::spawn_with_guardian(arguments, log, guardian)
+    }
+    fn spawn_with_guardian(arguments: &[String], log: &Path, guardian: &Path) -> Result<Self> {
         ensure!(!arguments.is_empty(), "Empty command");
         fs::create_dir_all(log.parent().context("Log has no parent")?)?;
         let file = File::create(log)?;
         // A tiny Rust guardian detects abrupt runner death, including on macOS.
-        let mut command = Command::new(std::env::current_exe()?);
+        let mut command = Command::new(guardian);
         command
             .args(["--guard-parent", &std::process::id().to_string(), "--"])
             .args(arguments);
@@ -113,11 +123,15 @@ impl ManagedChild {
             .stdout(Stdio::from(file.try_clone()?))
             .stderr(Stdio::from(file));
         #[cfg(unix)]
+        let (mut readiness, sender) = std::os::unix::net::UnixStream::pair()?;
+        #[cfg(unix)]
         {
-            use std::os::unix::process::CommandExt;
+            use std::os::{fd::AsRawFd, unix::process::CommandExt};
+            let ready_fd = sender.as_raw_fd();
+            command.env("PIPELINE_GUARD_READY_FD", ready_fd.to_string());
             unsafe {
-                command.pre_exec(|| {
-                    if libc::setsid() == -1 {
+                command.pre_exec(move || {
+                    if libc::setsid() == -1 || libc::fcntl(ready_fd, libc::F_SETFD, 0) == -1 {
                         return Err(std::io::Error::last_os_error());
                     }
                     Ok(())
@@ -154,15 +168,39 @@ impl ManagedChild {
             let _ = child.wait();
             return Err(error);
         }
-        Ok(Self {
+        #[allow(unused_mut)]
+        let mut result = Self {
             child,
+            #[cfg(unix)]
+            engine_group: None,
             #[cfg(windows)]
             job,
-        })
+        };
+        #[cfg(unix)]
+        {
+            use std::io::Read;
+            drop(sender);
+            readiness.set_read_timeout(Some(Duration::from_secs(30)))?;
+            let mut group = [0; 4];
+            readiness
+                .read_exact(&mut group)
+                .context("Engine launch was not acknowledged")?;
+            let group = u32::from_le_bytes(group);
+            ensure!(
+                group > 0 && group != result.child.id(),
+                "Invalid engine process group"
+            );
+            result.engine_group = Some(group);
+        }
+        Ok(result)
     }
     pub fn terminate(&mut self) {
         #[cfg(unix)]
         unsafe {
+            if let Some(group) = self.engine_group {
+                libc::kill(-(group as i32), libc::SIGTERM);
+                libc::kill(-(group as i32), libc::SIGCONT);
+            }
             libc::kill(-(self.child.id() as i32), libc::SIGTERM);
         }
         #[cfg(windows)]
@@ -171,23 +209,44 @@ impl ManagedChild {
         while Instant::now() < deadline {
             let exited = self.child.try_wait().ok().flatten().is_some();
             #[cfg(unix)]
-            let contained_alive = unsafe { libc::kill(-(self.child.id() as i32), 0) == 0 };
+            let contained_alive = self.engine_group.is_some_and(group_has_live_members);
             #[cfg(windows)]
             let contained_alive = !exited;
             if exited && !contained_alive {
+                #[cfg(unix)]
+                {
+                    self.engine_group = None;
+                }
                 return;
             }
             thread::sleep(Duration::from_millis(50));
         }
         #[cfg(unix)]
         unsafe {
+            if let Some(group) = self.engine_group {
+                libc::kill(-(group as i32), libc::SIGKILL);
+            }
             libc::kill(-(self.child.id() as i32), libc::SIGKILL);
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
+        #[cfg(unix)]
+        if let Some(group) = self.engine_group.take() {
+            wait_for_engine_group(group);
+        }
     }
     pub fn freeze(&mut self) -> Result<Frozen> {
-        Frozen::new(self.child.id())
+        #[cfg(unix)]
+        {
+            Frozen::new(
+                self.engine_group
+                    .context("Engine has not acknowledged launch")?,
+            )
+        }
+        #[cfg(windows)]
+        {
+            Frozen::new(self.child.id())
+        }
     }
 }
 impl Drop for ManagedChild {
@@ -236,47 +295,147 @@ fn parent_alive(parent: u32) -> bool {
 pub fn guard(parent: u32, arguments: &[String]) -> Result<()> {
     ensure!(parent_alive(parent), "Runner exited before engine launch");
     let runtime = Runtime::new()?;
-    let mut child = Command::new(arguments.first().context("Missing guarded command")?)
-        .args(&arguments[1..])
-        .spawn()?;
-    loop {
-        if !parent_alive(parent) || runtime.interrupted.load(Ordering::SeqCst) {
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(0, libc::SIGTERM);
-            }
-            #[cfg(windows)]
-            {
-                let _ = Command::new("taskkill")
-                    .args(["/PID", &child.id().to_string(), "/T", "/F"])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            }
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while Instant::now() < deadline {
-                if child.try_wait()?.is_some() {
+    #[cfg(unix)]
+    {
+        use std::{
+            io::Write,
+            os::{
+                fd::{AsRawFd, FromRawFd},
+                unix::{net::UnixStream, process::CommandExt},
+            },
+        };
+        let ready_fd: i32 = std::env::var("PIPELINE_GUARD_READY_FD")
+            .context("Missing guardian launch channel")?
+            .parse()?;
+        let mut readiness = unsafe { UnixStream::from_raw_fd(ready_fd) };
+        ensure!(
+            unsafe { libc::fcntl(readiness.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } != -1,
+            "Cannot isolate guardian launch channel"
+        );
+        let mut command = Command::new(arguments.first().context("Missing guarded command")?);
+        command
+            .args(&arguments[1..])
+            .env_remove("PIPELINE_GUARD_READY_FD");
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn()?;
+        let result = (|| -> Result<()> {
+            // Publish only after the engine owns its group. The guardian never
+            // joins that group, so snapshot suspension cannot stop its watchdog.
+            readiness.write_all(&child.id().to_le_bytes())?;
+            drop(readiness);
+            loop {
+                ensure!(
+                    parent_alive(parent) && !runtime.interrupted.load(Ordering::SeqCst),
+                    "Runner exited"
+                );
+                if let Some(status) = child.try_wait()? {
+                    ensure!(status.success(), "Engine exited {status}");
                     return Ok(());
                 }
-                thread::sleep(Duration::from_millis(50));
+                thread::sleep(Duration::from_millis(100));
             }
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(0, libc::SIGKILL);
+        })();
+        // SIGTERM cannot be handled by a stopped engine until SIGCONT arrives.
+        // Keep the inherited GPU lock until every live group member is gone.
+        stop_engine_group(&mut child, !parent_alive(parent));
+        result
+    }
+    #[cfg(windows)]
+    {
+        let mut child = Command::new(arguments.first().context("Missing guarded command")?)
+            .args(&arguments[1..])
+            .spawn()?;
+        loop {
+            if !parent_alive(parent) || runtime.interrupted.load(Ordering::SeqCst) {
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(0, libc::SIGTERM);
+                }
+                #[cfg(windows)]
+                {
+                    let _ = Command::new("taskkill")
+                        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                }
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while Instant::now() < deadline {
+                    if child.try_wait()?.is_some() {
+                        return Ok(());
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(0, libc::SIGKILL);
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("Runner exited");
             }
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("Runner exited");
+            if let Some(status) = child.try_wait()? {
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(0, libc::SIGTERM);
+                }
+                ensure!(status.success(), "Engine exited {status}");
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(100));
         }
-        if let Some(status) = child.try_wait()? {
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(0, libc::SIGTERM);
-            }
-            ensure!(status.success(), "Engine exited {status}");
-            return Ok(());
+    }
+}
+#[cfg(unix)]
+fn group_has_live_members(group: u32) -> bool {
+    group_members(group)
+        .map(|members| members.iter().any(|(_, state)| !state.starts_with('Z')))
+        .unwrap_or(true)
+}
+#[cfg(unix)]
+fn stop_engine_group(child: &mut Child, parent_exited: bool) {
+    let group = child.id();
+    if !parent_exited {
+        // The parent can still be copying a frozen checkpoint after the engine
+        // leader exits. Terminate descendants without resuming any writer.
+        unsafe {
+            libc::kill(-(group as i32), libc::SIGKILL);
         }
-        thread::sleep(Duration::from_millis(100));
+        let _ = child.kill();
+        let _ = child.wait();
+        wait_for_engine_group(group);
+        return;
+    }
+    unsafe {
+        libc::kill(-(group as i32), libc::SIGTERM);
+        libc::kill(-(group as i32), libc::SIGCONT);
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        let _ = child.try_wait();
+        if !group_has_live_members(group) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    unsafe {
+        libc::kill(-(group as i32), libc::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    wait_for_engine_group(group);
+}
+#[cfg(unix)]
+fn wait_for_engine_group(group: u32) {
+    while group_has_live_members(group) {
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -360,7 +519,12 @@ impl Frozen {
                 if state.starts_with('Z') {
                     continue;
                 }
-                for file in fs::read_dir(format!("/proc/{pid}/fd"))? {
+                let descriptors = match fs::read_dir(format!("/proc/{pid}/fd")) {
+                    Ok(files) => files,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                for file in descriptors {
                     let file = file?;
                     if let Ok(target) = fs::read_link(file.path()) {
                         if target.is_absolute() {
@@ -385,10 +549,13 @@ impl Frozen {
             let output = Command::new("/usr/sbin/lsof")
                 .args(["-F", "n", "-p", &pids])
                 .output()?;
-            ensure!(
-                output.status.success(),
-                "Cannot inspect frozen engine open files"
-            );
+            if !output.status.success() {
+                ensure!(
+                    !group_has_live_members(self.pids[0]),
+                    "Cannot inspect frozen engine open files"
+                );
+                return Ok(vec![]);
+            }
             Ok(String::from_utf8_lossy(&output.stdout)
                 .lines()
                 .filter_map(|line| {
