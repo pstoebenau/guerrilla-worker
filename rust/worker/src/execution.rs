@@ -270,6 +270,10 @@ pub async fn execute(
                             let message=redact(event["error"].as_str().unwrap_or("Source download failed"));
                             *error.lock().await=Some((message.clone(),event["interrupted"]==true));
                             events.send("progress",&message,json!({"status":"failed"}),Some("download"),None).await?;
+                        } else if event["type"]=="progress" {
+                            let mut progress=event.as_object().cloned().unwrap_or_default();
+                            for key in ["type","stage","message","timestamp"] {progress.remove(key);}
+                            events.send("progress",event["message"].as_str().unwrap_or("Downloading source video"),Value::Object(progress),Some("download"),None).await?;
                         }
                         Ok(())
                     }

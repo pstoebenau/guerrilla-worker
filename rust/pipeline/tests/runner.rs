@@ -1121,3 +1121,82 @@ fn engine_leader_exit_does_not_resume_frozen_descendant_writers() {
         "Snapshot parent should still be alive"
     );
 }
+
+#[test]
+fn source_download_retries_transient_http_failures_without_leaking_signed_urls() {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
+    let fixture = Fixture::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        for attempt in 0..3 {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            let _ = socket.read(&mut request);
+            if attempt < 2 {
+                socket.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            } else {
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: 14\r\nConnection: close\r\n\r\nsource fixture").unwrap();
+            }
+        }
+    });
+    let destination = fixture.root.path().join("download.mp4");
+    let url = format!("http://{address}/source?signature=private-token");
+    let output = fixture
+        .command()
+        .args([
+            "--download",
+            &url,
+            "--destination",
+            destination.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert_eq!(fs::read(destination).unwrap(), b"source fixture");
+    assert!(stdout.contains("attempt 3 of 3"));
+    assert!(stdout.contains("Retrying source download"));
+    assert!(!stdout.contains("private-token"));
+    assert!(!stdout.contains(&url));
+}
+
+#[test]
+fn source_download_does_not_retry_permanent_http_errors() {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
+    let fixture = Fixture::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut request = [0; 4096];
+        let _ = socket.read(&mut request);
+        socket
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+    });
+    let destination = fixture.root.path().join("download.mp4");
+    let output = fixture
+        .command()
+        .args([
+            "--download",
+            &format!("http://{address}/missing"),
+            "--destination",
+            destination.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("after 1 attempt(s)"));
+    assert!(!stdout.contains("retrying"));
+    assert!(!destination.exists());
+}

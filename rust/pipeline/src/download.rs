@@ -10,7 +10,7 @@ use std::{
     io::{Read, Write},
     net::{IpAddr, ToSocketAddrs},
     path::Path,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 fn public_ip(ip: IpAddr) -> bool {
@@ -44,7 +44,12 @@ fn public_ip(ip: IpAddr) -> bool {
         }
     }
 }
-fn response(mut url: Url, public: bool, runtime: &Runtime) -> Result<reqwest::blocking::Response> {
+fn response(
+    mut url: Url,
+    public: bool,
+    runtime: &Runtime,
+    description: &str,
+) -> Result<reqwest::blocking::Response> {
     for _ in 0..10 {
         runtime.check()?;
         ensure!(
@@ -72,11 +77,54 @@ fn response(mut url: Url, public: bool, runtime: &Runtime) -> Result<reqwest::bl
         }
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(60))
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(180))
             .no_proxy()
             .resolve_to_addrs(host, &addresses)
             .build()?;
-        let result = client.get(url.clone()).send()?;
+        let mut result = None;
+        for attempt in 1..=3 {
+            runtime.check()?;
+            crate::emit(
+                "progress",
+                serde_json::json!({
+                    "stage":"download", "message":format!("Requesting {description} (attempt {attempt} of 3)"),
+                    "substep":"Waiting for the source server"
+                }),
+            );
+            let response = client
+                .get(url.clone())
+                .send()
+                .and_then(|response| response.error_for_status());
+            match response {
+                Ok(response) => {
+                    result = Some(response);
+                    break;
+                }
+                Err(error) => {
+                    let retryable = error.is_timeout()
+                        || error.is_connect()
+                        || error.status().is_some_and(|status| {
+                            status.is_server_error() || matches!(status.as_u16(), 408 | 429)
+                        });
+                    if !retryable || attempt == 3 {
+                        return Err(error).with_context(|| format!("Could not request {description} from {host} after {attempt} attempt(s)"));
+                    }
+                    crate::emit(
+                        "progress",
+                        serde_json::json!({
+                            "stage":"download", "message":format!("The source server delayed {description}; retrying ({attempt} of 3)"),
+                            "substep":"Retrying source download"
+                        }),
+                    );
+                    for _ in 0..attempt * 10 {
+                        runtime.check()?;
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+            }
+        }
+        let result = result.context("Source server did not return a response")?;
         if result.status().is_redirection() {
             let location = result
                 .headers()
@@ -86,7 +134,7 @@ fn response(mut url: Url, public: bool, runtime: &Runtime) -> Result<reqwest::bl
             url = url.join(location)?;
             continue;
         }
-        return Ok(result.error_for_status()?);
+        return Ok(result);
     }
     bail!("Too many video redirects")
 }
@@ -105,11 +153,12 @@ pub fn download(url: &str, destination: &Path, public: bool, runtime: &Runtime) 
             .context("Download destination has no parent")?,
     )?;
     let mut url = Url::parse(url)?;
+    let mut description = "source video";
     if matches!(
         url.host_str(),
         Some("photos.app.goo.gl" | "photos.google.com")
     ) {
-        let mut page = response(url, public, runtime)?;
+        let mut page = response(url, public, runtime, "Google Photos share page")?;
         let mut bytes = vec![];
         page.by_ref()
             .take(10 * 1024 * 1024 + 1)
@@ -143,8 +192,9 @@ pub fn download(url: &str, destination: &Path, public: bool, runtime: &Runtime) 
             "Invalid Google Photos media URL"
         );
         url = Url::parse(&(url.to_string() + "=dv"))?;
+        description = "original-quality Google Photos video";
     }
-    let mut response = response(url, public, runtime)?;
+    let mut response = response(url, public, runtime, description)?;
     let content = response
         .headers()
         .get(CONTENT_TYPE)
@@ -179,6 +229,11 @@ pub fn download(url: &str, destination: &Path, public: bool, runtime: &Runtime) 
             .open(&temporary)?;
         let mut buffer = [0; 128 * 1024];
         let mut written = 0;
+        let mut last_progress = Instant::now();
+        crate::emit(
+            "progress",
+            serde_json::json!({"stage":"download","message":format!("Downloading {description}"),"current":0,"total":expected,"unit":"bytes"}),
+        );
         loop {
             runtime.check()?;
             let read = response.read(&mut buffer)?;
@@ -187,6 +242,13 @@ pub fn download(url: &str, destination: &Path, public: bool, runtime: &Runtime) 
             }
             file.write_all(&buffer[..read])?;
             written += read as u64;
+            if last_progress.elapsed() >= Duration::from_secs(5) {
+                crate::emit(
+                    "progress",
+                    serde_json::json!({"stage":"download","message":format!("Downloading {description}"),"current":written,"total":expected,"unit":"bytes"}),
+                );
+                last_progress = Instant::now();
+            }
         }
         ensure!(
             written > 0 && expected.is_none_or(|value| value == written),

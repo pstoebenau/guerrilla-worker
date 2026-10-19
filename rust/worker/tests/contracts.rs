@@ -1158,7 +1158,7 @@ async fn source_download_failure_uploads_diagnostics_before_finish() {
     }).await;
     *base.lock().unwrap() = url.clone();
     let temp = tempfile::tempdir().unwrap();
-    let paths = pipeline_fixture(&temp, "import json,sys\nprint(json.dumps({'type':'failed','error':'Source request timed out https://signed.example/private','interrupted':False}),flush=True)\nsys.exit(7)\n");
+    let paths = pipeline_fixture(&temp, "import json,sys\nprint(json.dumps({'type':'progress','stage':'download','message':'Downloading original video','current':10,'total':100,'unit':'bytes'}),flush=True)\nprint(json.dumps({'type':'failed','error':'Source request timed out https://signed.example/private','interrupted':False}),flush=True)\nsys.exit(7)\n");
     let mut assignment = assignment(30);
     assignment.resume_state = None;
     assignment.input.kind = "source".into();
@@ -1187,6 +1187,13 @@ async fn source_download_failure_uploads_diagnostics_before_finish() {
         .unwrap();
     assert!(complete < finish);
     assert_eq!(requests[finish].1["state"], "failed");
+    assert!(requests
+        .iter()
+        .any(|(route, value)| route == "/api/worker/events"
+            && value["message"] == "Downloading original video"
+            && value["stage"] == "download"
+            && value["progress"]["current"] == 10
+            && value["progress"]["unit"] == "bytes"));
     assert_eq!(
         requests[finish].1["error"],
         "Source request timed out [redacted URL]"
