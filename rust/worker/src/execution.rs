@@ -261,25 +261,7 @@ pub async fn execute(
             if assignment.input.kind=="stored" {
                 let sha=assignment.input.sha256.as_deref().context("Missing input checksum")?;let size=assignment.input.size.context("Missing input size")?;
                 if archive::download(client,&assignment.input.url,&input,size,sha,&cancel).await.is_err(){if cancel.is_cancelled(){bail!("Download interrupted");}let refreshed:Value=client.post("refresh",&body(&assignment.fence,json!({"input":true,"artifactIds":[]})),&cancel).await?;archive::download(client,refreshed["input"]["url"].as_str().context("Missing refreshed input URL")?,&input,size,sha,&cancel).await?;}
-            }else if assignment.input.kind=="source" {
-                let args=vec!["--download".into(),assignment.input.url.clone(),"--public-source".into(),"--destination".into(),input.to_string_lossy().into_owned()];
-                run_process(paths,&args,&job.join("download.log"),&cancel,|event:Value| {
-                    let events=&events;let error=&pipeline_error;
-                    async move {
-                        if event["type"]=="failed" {
-                            let message=redact(event["error"].as_str().unwrap_or("Source download failed"));
-                            *error.lock().await=Some((message.clone(),event["interrupted"]==true));
-                            events.send("progress",&message,json!({"status":"failed"}),Some("download"),None).await?;
-                        } else if event["type"]=="progress" {
-                            let mut progress=event.as_object().cloned().unwrap_or_default();
-                            for key in ["type","stage","message","timestamp"] {progress.remove(key);}
-                            events.send("progress",event["message"].as_str().unwrap_or("Downloading source video"),Value::Object(progress),Some("download"),None).await?;
-                        }
-                        Ok(())
-                    }
-                }).await?;
-                archive::archive_file(client,&assignment.fence,archive::UploadFile{path:&input,relative:"input/source.mp4",role:"input",checkpoint:None,client_id:&uuid::Uuid::new_v4().to_string()},&cancel).await?;
-            }else {bail!("Unknown input kind");}
+            }else {bail!("Hosted scans require a video saved to private storage; the GPU worker does not fetch source links.");}
             events.send("stage","Video ready",json!({"status":"completed"}),Some("download"),None).await?;
         }
         let mut request=assignment.request.clone();let request_object=request.as_object_mut().context("Invalid request")?;

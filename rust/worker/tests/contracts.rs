@@ -1143,22 +1143,10 @@ fn log_picker_reads_retained_downloads_and_rejects_non_logs_and_links() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn source_download_failure_uploads_diagnostics_before_finish() {
-    let base: Arc<Mutex<String>> = Default::default();
-    let server_base = base.clone();
-    let uploaded: Arc<Mutex<Vec<Vec<u8>>>> = Default::default();
-    let uploads = uploaded.clone();
-    let (url, requests, task) = server(move |route, bytes| {
-        let response = match route {
-            "/api/worker/artifacts" => json!({"artifactId":"download-log","method":"put","url":format!("{}/upload",server_base.lock().unwrap())}),
-            "/upload" => { uploads.lock().unwrap().push(bytes.to_vec()); json!({}) },
-            _ => json!({})
-        };
-        (200, serde_json::to_vec(&response).unwrap())
-    }).await;
-    *base.lock().unwrap() = url.clone();
+async fn hosted_source_links_are_rejected_without_running_the_pipeline() {
+    let (url, requests, task) = server(|_, _| (200, serde_json::to_vec(&json!({})).unwrap())).await;
     let temp = tempfile::tempdir().unwrap();
-    let paths = pipeline_fixture(&temp, "import json,sys\nprint(json.dumps({'type':'progress','stage':'download','message':'Downloading original video','current':10,'total':100,'unit':'bytes'}),flush=True)\nprint(json.dumps({'type':'failed','error':'Source request timed out https://signed.example/private','interrupted':False}),flush=True)\nsys.exit(7)\n");
+    let paths = pipeline_fixture(&temp, "raise RuntimeError('pipeline must not run')\n");
     let mut assignment = assignment(30);
     assignment.resume_state = None;
     assignment.input.kind = "source".into();
@@ -1171,41 +1159,21 @@ async fn source_download_failure_uploads_diagnostics_before_finish() {
         Arc::new(tokio::sync::Mutex::new(daemon::Status::default())),
     )
     .await;
-    let error = result.unwrap_err().to_string();
-    assert!(error.contains("Source request timed out"));
-    assert!(error.contains("7"));
-    assert!(error.contains("download.log"));
-    assert!(!error.contains("signed.example"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("does not fetch source links"));
+    assert!(!paths.scratch.join("scan/attempt/download.log").exists());
     let requests = requests.lock().unwrap();
-    let complete = requests
-        .iter()
-        .position(|(route, _)| route == "/api/worker/complete")
-        .unwrap();
     let finish = requests
         .iter()
-        .position(|(route, _)| route == "/api/worker/finish")
+        .find(|(route, _)| route == "/api/worker/finish")
         .unwrap();
-    assert!(complete < finish);
-    assert_eq!(requests[finish].1["state"], "failed");
-    assert!(requests
-        .iter()
-        .any(|(route, value)| route == "/api/worker/events"
-            && value["message"] == "Downloading original video"
-            && value["stage"] == "download"
-            && value["progress"]["current"] == 10
-            && value["progress"]["unit"] == "bytes"));
-    assert_eq!(
-        requests[finish].1["error"],
-        "Source request timed out [redacted URL]"
-    );
-    assert!(requests
-        .iter()
-        .any(|(route, value)| route == "/api/worker/artifacts"
-            && value["relativePath"] == "logs/download.log"));
-    assert!(
-        String::from_utf8_lossy(&uploaded.lock().unwrap()[0]).contains("Source request timed out")
-    );
-    assert!(paths.scratch.join("scan/attempt/download.log").exists());
+    assert_eq!(finish.1["state"], "failed");
+    assert!(finish.1["error"]
+        .as_str()
+        .unwrap()
+        .contains("private storage"));
     drop(requests);
     task.abort();
 }
