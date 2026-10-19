@@ -71,19 +71,21 @@ pub fn save(path: &Path, value: &impl Serialize) -> Result<()> {
         path.file_name().unwrap().to_string_lossy(),
         uuid::Uuid::new_v4()
     ));
-    let result = (|| {
+    let result: Result<()> = (|| {
         let mut file = File::options()
             .create_new(true)
             .write(true)
             .open(&temporary)?;
         serde_json::to_writer_pretty(&mut file, value)?;
         file.write_all(b"\n")?;
-        file.sync_all()?;
+        file.sync_all().context("Syncing temporary JSON file")?;
         for attempt in 0..6 {
             match fs::rename(&temporary, path) {
                 Ok(()) => {
                     #[cfg(unix)]
-                    File::open(parent)?.sync_all()?;
+                    File::open(parent)?
+                        .sync_all()
+                        .context("Syncing JSON parent directory")?;
                     return Ok(());
                 }
                 Err(error)
@@ -97,7 +99,7 @@ pub fn save(path: &Path, value: &impl Serialize) -> Result<()> {
         unreachable!()
     })();
     let _ = fs::remove_file(&temporary);
-    result
+    result.with_context(|| format!("Saving JSON {}", path.display()))
 }
 
 pub fn safe(root: &Path, relative: &str) -> Result<PathBuf> {

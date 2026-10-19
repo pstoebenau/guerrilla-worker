@@ -471,8 +471,13 @@ impl Frozen {
                 }
                 ensure!(
                     Instant::now() < deadline,
-                    "Could not freeze every engine thread"
+                    "Could not freeze every engine thread: {members:?}"
                 );
+                // Consecutive snapshot guards can race a pending SIGCONT on
+                // Darwin. Reassert the stop until every live member confirms it.
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGSTOP);
+                }
                 thread::sleep(Duration::from_millis(10));
             }
         }
@@ -868,6 +873,48 @@ mod tests {
                 .all(|(_, state)| state.starts_with('T')),
             "Live group members must be stopped: {states:?}"
         );
+    }
+
+    #[test]
+    fn consecutive_snapshot_guards_stop_the_engine_again() {
+        let mut command = Command::new("python3");
+        command
+            .args([
+                "-c",
+                "import time; print('ready',flush=True); time.sleep(60)",
+            ])
+            .stdout(Stdio::piped());
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        let mut ready = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        let result = (|| -> Result<()> {
+            for _ in 0..64 {
+                let frozen = Frozen::new(child.id())?;
+                ensure!(
+                    group_members(child.id())?
+                        .iter()
+                        .all(|(_, state)| state.starts_with('T')),
+                    "Snapshot guard left the engine running"
+                );
+                drop(frozen);
+            }
+            Ok(())
+        })();
+        unsafe {
+            libc::kill(-(child.id() as i32), libc::SIGKILL);
+        }
+        let _ = child.wait();
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[test]

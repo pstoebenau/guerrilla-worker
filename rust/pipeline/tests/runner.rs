@@ -926,7 +926,10 @@ while True:
 '''
 child=subprocess.Popen([sys.executable,'-c',writer,str(Path(sys.argv[1]).with_name('counter'))],stdout=subprocess.PIPE,text=True)
 assert child.stdout.readline().strip()=='ready'
-Path(sys.argv[1]).write_text(json.dumps([os.getpid(),child.pid]))
+ready=Path(sys.argv[1])
+temporary=ready.with_suffix('.tmp')
+temporary.write_text(json.dumps([os.getpid(),child.pid]))
+temporary.replace(ready)
 time.sleep(60)
 "#;
     let mut child = process_fixture::ManagedChild::spawn_for_test(
@@ -946,11 +949,14 @@ time.sleep(60)
         std::thread::sleep(Duration::from_millis(10));
     }
     let _frozen = child.freeze().unwrap();
+    let ready = root.join("frozen.json");
+    let temporary = ready.with_extension("tmp");
     fs::write(
-        root.join("frozen.json"),
+        &temporary,
         serde_json::to_vec(&json!({"guardian":child.child.id()})).unwrap(),
     )
     .unwrap();
+    fs::rename(temporary, ready).unwrap();
     loop {
         std::thread::sleep(Duration::from_secs(1));
     }
