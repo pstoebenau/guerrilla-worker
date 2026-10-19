@@ -462,6 +462,26 @@ fn interrupted_training_selectively_restores_checkpoint_and_relocated_dataset() 
     assert!(!initial.wait().unwrap().success());
     let state = fixture.state();
     assert!(state["stageCheckpoints"].get("training").is_some());
+    assert!(state["completed"].get("training").is_none());
+    let training = fixture
+        .output
+        .join(state["stages"]["training"].as_str().unwrap());
+    let checkpoint = fixture
+        .output
+        .join(state["checkpoints"][0]["path"].as_str().unwrap());
+    // Final preservation can precede a failed archival acknowledgement. Seed
+    // that incomplete output explicitly rather than depending on engine timing.
+    copy_fixture(
+        &checkpoint.join("splat.ply"),
+        &training.join("final/splat.ply"),
+    );
+    copy_fixture(
+        &checkpoint.parent().unwrap().join("config.json"),
+        &training.join("final/config.json"),
+    );
+    assert!(fs::read_to_string(training.join("final/config.json"))
+        .unwrap()
+        .contains("\"resumed\": false"));
     let relocated = fixture.root.path().join("relocated");
     fs::create_dir_all(&relocated).unwrap();
     fs::copy(
@@ -470,15 +490,18 @@ fn interrupted_training_selectively_restores_checkpoint_and_relocated_dataset() 
     )
     .unwrap();
     fs::remove_file(&fixture.input).unwrap();
-    fixture.write(json!({"resume":true,"selectiveResume":true,"inputSha256":state["identity"]["inputSha256"],"outputPath":relocated}));
+    fixture.write(json!({"resume":true,"selectiveResume":true,"inputSha256":state["identity"]["inputSha256"],"outputPath":relocated,"archiveAck":true,"archiveTimeoutSeconds":30}));
+    let release = fixture.root.path().join("resume-release");
     let mut resumed = fixture
         .command()
+        .env("FIXTURE_RESUME_RELEASE", &release)
         .args(["--request", fixture.request.to_str().unwrap()])
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
     let mut restored = vec![];
     let mut failed = None;
+    let mut checkpoint_observed = false;
     for line in BufReader::new(resumed.stdout.take().unwrap()).lines() {
         let event: Value = serde_json::from_str(&line.unwrap()).unwrap();
         if event["type"] == "restore" {
@@ -493,11 +516,35 @@ fn interrupted_training_selectively_restores_checkpoint_and_relocated_dataset() 
             fs::create_dir_all(ack.parent().unwrap()).unwrap();
             fs::write(ack, b"verified").unwrap();
         }
+        if event["type"] == "checkpoint" {
+            let current: Value =
+                serde_json::from_slice(&fs::read(relocated.join("platform-state.json")).unwrap())
+                    .unwrap();
+            if event["stage"] == "training" && current["completed"].get("training").is_none() {
+                let run_config = relocated
+                    .join(current["stages"]["training"].as_str().unwrap())
+                    .join("run/config.json");
+                assert!(fs::read_to_string(run_config)
+                    .unwrap()
+                    .contains("\"resumed\": true"));
+                checkpoint_observed = true;
+                fs::write(&release, b"checkpoint observed").unwrap();
+            }
+            let ack = relocated
+                .join(".archive-acks")
+                .join(event["checkpointId"].as_str().unwrap());
+            fs::create_dir_all(ack.parent().unwrap()).unwrap();
+            fs::write(ack, b"verified").unwrap();
+        }
         if event["type"] == "failed" {
             failed = Some(event);
         }
     }
     assert!(resumed.wait().unwrap().success(), "{failed:?}");
+    assert!(
+        checkpoint_observed,
+        "Resume must survive pruning an acknowledged live checkpoint"
+    );
     let final_state: Value =
         serde_json::from_slice(&fs::read(relocated.join("platform-state.json")).unwrap()).unwrap();
     let training = relocated.join(final_state["stages"]["training"].as_str().unwrap());
@@ -509,6 +556,9 @@ fn interrupted_training_selectively_restores_checkpoint_and_relocated_dataset() 
         .iter()
         .any(|path| path.contains("retained-checkpoints")));
     assert!(!restored.iter().any(|path| path.starts_with("selection")));
+    for stage in ["selection", "reconstruction", "densification"] {
+        assert_eq!(final_state["completed"][stage], state["completed"][stage]);
+    }
     assert_eq!(final_state["result"]["gaussians"], 4);
 }
 fn copy_fixture(source: &std::path::Path, target: &std::path::Path) {

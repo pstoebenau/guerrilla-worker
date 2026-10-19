@@ -79,6 +79,13 @@ elif args[:1] == ['train']:
             (directory / 'state.tar').write_bytes(b'truncated')
         (directory / 'splat.ply').write_text(f'ply\nformat ascii 1.0\nelement vertex {count}\nproperty float x\nend_header\n' + ('0\n' * count))
     print('iteration 2/2')
+    if '--resume' in args and os.environ.get('FIXTURE_RESUME_RELEASE'):
+        release = Path(os.environ['FIXTURE_RESUME_RELEASE'])
+        deadline = time.monotonic() + 30
+        while not release.is_file():
+            if time.monotonic() >= deadline:
+                raise RuntimeError('Resumed fixture checkpoint was not released')
+            time.sleep(0.01)
     if os.environ.get('FIXTURE_HOLD') == '1':
         descendant = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
         (run / 'engine.pid').write_text(str(os.getpid()))

@@ -823,7 +823,9 @@ impl Runner {
                     && path.extension().and_then(|s| s.to_str())
                         == Some(self.request.backend.suffix())
                     && !relative.contains("retained-checkpoints")
-                    && self.request.backend.checkpoint(path.clone()).step > latest_step
+                    // The latest native checkpoint may also be the engine's
+                    // final output. Keep it until preserve_final runs on exit.
+                    && self.request.backend.checkpoint(path.clone()).step >= latest_step
                 {
                     continue;
                 }
@@ -1088,6 +1090,14 @@ impl Runner {
             if let Some(path) = checkpoint {
                 runner.restore(&[path.clone(), path.parent().unwrap().join("config.json")])?;
                 args.extend(["--resume".into(), path.to_string_lossy().to_string()]);
+            }
+            // An archive timeout can leave final output without a completed
+            // training stage. After verifying resume inputs, discard that stale
+            // final so live retention cannot retire the new run in its favor.
+            // Completed training takes the earlier fast path and stays intact.
+            let incomplete_final = folder.join("final");
+            if incomplete_final.exists() {
+                remove_product(&incomplete_final)?;
             }
             runner.command(
                 &args,
