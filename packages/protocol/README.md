@@ -14,18 +14,25 @@ all other calls use the revocable worker Bearer credential. Loopback HTTP is for
 local development only. Transfers use short-lived presigned URLs, never storage
 credentials. URLs and credentials must not appear in logs.
 
-`enroll`, `poll`, `heartbeat`, `events`, `artifacts`, `complete`, `checkpoint`,
-`refresh`, `cleanup`, and `finish` are POST endpoints. Each attempt operation carries its
-opaque fence. Event sequences start at one; event IDs make retransmission
-idempotent. Lease loss stops the subprocess tree. A heartbeat cannot revive an
-expired lease. Checkpoint acknowledgement follows durable canonical commit.
+Workers keep an authenticated outbound WebSocket at `GET /api/worker/connect`.
+The server sends `ready`, `work_available`, explicit `cancel`, or an owner-requested
+`status` query; workers answer status queries using the same request identity.
+Idle sockets send no application heartbeat. Work is claimed on connection,
+notification, and completion. Reconnects use bounded exponential backoff.
 
-After acquiring its exclusive GPU lock, an agent sends `recovering: true` in its
-startup poll. Personal-worker recovery polls do not claim an assignment. A
-`recoveryPending: true` response keeps startup recovery enabled while a previous
-lease is still valid; otherwise the next poll claims work normally. Retrying a
-startup poll cannot create duplicate resumes. Cloud termination barriers remain
-under control-plane ownership.
+`enroll`, `poll`, `reconcile`, `events`, `artifacts`, `complete`, `checkpoint`,
+`refresh`, `cleanup`, and `finish` are POST endpoints. Each attempt operation
+carries its opaque fence. `reconcile` returns `continue` or `stop` with a
+`cancelled`/`superseded` reason. D1 owns attempt validity: connection loss and
+transport silence never expire an assignment or cancel computation. Workers
+reconcile before replaying durable events or uploading after reconnect. An
+explicit retry supersedes the previous fence immediately.
+
+Event sequences start at one; stable event IDs make retransmission idempotent.
+Workers retain lifecycle events and terminal results locally until acknowledged,
+coalesce progress, and preserve completed outputs plus the latest frozen resume
+checkpoint during outages. Only stages needing unavailable remote inputs pause.
+Checkpoint acknowledgement follows durable canonical commit.
 
 Assignments carry scan-owned `resumeState` and uploaded artifact metadata across
 all attempts. Workers restore only dependencies requested by the next unfinished
@@ -34,10 +41,10 @@ checkpoint commit without downloading or uploading those bytes again. Completed
 stage manifests are immutable. Native checkpoints are recorded separately for
 unfinished stages.
 
-A heartbeat stop with `reason: "cancelled"` authorizes discarding that scan's local
+A reconciliation stop with `reason: "cancelled"` authorizes discarding that scan's local
 scratch after processing/transfers stop. Other stops retain unsaved data. Polling
 also returns outstanding `cleanup` fences, including after restart; `cleanup`
-acknowledges deletion even after the execution lease expires. Old protocol-v1
+acknowledges deletion after an attempt has ended. Old protocol-v1
 workers and attempt-based resume formats are not supported by this protocol.
 
 Artifact allocation uses an idempotent client ID. Upload URLs target exact keys

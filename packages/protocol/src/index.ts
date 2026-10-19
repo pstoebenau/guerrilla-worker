@@ -33,6 +33,7 @@ export interface ArtifactManifest {
 }
 export interface Assignment extends Fence {
   protocolVersion: 2;
+  /** Legacy compatibility field; transport silence does not expire assignments. */
   leaseExpiresAt: string;
   settingsHash: string;
   request: ScanRequest;
@@ -43,6 +44,18 @@ export interface Assignment extends Fence {
 }
 export interface PollResponse { assignment: Assignment | null; command: Command; pollAfterMs: number; recoveryPending?: boolean; cleanup?: Fence[] }
 export interface HeartbeatResponse { leaseExpiresAt: string; command: Command; reason?: "cancelled" }
+export interface ReconcileResponse { command: Command; reason?: "cancelled" | "superseded"; state?: "completed" | "failed" | "interrupted" }
+export type WorkerControlMessage =
+  | { type: "ready" }
+  | { type: "work_available" }
+  | { type: "status"; requestId: string }
+  | ({ type: "cancel" } & Fence);
+export type WorkerStatusMessage = {
+  type: "status";
+  requestId: string;
+  state: "idle" | "busy";
+} & Partial<Fence>;
+
 export interface EnrollmentRequest { token: string; registration: Registration }
 export interface EnrollmentResponse { workerId: string; credential: string }
 export interface WorkerEvent extends Fence {

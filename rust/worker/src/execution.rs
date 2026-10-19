@@ -1,10 +1,10 @@
 use crate::{
-    api::{body, ApiError, Client},
+    api::{body, Client},
     archive::{self, BackgroundArchive},
     daemon::Status,
     files,
     profile::ContextPaths,
-    protocol::{redact, valid_id, Assignment, Fence, Heartbeat},
+    protocol::{redact, valid_id, Assignment, Fence},
 };
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -12,10 +12,10 @@ use std::{
     collections::BTreeSet,
     path::Path,
     sync::{
-        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -23,20 +23,22 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-fn timestamp(value: &str) -> Result<i64> {
-    Ok(chrono::DateTime::parse_from_rfc3339(value)?.timestamp_millis())
-}
-fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
-struct LeaseTasks {
+struct ExecutionTasks {
     cancel: CancellationToken,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
-impl Drop for LeaseTasks {
+impl ExecutionTasks {
+    async fn stop(&mut self) {
+        self.cancel.cancel();
+        for task in &self.tasks {
+            task.abort();
+        }
+        for task in &mut self.tasks {
+            let _ = task.await;
+        }
+    }
+}
+impl Drop for ExecutionTasks {
     fn drop(&mut self) {
         self.cancel.cancel();
         for task in &self.tasks {
@@ -45,10 +47,8 @@ impl Drop for LeaseTasks {
     }
 }
 struct Events {
-    client: Client,
     fence: Fence,
-    sequence: AtomicU64,
-    cancel: CancellationToken,
+    outbox: Arc<crate::outbox::Outbox>,
     status: Arc<Mutex<Status>>,
     state: std::path::PathBuf,
     drain: Arc<AtomicBool>,
@@ -66,7 +66,7 @@ impl Events {
         let _serial = self.serial.lock().await;
         let mut update = body(
             &self.fence,
-            json!({"eventId":uuid::Uuid::new_v4().to_string(),"sequence":self.sequence.fetch_add(1,Ordering::SeqCst)+1,"kind":kind,"message":redact(message),"progress":progress}),
+            json!({"eventId":uuid::Uuid::new_v4().to_string(),"kind":kind,"message":redact(message),"progress":progress}),
         );
         if let Some(stage) = stage {
             update["stage"] = stage.into();
@@ -74,7 +74,7 @@ impl Events {
         if let Some(versions) = versions {
             update["runtimeVersions"] = versions.clone();
         }
-        let _: Value = self.client.post("events", &update, &self.cancel).await?;
+        self.outbox.push(update).await?;
         if kind == "upload" {
             return Ok(());
         }
@@ -97,7 +97,7 @@ impl Events {
 pub async fn execute(
     paths: &ContextPaths,
     client: &Client,
-    assignment: Assignment,
+    mut assignment: Assignment,
     shutdown: &CancellationToken,
     local_drain: Arc<AtomicBool>,
     status: Arc<Mutex<Status>>,
@@ -121,74 +121,8 @@ pub async fn execute(
     {
         bail!("Incompatible assignment");
     }
-    let deadline = Arc::new(AtomicI64::new(timestamp(&assignment.lease_expires_at)?));
-    if deadline.load(Ordering::SeqCst) <= now() {
-        bail!("Expired assignment");
-    }
     let cancel = shutdown.child_token();
-    let task_cancel = cancel.clone();
-    let client_heartbeat = client.clone();
-    let fence = assignment.fence.clone();
-    let expiry = deadline.clone();
     let cancelled = Arc::new(AtomicBool::new(false));
-    let owner_cancelled = cancelled.clone();
-    let drain = local_drain.clone();
-    let server_drain = Arc::new(AtomicBool::new(false));
-    let heartbeat_drain = server_drain.clone();
-    let watchdog = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(250));
-        loop {
-            tokio::select! {_=task_cancel.cancelled()=>break,_=interval.tick()=>{if now()>=expiry.load(Ordering::SeqCst){task_cancel.cancel();break;}}}
-        }
-    });
-    let heartbeat_cancel = cancel.clone();
-    let heartbeat = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(5));
-        interval.tick().await;
-        loop {
-            tokio::select! {_=heartbeat_cancel.cancelled()=>break,_=interval.tick()=>{}}
-            match client_heartbeat
-                .post::<Heartbeat>(
-                    "heartbeat",
-                    &serde_json::to_value(&fence).unwrap(),
-                    &heartbeat_cancel,
-                )
-                .await
-            {
-                Ok(response) => {
-                    if response.command == "stop" {
-                        owner_cancelled.store(
-                            response.reason.as_deref() == Some("cancelled"),
-                            Ordering::SeqCst,
-                        );
-                        heartbeat_cancel.cancel();
-                        break;
-                    }
-                    if response.command == "drain" {
-                        drain.store(true, Ordering::SeqCst);
-                        heartbeat_drain.store(true, Ordering::SeqCst);
-                    }
-                    if let Ok(expiry) = timestamp(&response.lease_expires_at) {
-                        deadline.store(expiry, Ordering::SeqCst);
-                    }
-                }
-                Err(error) => {
-                    if error
-                        .downcast_ref::<ApiError>()
-                        .is_some_and(|s| s.0 < 500 && s.0 != 429)
-                    {
-                        heartbeat_cancel.cancel();
-                        break;
-                    }
-                    eprintln!("Lease renewal transport failed; deadline remains enforced");
-                }
-            }
-        }
-    });
-    let lease_tasks = LeaseTasks {
-        cancel: cancel.clone(),
-        tasks: vec![watchdog, heartbeat],
-    };
     let job = files::checked(
         &paths.scratch,
         &format!(
@@ -207,18 +141,44 @@ pub async fn execute(
             &serde_json::to_vec(&*status)?,
         )?;
     }
-    let events = Arc::new(Events {
-        client: client.clone(),
-        fence: assignment.fence.clone(),
-        sequence: AtomicU64::new(0),
+    files::private_dir(&output.join(".worker"))?;
+    let fence_path = output.join(".worker/fence.json");
+    let same_fence = std::fs::read(&fence_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|fence| fence == serde_json::to_value(&assignment.fence).unwrap());
+    if same_fence {
+        if let Ok(bytes) = std::fs::read(output.join("platform-state.json")) {
+            assignment.resume_state = Some(serde_json::from_slice(&bytes)?);
+        }
+    }
+    files::write_private(&fence_path, &serde_json::to_vec(&assignment.fence)?)?;
+    let outbox = crate::outbox::Outbox::open(output.join(".worker/events.json"))?;
+    if let Some(session) = &client.session {
+        session
+            .activate(
+                assignment.fence.clone(),
+                cancel.clone(),
+                cancelled.clone(),
+                local_drain.clone(),
+            )
+            .await;
+    }
+    let event_task = tokio::spawn(outbox.clone().run(client.clone(), cancel.clone()));
+    let mut execution_tasks = ExecutionTasks {
         cancel: cancel.clone(),
+        tasks: vec![event_task],
+    };
+    let events = Arc::new(Events {
+        fence: assignment.fence.clone(),
+        outbox: outbox.clone(),
         status,
         state: paths.state.clone(),
         drain: local_drain.clone(),
         serial: Mutex::new(()),
     });
     let archive_cancel = cancel.child_token();
-    let archives = BackgroundArchive::new(
+    let mut archives = BackgroundArchive::new(
         client.clone(),
         assignment.fence.clone(),
         output.clone(),
@@ -250,13 +210,22 @@ pub async fn execute(
         })
     }));
     let pipeline_error = Arc::new(Mutex::new(None::<(String, bool)>));
+    let finish_path = output.join(".worker/finish.json");
+    let saved_finish: Option<Value> = match std::fs::read(&finish_path) {
+        Ok(bytes) => Some(serde_json::from_slice(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
     let result=async {
+        if saved_finish.is_some() { return Ok::<(), anyhow::Error>(()); }
         files::private_dir(&paths.scratch)?;
         files::private_dir(&output.join(".worker"))?;
         if let Some(state)=&assignment.resume_state{files::write_private(&output.join("platform-state.json"),&serde_json::to_vec(state)?)?;}
         let needs_input=assignment.resume_state.as_ref().and_then(|state|state["completed"].get("selection")).is_none();
         let input=job.join("input.mp4");
-        if needs_input {
+        let input_cached = assignment.input.size.zip(assignment.input.sha256.as_ref())
+            .is_some_and(|(size, sha)| files::hash(&input).is_ok_and(|identity| identity == (size, sha.clone())));
+        if needs_input && !input_cached {
             events.send("stage","Preparing video",json!({"status":"running"}),Some("download"),None).await?;
             if assignment.input.kind=="stored" {
                 let sha=assignment.input.sha256.as_deref().context("Missing input checksum")?;let size=assignment.input.size.context("Missing input size")?;
@@ -268,9 +237,11 @@ pub async fn execute(
         request_object.extend(json!({"scanId":assignment.fence.scan_id,"attemptId":assignment.fence.attempt_id,"inputPath":input,"outputPath":output,"resume":assignment.resume_state.is_some(),"selectiveResume":assignment.resume_state.is_some(),"inputSha256":assignment.input.sha256,"archiveAck":true,"backgroundArchive":true}).as_object().unwrap().clone());
         if let Some(versions)=&assignment.runtime_versions{request_object.insert("runtimeVersions".into(),versions.clone());}
         let request_path=output.join(".worker/request.json");files::write_private(&request_path,&serde_json::to_vec(&request)?)?;
-        let checkpoint_sequence=AtomicU64::new(0);let restored=Mutex::new(BTreeSet::new());
+        let sequence_path = output.join(".worker/checkpoint-sequence");
+        let sequence = std::fs::read_to_string(&sequence_path).ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let checkpoint_sequence=AtomicU64::new(sequence);let restored=Mutex::new(BTreeSet::new());
         run_process(paths,&["--request".into(),request_path.to_string_lossy().into_owned()],&job.join("worker.log"),&cancel,|event:Value| {
-            let restored=&restored;let archives=&archives;let events=&events;let output=&output;let assignment=&assignment;let job=&job;let sequence=&checkpoint_sequence;let error=&pipeline_error;let cancel=&cancel;
+            let restored=&restored;let archives=&archives;let events=&events;let output=&output;let assignment=&assignment;let job=&job;let sequence=&checkpoint_sequence;let error=&pipeline_error;let cancel=&cancel;let sequence_path=&sequence_path;
             async move {
                 let kind=event["type"].as_str().unwrap_or("progress");let stage=event["stage"].as_str();
                 if kind=="restore" {
@@ -282,7 +253,7 @@ pub async fn execute(
                 if kind=="checkpoint" {
                     files::private_dir(&output.join("logs"))?;files::write_log_tail(&job.join("worker.log"),&output.join("logs/worker.log"))?;
                     let id=event["checkpointId"].as_str().context("Missing checkpoint identity")?;
-                    archives.enqueue(id,sequence.fetch_add(1,Ordering::SeqCst)+1).await?;return Ok(());
+                    let next=sequence.fetch_add(1,Ordering::SeqCst)+1;files::write_private(sequence_path,next.to_string().as_bytes())?;archives.enqueue(id,next).await?;return Ok(());
                 }
                 if kind=="failed"{*error.lock().await=Some((redact(event["error"].as_str().unwrap_or("Pipeline failed")),event["interrupted"]==true));}
                 if kind=="completed" {return Ok(());}
@@ -290,102 +261,93 @@ pub async fn execute(
                 events.send(kind,event["message"].as_str().or(event["error"].as_str()).unwrap_or(kind),Value::Object(progress),stage,event.get("runtimeVersions")).await
             }
         }).await?;
-        events.send("stage","Waiting for required uploads",json!({"status":"running"}),Some("finalizing"),None).await?;
-        archives.drain().await?;
-        let _:Value=client.post("finish",&body(&assignment.fence,json!({"state":"completed"})),&cancel).await?;
-        files::remove(&paths.scratch,&assignment.fence.scan_id)?;Ok(())
+        Ok(())
     }.await;
-    if let Err(error) = &result {
-        if !cancel.is_cancelled() && error.downcast_ref::<ApiError>().is_some_and(|s| s.0 == 409) {
-            if let Ok(response) = client
-                .post::<Heartbeat>(
-                    "heartbeat",
-                    &serde_json::to_value(&assignment.fence)?,
-                    &cancel,
-                )
-                .await
-            {
-                if response.command == "stop" {
-                    cancelled.store(
-                        response.reason.as_deref() == Some("cancelled"),
-                        Ordering::SeqCst,
-                    );
-                    cancel.cancel();
-                }
-            }
-        }
-        archive_cancel.cancel();
-        let cleanup_cancel = CancellationToken::new();
-        let mut cleanup_pending = false;
-        if cancelled.load(Ordering::SeqCst) {
-            cleanup_pending = files::remove(&paths.scratch, &assignment.fence.scan_id).is_err();
-            if !cleanup_pending {
-                let response: Result<Value> = client
-                    .post(
-                        "cleanup",
-                        &serde_json::to_value(&assignment.fence)?,
-                        &cleanup_cancel,
-                    )
-                    .await;
-                cleanup_pending = response.is_err();
-            }
-        }
-        if !cancel.is_cancelled() {
-            for name in ["download.log", "worker.log"] {
-                let saved = output.join("logs").join(name);
-                if files::write_log_tail(&job.join(name), &saved).is_ok() {
-                    if let Err(upload_error) = archive::archive_file(
-                        client,
-                        &assignment.fence,
-                        archive::UploadFile {
-                            path: &saved,
-                            relative: &format!("logs/{name}"),
-                            role: "log",
-                            checkpoint: None,
-                            client_id: &uuid::Uuid::new_v4().to_string(),
-                        },
-                        &cancel,
-                    )
-                    .await
-                    {
-                        eprintln!(
-                            "Could not upload {name}; local log retained at {}: {}",
-                            job.join(name).display(),
-                            redact(&upload_error.to_string())
-                        );
-                    }
-                }
-            }
-        }
-        let pipeline_error = pipeline_error.lock().await;
-        let interrupted = cancel.is_cancelled() || pipeline_error.as_ref().is_some_and(|e| e.1);
-        let message = if cleanup_pending {
-            "Cancelled; local cleanup pending.".to_owned()
-        } else if cancelled.load(Ordering::SeqCst) {
-            "Cancelled by owner.".to_owned()
-        } else {
-            pipeline_error
-                .as_ref()
-                .map(|e| e.0.clone())
-                .unwrap_or_else(|| redact(&error.to_string()))
-        };
-        let _ = tokio::time::timeout(
-            Duration::from_secs(10),
-            client.post::<Value>(
-                "finish",
-                &body(
-                    &assignment.fence,
-                    json!({"state":if interrupted{"interrupted"}else{"failed"},"error":message}),
-                ),
-                &cleanup_cancel,
-            ),
-        )
-        .await;
+    let pipeline_error = pipeline_error.lock().await;
+    let mut terminal = saved_finish.unwrap_or_else(|| {
+        if let Err(error) = &result {
+            let interrupted = shutdown.is_cancelled() || pipeline_error.as_ref().is_some_and(|e| e.1);
+            let message = pipeline_error.as_ref().map(|e| e.0.clone()).unwrap_or_else(|| redact(&error.to_string()));
+            body(&assignment.fence, json!({"state": if interrupted { "interrupted" } else { "failed" }, "error": message}))
+        } else { body(&assignment.fence, json!({"state":"completed"})) }
+    });
+    drop(pipeline_error);
+    // Persist completion before waiting for uploads. A daemon restart can finish
+    // publishing without repeating successful GPU computation.
+    if !cancel.is_cancelled() || shutdown.is_cancelled() {
+        files::write_private(&finish_path, &serde_json::to_vec(&terminal)?)?;
     }
+    let publication: Result<()> = async {
+        if cancelled.load(Ordering::SeqCst) {
+            archives.stop().await;
+            execution_tasks.stop().await;
+            files::remove(&paths.scratch, &assignment.fence.scan_id)?;
+            let _: Value = client
+                .post(
+                    "cleanup",
+                    &serde_json::to_value(&assignment.fence)?,
+                    shutdown,
+                )
+                .await?;
+            return Ok(());
+        }
+        if cancel.is_cancelled() {
+            bail!("Assignment interrupted; recovery files retained");
+        }
+        if terminal["state"] == "completed" {
+            events
+                .send(
+                    "stage",
+                    "Waiting for required uploads",
+                    json!({"status":"running"}),
+                    Some("finalizing"),
+                    None,
+                )
+                .await?;
+        }
+        if let Err(error) = archives.drain().await {
+            if cancel.is_cancelled() {
+                return Err(error);
+            }
+            terminal = body(
+                &assignment.fence,
+                json!({"state":"failed","error":redact(&error.to_string())}),
+            );
+            files::write_private(&finish_path, &serde_json::to_vec(&terminal)?)?;
+        }
+        outbox.flush(&cancel).await?;
+        let _: Value = client.post("finish", &terminal, &cancel).await?;
+        if terminal["state"] == "completed" {
+            files::remove(&paths.scratch, &assignment.fence.scan_id)?;
+        } else {
+            std::fs::remove_file(&finish_path)?;
+        }
+        Ok(())
+    }
+    .await;
+
+    let publication = if publication.is_err()
+        && client.session.as_ref().is_some_and(|session| {
+            session.confirmed(&assignment.fence, terminal["state"].as_str().unwrap_or(""))
+        }) {
+        archives.stop().await;
+        execution_tasks.stop().await;
+        if terminal["state"] == "completed" {
+            files::remove(&paths.scratch, &assignment.fence.scan_id)
+        } else {
+            std::fs::remove_file(&finish_path).map_err(Into::into)
+        }
+    } else {
+        publication
+    };
     cancel.cancel();
-    drop(lease_tasks);
+    drop(execution_tasks);
+    if let Some(session) = &client.session {
+        session.clear().await;
+    }
+    publication?;
     result?;
-    Ok(server_drain.load(Ordering::SeqCst))
+    Ok(false)
 }
 
 pub async fn run_process<F, Fut>(
@@ -536,4 +498,74 @@ fn terminate_tree(pid: u32, force: bool) {
         command.creation_flags(0x08000000);
         let _ = command.output();
     }
+}
+
+/// Resolve durable terminal intents even when a committed remote attempt is no
+/// longer returned by poll after a daemon restart.
+pub async fn recover_finished(
+    paths: &ContextPaths,
+    client: &Client,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    for scan in std::fs::read_dir(&paths.scratch)? {
+        let scan = scan?;
+        let Some(scan_id) = scan.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !valid_id(&scan_id) || !scan.file_type()?.is_dir() {
+            continue;
+        }
+        for attempt in std::fs::read_dir(files::checked(&paths.scratch, &scan_id)?)? {
+            let attempt = attempt?;
+            let Some(attempt_id) = attempt.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if !valid_id(&attempt_id) || !attempt.file_type()?.is_dir() {
+                continue;
+            }
+            let relative = format!("{scan_id}/{attempt_id}/run/.worker/finish.json");
+            let finish_path = files::checked(&paths.scratch, &relative)?;
+            let bytes = match std::fs::read(&finish_path) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let terminal: Value = serde_json::from_slice(&bytes)?;
+            let fence: Fence = serde_json::from_value(terminal.clone())?;
+            if fence.scan_id != scan_id
+                || fence.attempt_id != attempt_id
+                || !valid_id(&fence.lease_id)
+            {
+                bail!("Invalid retained terminal fence");
+            }
+            let response: Value = client
+                .post("reconcile", &serde_json::to_value(&fence)?, cancel)
+                .await?;
+            if response["command"] != "stop" {
+                continue;
+            }
+            if response["reason"] == "cancelled" {
+                files::remove(&paths.scratch, &scan_id)?;
+                let _: Value = client
+                    .post("cleanup", &serde_json::to_value(&fence)?, cancel)
+                    .await?;
+                break;
+            }
+            if response["state"] == "completed" && terminal["state"] == "completed" {
+                files::remove(&paths.scratch, &scan_id)?;
+                break;
+            }
+            if response["state"] == terminal["state"] && response["state"].is_string() {
+                std::fs::remove_file(&finish_path)?;
+            } else if response["reason"] == "superseded" {
+                // Keep unsuccessful/stale local work for diagnostics without
+                // replaying its terminal intent on every future connection.
+                std::fs::rename(
+                    &finish_path,
+                    finish_path.with_file_name("finish-superseded.json"),
+                )?;
+            }
+        }
+    }
+    Ok(())
 }

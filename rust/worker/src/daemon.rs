@@ -485,12 +485,34 @@ async fn run_loop(
         tokio::select! {_=cancel.cancelled()=>return Ok(()),_=tokio::time::sleep(Duration::from_secs(3))=>{}}
     };
     status.lock().await.worker_id = Some(credentials.worker_id);
-    let client = Client::new(&credentials.origin, &credentials.credential)?;
+    let mut client = Client::new(&credentials.origin, &credentials.credential)?;
+    let session = crate::connection::Session::new();
+    let connection = tokio::spawn(session.clone().run(client.clone(), cancel.clone()));
+    client.session = Some(session.clone());
+    let mut connectivity = session.connectivity();
+    let connection_status = status.clone();
+    let connection_status_path = paths.state.join("status.json");
+    let connection_updates = tokio::spawn(async move {
+        while connectivity.changed().await.is_ok() {
+            let connected = *connectivity.borrow_and_update();
+            let mut status = connection_status.lock().await;
+            status.connected = connected;
+            if let Ok(bytes) = serde_json::to_vec(&*status) {
+                let _ = files::write_private(&connection_status_path, &bytes);
+            }
+        }
+    });
+    let mut changes = session.changes();
     files::private_dir(&paths.scratch)?;
-    let mut clean = files::clean(&paths.scratch)?;
     let mut recovering = true;
     while !cancel.is_cancelled() && !drain.load(Ordering::SeqCst) {
-        let connected = status.lock().await.connected;
+        if session.wait(cancel).await.is_err() {
+            break;
+        }
+        changes.borrow_and_update();
+        execution::recover_finished(paths, &client, cancel).await?;
+        let clean = files::clean(&paths.scratch)?;
+        let connected = session.connected();
         publish(
             paths,
             status,
@@ -506,7 +528,7 @@ async fn run_loop(
                 cancel,
             )
             .await;
-        let step: Result<u64> = async {
+        let step: Result<bool> = async {
             let response = response?;
             publish(paths,status,"idle","Connected; waiting for assigned work",true).await?;
             recovering = response.recovery_pending;
@@ -527,25 +549,23 @@ async fn run_loop(
                     .await;
             }
             if !response.cleanup.is_empty() {
-                clean = files::clean(&paths.scratch)?;
-                return Ok(0);
+                return Ok(true);
             }
             if response.command != "continue" {
                 drain.store(true, Ordering::SeqCst);
-                return Ok(0);
+                return Ok(true);
             }
             if let Some(assignment) = response.assignment {
                 if drain.load(Ordering::SeqCst) {
                     let _:Value=client.post("finish",&body(&assignment.fence,json!({"state":"interrupted","error":"Worker locally drained before starting assignment."})),cancel).await?;
-                    return Ok(0);
+                    return Ok(true);
                 }
-                clean = false;
                 {
                     let mut s = status.lock().await;
                     s.scan_id = Some(assignment.fence.scan_id.clone());
                     s.attempt_id = Some(assignment.fence.attempt_id.clone());
                 }
-                let server_drain=execution::execute(
+                let execution=execution::execute(
                     paths,
                     &client,
                     assignment,
@@ -553,33 +573,36 @@ async fn run_loop(
                     drain.clone(),
                     status.clone(),
                 )
-                .await?;
-                clean = files::clean(&paths.scratch)?;
-                if server_drain {
-                    let _:Poll=client.post("poll",&json!({"registration":info,"clean":clean}),cancel).await?;
+                .await;
+                if let Err(error) = execution {
+                    if !cancel.is_cancelled() { eprintln!("{}", redact(&error.to_string())); }
                 }
+                return Ok(true);
             }
-            Ok(response.poll_after_ms.clamp(1000, 30000))
+            Ok(false)
         }
         .await;
         match step {
-            Ok(delay) => {
+            Ok(immediate) => {
                 if drain.load(Ordering::SeqCst) {
                     break;
                 }
-                tokio::select! {_=cancel.cancelled()=>break,_=tokio::time::sleep(Duration::from_millis(delay))=>{}}
+                if !immediate {
+                    tokio::select! { _ = cancel.cancelled() => break, _ = changes.changed() => {} }
+                }
             }
             Err(error) => {
                 if cancel.is_cancelled() {
                     break;
                 }
-                clean = files::clean(&paths.scratch).unwrap_or(false);
                 publish(paths, status, "error", &error.to_string(), false).await?;
                 eprintln!("{}", redact(&error.to_string()));
-                tokio::select! {_=cancel.cancelled()=>break,_=tokio::time::sleep(Duration::from_secs(5))=>{}}
+                session.disconnect();
             }
         }
     }
+    connection.abort();
+    connection_updates.abort();
     if drain.load(Ordering::SeqCst) && !cancel.is_cancelled() {
         publish(
             paths,

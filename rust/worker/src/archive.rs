@@ -7,7 +7,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -18,7 +18,37 @@ use std::{
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
 
+#[derive(Debug)]
+struct TransferTransport;
+impl std::fmt::Display for TransferTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Scoped transfer transport unavailable")
+    }
+}
+impl std::error::Error for TransferTransport {}
 pub async fn download(
+    client: &Client,
+    url: &str,
+    destination: &Path,
+    size: u64,
+    sha256: &str,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    loop {
+        match download_once(client, url, destination, size, sha256, cancel).await {
+            Err(error)
+                if !cancel.is_cancelled()
+                    && client.session.is_some()
+                    && error.downcast_ref::<TransferTransport>().is_some() =>
+            {
+                client.session.as_ref().unwrap().disconnect();
+                client.wait_connected(cancel).await?;
+            }
+            result => return result,
+        }
+    }
+}
+async fn download_once(
     client: &Client,
     url: &str,
     destination: &Path,
@@ -33,9 +63,13 @@ pub async fn download(
     {
         bail!("Invalid expected download identity");
     }
-    let response = tokio::select! {_=cancel.cancelled()=>bail!("Download interrupted"),r=client.http.get(transfer_url(url)?).timeout(Duration::from_secs(600)).send()=>r.map_err(|_|anyhow::anyhow!("Download transport failed"))?};
+    client.wait_connected(cancel).await?;
+    let response = tokio::select! {_=cancel.cancelled()=>bail!("Download interrupted"),r=client.http.get(transfer_url(url)?).timeout(Duration::from_secs(600)).send()=>r.map_err(|_|anyhow::Error::new(TransferTransport))?};
     if !response.status().is_success() {
-        bail!("Download failed ({})", response.status().as_u16());
+        if response.status().is_server_error() {
+            return Err(TransferTransport.into());
+        }
+        return Err(crate::api::ApiError(response.status().as_u16()).into());
     }
     files::private_dir(
         destination
@@ -47,7 +81,7 @@ pub async fn download(
         let mut options=tokio::fs::OpenOptions::new();options.create_new(true).write(true);
         #[cfg(unix)] options.mode(0o600);
         let mut file=options.open(&temporary).await?; let mut response=response;let mut bytes=0u64;let mut hash=Sha256::new();
-        loop {let chunk=tokio::select!{_=cancel.cancelled()=>bail!("Download interrupted"),r=response.chunk()=>r.map_err(|_|anyhow::anyhow!("Download stream failed"))?};let Some(chunk)=chunk else {break};bytes+=chunk.len() as u64;if bytes>size{bail!("Download exceeded manifest size");}hash.update(&chunk);file.write_all(&chunk).await?;}
+        loop {let chunk=tokio::select!{_=cancel.cancelled()=>bail!("Download interrupted"),r=response.chunk()=>r.map_err(|_|anyhow::Error::new(TransferTransport))?};let Some(chunk)=chunk else {break};bytes+=chunk.len() as u64;if bytes>size{bail!("Download exceeded manifest size");}hash.update(&chunk);file.write_all(&chunk).await?;}
         if bytes!=size||hex::encode(hash.finalize())!=sha256{bail!("Download checksum mismatch");}
         file.sync_all().await?;drop(file);
         #[cfg(windows)] files::replace_windows(&temporary,destination)?;
@@ -64,6 +98,7 @@ async fn put(
     length: u64,
     cancel: &CancellationToken,
 ) -> Result<Option<String>> {
+    client.wait_connected(cancel).await?;
     let mut file = tokio::fs::File::open(path).await?;
     file.seek(std::io::SeekFrom::Start(start)).await?;
     let request = client
@@ -74,7 +109,7 @@ async fn put(
         .body(reqwest::Body::wrap_stream(ReaderStream::new(
             file.take(length),
         )));
-    let response = tokio::select! {_=cancel.cancelled()=>bail!("Upload interrupted"),r=request.send()=>r.map_err(|_|anyhow::anyhow!("Upload transport failed"))?};
+    let response = tokio::select! {_=cancel.cancelled()=>bail!("Upload interrupted"),r=request.send()=>r.map_err(|_|{if let Some(session) = &client.session { session.disconnect(); } anyhow::anyhow!("Upload transport failed")})?};
     if !response.status().is_success() {
         return Err(crate::api::ApiError(response.status().as_u16()).into());
     }
@@ -393,6 +428,13 @@ async fn checkpoint(
     state: &Value,
     commit_started: &mut bool,
 ) -> Result<CheckpointResult> {
+    let commit_path = snapshot.root.join("commit.json");
+    if commit_path.exists() {
+        let commit: Value = serde_json::from_slice(&std::fs::read(&commit_path)?)?;
+        *commit_started = true;
+        let _: Value = client.post("checkpoint", &commit, cancel).await?;
+        return Ok(CheckpointResult::Saved);
+    }
     let required = declared(&state)?;
     let exclusions = exclusions(&state)?;
     let mut retained: BTreeMap<_, _> = inherited
@@ -488,16 +530,41 @@ async fn checkpoint(
     }
     // Once commit is attempted its outcome may be ambiguous on transport error.
     // Retry the identical commit before moving on to a replacement snapshot.
+    files::write_private(&commit_path, &serde_json::to_vec(&commit)?)?;
     *commit_started = true;
     let _: Value = client.post("checkpoint", &commit, cancel).await?;
     Ok(CheckpointResult::Saved)
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Snapshot {
     id: String,
     sequence: u64,
     root: PathBuf,
     stages: Vec<String>,
+}
+fn recover_snapshots(output: &Path) -> Result<VecDeque<Snapshot>> {
+    let archives = output.join(".worker/archives");
+    let entries = match std::fs::read_dir(&archives) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(VecDeque::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut snapshots = vec![];
+    for entry in entries {
+        let entry = entry?;
+        let descriptor = entry.path().join("snapshot.json");
+        if !descriptor.exists() {
+            continue;
+        }
+        let mut snapshot: Snapshot = serde_json::from_slice(&std::fs::read(descriptor)?)?;
+        if !valid_id(&snapshot.id) || entry.file_name().to_str() != Some(&snapshot.id) {
+            bail!("Invalid retained checkpoint identity");
+        }
+        snapshot.root = files::checked(output, &format!(".worker/archives/{}", snapshot.id))?;
+        snapshots.push(snapshot);
+    }
+    snapshots.sort_by_key(|s| s.sequence);
+    Ok(snapshots.into())
 }
 pub type Observer = Arc<
     dyn Fn(Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
@@ -529,6 +596,7 @@ async fn report(queue: &Queue, status: &str, snapshot: &Snapshot, current: u64, 
 }
 struct Queue {
     pending: tokio::sync::Mutex<Option<Snapshot>>,
+    recovered: tokio::sync::Mutex<VecDeque<Snapshot>>,
     busy: AtomicBool,
     notify: tokio::sync::Notify,
     error: tokio::sync::Mutex<Option<String>>,
@@ -551,11 +619,17 @@ impl BackgroundArchive {
         inherited: Vec<Artifact>,
         cancel: CancellationToken,
     ) -> Self {
+        let recovery = recover_snapshots(&output);
+        let (recovered, error) = match recovery {
+            Ok(snapshots) => (snapshots, None),
+            Err(error) => (VecDeque::new(), Some(error.to_string())),
+        };
         let queue = Arc::new(Queue {
             pending: tokio::sync::Mutex::new(None),
+            recovered: tokio::sync::Mutex::new(recovered),
             busy: AtomicBool::new(false),
             notify: tokio::sync::Notify::new(),
-            error: tokio::sync::Mutex::new(None),
+            error: tokio::sync::Mutex::new(error),
             observer: std::sync::Mutex::new(None),
             progress: std::sync::Mutex::new(BTreeMap::new()),
         });
@@ -569,7 +643,12 @@ impl BackgroundArchive {
                 let ready = q.notify.notified();
                 let snapshot = {
                     let mut pending = q.pending.lock().await;
-                    let next = pending.take();
+                    let next = q
+                        .recovered
+                        .lock()
+                        .await
+                        .pop_front()
+                        .or_else(|| pending.take());
                     if next.is_some() {
                         q.busy.store(true, Ordering::SeqCst);
                     }
@@ -589,7 +668,7 @@ impl BackgroundArchive {
                 };
                 let mut cache = BTreeMap::new();
                 let mut retries = 0;
-                let mut commit_started = false;
+                let mut commit_started = snapshot.root.join("commit.json").exists();
                 loop {
                     match checkpoint(
                         &client,
@@ -676,6 +755,11 @@ impl BackgroundArchive {
             frozen: std::sync::Mutex::new(BTreeMap::new()),
         }
     }
+    pub async fn stop(&mut self) {
+        self.cancel.cancel();
+        self.task.abort();
+        let _ = (&mut self.task).await;
+    }
     pub fn observe(&self, observer: Observer) {
         *self.queue.observer.lock().unwrap() = Some(observer);
     }
@@ -721,6 +805,10 @@ impl BackgroundArchive {
             root,
             stages: stages.into_iter().collect(),
         };
+        files::write_private(
+            &snapshot.root.join("snapshot.json"),
+            &serde_json::to_vec(&snapshot)?,
+        )?;
         report(&self.queue, "queued", &snapshot, 0, 0).await;
         let mut pending = self.queue.pending.lock().await;
         if let Some(previous) = pending.replace(snapshot) {
@@ -747,7 +835,9 @@ impl BackgroundArchive {
             if self.cancel.is_cancelled() {
                 bail!("Upload interrupted; local files retained");
             }
-            if self.queue.pending.lock().await.is_none() && !self.queue.busy.load(Ordering::SeqCst)
+            if self.queue.pending.lock().await.is_none()
+                && self.queue.recovered.lock().await.is_empty()
+                && !self.queue.busy.load(Ordering::SeqCst)
             {
                 return Ok(());
             }
@@ -784,6 +874,12 @@ pub async fn restore(
             continue;
         }
         let destination = files::checked(output, &file.relative_path)?;
+        if files::hash(&destination)
+            .is_ok_and(|identity| identity == (file.size, file.sha256.clone()))
+        {
+            restored.insert(file.artifact_id.clone());
+            continue;
+        }
         if download(
             client,
             &file.url,

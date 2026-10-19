@@ -10,6 +10,8 @@ chrono = "0.4"
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "6"
 fs2 = "0.4"
+futures-util = { version = "0.3", features = ["sink"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 hex = "0.4"
 libc = "0.2"
 regex = "1"
@@ -18,11 +20,13 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+socket2 = { version = "0.6", features = ["all"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io", "rt"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]

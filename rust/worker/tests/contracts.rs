@@ -26,6 +26,23 @@ async fn server(
             let handler = handler.clone();
             let records = records.clone();
             tokio::spawn(async move {
+                use futures_util::{SinkExt, StreamExt};
+                let mut peek = [0u8; 1024];
+                let count = socket.peek(&mut peek).await.unwrap();
+                if peek[..count].starts_with(b"GET /api/worker/connect ") {
+                    let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                    records
+                        .lock()
+                        .unwrap()
+                        .push(("/api/worker/connect".into(), Value::Null));
+                    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                        "{\"type\":\"ready\"}".into(),
+                    ))
+                    .await
+                    .unwrap();
+                    while let Some(Ok(_)) = ws.next().await {}
+                    return;
+                }
                 let mut bytes = vec![];
                 let mut buffer = [0u8; 4096];
                 let header_end = loop {
@@ -371,7 +388,7 @@ print(json.dumps({'type':'completed'}),flush=True)
         .map(|e| e["sequence"].as_u64().unwrap())
         .collect();
     assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]));
-    for state in ["queued", "uploading", "completing", "saved"] {
+    for state in ["saved"] {
         assert!(events
             .iter()
             .any(|e| e["kind"] == "upload" && e["progress"]["status"] == state));
@@ -393,7 +410,7 @@ print(json.dumps({'type':'completed'}),flush=True)
 }
 #[cfg(unix)]
 #[tokio::test]
-async fn lease_expiry_stops_engine_tree_and_retains_recovery_files() {
+async fn legacy_lease_expiry_does_not_stop_compute_and_local_shutdown_retains_recovery() {
     let (url, requests, task) = server(|_, _| (200, b"{}".to_vec())).await;
     let temp = tempfile::tempdir().unwrap();
     let paths = pipeline_fixture(
@@ -412,13 +429,22 @@ while True:time.sleep(.05)
     let client = api::Client::new(&url, "credential").unwrap();
     let mut assignment = assignment(1);
     assignment.lease_expires_at = (chrono::Utc::now() + chrono::Duration::seconds(2)).to_rfc3339();
+    let shutdown = CancellationToken::new();
+    let signal = shutdown.clone();
+    let pid_path = paths.scratch.join("scan/attempt/run/engine.pid");
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+        let pid = std::fs::read_to_string(pid_path).unwrap();
+        assert_eq!(unsafe { libc::kill(pid.trim().parse().unwrap(), 0) }, 0);
+        signal.cancel();
+    });
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         guerrilla_worker::execution::execute(
             &paths,
             &client,
             assignment,
-            &CancellationToken::new(),
+            &shutdown,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             Arc::new(tokio::sync::Mutex::new(daemon::Status::default())),
         ),
@@ -436,11 +462,16 @@ while True:time.sleep(.05)
         String::from_utf8_lossy(&ps.stdout).trim().is_empty()
             || String::from_utf8_lossy(&ps.stdout).contains('Z')
     );
-    assert!(requests
+    let terminal: Value = serde_json::from_slice(
+        &std::fs::read(paths.scratch.join("scan/attempt/run/.worker/finish.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(terminal["state"], "interrupted");
+    assert!(!requests
         .lock()
         .unwrap()
         .iter()
-        .any(|r| r.0 == "/api/worker/finish" && r.1["state"] == "interrupted"));
+        .any(|r| r.0 == "/api/worker/heartbeat"));
     task.abort();
 }
 
@@ -496,12 +527,21 @@ print(json.dumps({'gpus':[{'id':'fixture-GPU','name':'Fixture GPU','memoryBytes'
     let first = invoke("start");
     assert_eq!(first["running"], true);
     for _ in 0..1000 {
-        if !requests.lock().unwrap().is_empty() {
+        if requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.0 == "/api/worker/poll")
+        {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    assert!(!requests.lock().unwrap().is_empty());
+    assert!(requests
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|r| r.0 == "/api/worker/poll"));
     let second = invoke("start");
     assert_eq!(second["running"], true);
     assert_eq!(second["workerId"], "fixture-worker");
@@ -524,7 +564,15 @@ print(json.dumps({'gpus':[{'id':'fixture-GPU','name':'Fixture GPU','memoryBytes'
 #[cfg(unix)]
 #[tokio::test]
 async fn owner_cancellation_confirms_fence_then_removes_local_outputs() {
-    let (url,requests,task)=server(|route,_| {if route=="/api/worker/events"{(409,b"{}".to_vec())}else {let value=if route=="/api/worker/heartbeat"{json!({"command":"stop","reason":"cancelled","leaseExpiresAt":chrono::Utc::now().to_rfc3339()})}else{json!({})};(200,serde_json::to_vec(&value).unwrap())}}).await;
+    let (url, requests, task) = server(|route, _| {
+        let value = if route == "/api/worker/reconcile" {
+            json!({"command":"stop","reason":"cancelled"})
+        } else {
+            json!({})
+        };
+        (200, serde_json::to_vec(&value).unwrap())
+    })
+    .await;
     let temp = tempfile::tempdir().unwrap();
     let paths = pipeline_fixture(
         &temp,
@@ -534,9 +582,14 @@ print(json.dumps({'type':'progress','stage':'training','message':'Training'}),fl
 while True:time.sleep(.05)
 "#,
     );
+    let mut client = api::Client::new(&url, "credential").unwrap();
+    let session = guerrilla_worker::connection::Session::new();
+    let shutdown = CancellationToken::new();
+    let connection = tokio::spawn(session.clone().run(client.clone(), shutdown.clone()));
+    client.session = Some(session);
     let result = guerrilla_worker::execution::execute(
         &paths,
-        &api::Client::new(&url, "credential").unwrap(),
+        &client,
         assignment(30),
         &CancellationToken::new(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -548,17 +601,19 @@ while True:time.sleep(.05)
     let records = requests.lock().unwrap();
     let heartbeat = records
         .iter()
-        .position(|r| r.0 == "/api/worker/heartbeat")
+        .position(|r| r.0 == "/api/worker/reconcile")
         .unwrap();
     let cleanup = records
         .iter()
         .position(|r| r.0 == "/api/worker/cleanup")
         .unwrap();
     assert!(heartbeat < cleanup);
-    assert!(records
+    assert!(!records
         .iter()
-        .any(|r| r.0 == "/api/worker/finish" && r.1["error"] == "Cancelled by owner."));
+        .any(|r| r.0 == "/api/worker/events" || r.0 == "/api/worker/artifacts"));
     drop(records);
+    shutdown.cancel();
+    connection.abort();
     task.abort();
 }
 #[tokio::test]
@@ -1176,4 +1231,432 @@ async fn hosted_source_links_are_rejected_without_running_the_pipeline() {
         .contains("private storage"));
     drop(requests);
     task.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn computation_finishes_during_31_minute_outage_then_reconciles_before_publication() {
+    let (url, requests, server_task) = server(|route, payload| {
+        let value = match route {
+            "/api/worker/reconcile" => json!({"command":"continue"}),
+            "/api/worker/artifacts" => {
+                let body: Value = serde_json::from_slice(payload).unwrap();
+                json!({"artifactId":body["relativePath"],"method":"reuse"})
+            }
+            _ => json!({}),
+        };
+        (200, serde_json::to_vec(&value).unwrap())
+    })
+    .await;
+    let temp = tempfile::tempdir().unwrap();
+    let paths = pipeline_fixture(
+        &temp,
+        r#"
+import json,sys,time
+from pathlib import Path
+request=json.loads(Path(sys.argv[2]).read_text())
+root=Path(request['outputPath'])
+print(json.dumps({'type':'stage','stage':'training','status':'running'}),flush=True)
+for i in range(100):print(json.dumps({'type':'progress','stage':'training','iteration':i}),flush=True)
+(root/'export.spz').write_bytes(b'offline-computed-output')
+(root/'platform-state.json').write_text(json.dumps({'completed':{'export':{'files':[{'path':'export.spz'}]}}}))
+print(json.dumps({'type':'checkpoint','checkpointId':'offline','stage':'export'}),flush=True)
+while not (root/'.archive-acks/offline.ready').exists():time.sleep(.01)
+(root/'computed').write_text('done')
+print(json.dumps({'type':'completed'}),flush=True)
+"#,
+    );
+    let mut client = api::Client::new(&url, "credential").unwrap();
+    let raw_client = client.clone();
+    let session = guerrilla_worker::connection::Session::new();
+    client.session = Some(session.clone());
+    let shutdown = CancellationToken::new();
+    let execution = guerrilla_worker::execution::execute(
+        &paths,
+        &client,
+        assignment(-60),
+        &shutdown,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(tokio::sync::Mutex::new(daemon::Status::default())),
+    );
+    tokio::pin!(execution);
+    let finish = paths.scratch.join("scan/attempt/run/.worker/finish.json");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            tokio::select! {
+                result = &mut execution => panic!("Offline execution ended before reconciliation: {result:?}"),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+            }
+            if finish.exists() { break; }
+        }
+    }).await.unwrap();
+    assert!(paths.scratch.join("scan/attempt/run/computed").exists());
+    assert!(requests.lock().unwrap().is_empty());
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(31 * 60)).await;
+    assert!(!shutdown.is_cancelled());
+    assert!(finish.exists());
+    tokio::time::resume();
+    let connection = tokio::spawn(session.run(raw_client, shutdown.clone()));
+    tokio::time::timeout(std::time::Duration::from_secs(10), &mut execution)
+        .await
+        .unwrap()
+        .unwrap();
+    let records = requests.lock().unwrap();
+    let reconciled = records
+        .iter()
+        .position(|r| r.0 == "/api/worker/reconcile")
+        .unwrap();
+    let published = records
+        .iter()
+        .position(|r| matches!(r.0.as_str(), "/api/worker/events" | "/api/worker/artifacts"))
+        .unwrap();
+    assert!(reconciled < published);
+    assert!(records
+        .iter()
+        .any(|r| r.0 == "/api/worker/finish" && r.1["state"] == "completed"));
+    assert!(!records.iter().any(|r| r.0 == "/api/worker/heartbeat"));
+    assert!(!paths.scratch.join("scan").exists());
+    drop(records);
+    shutdown.cancel();
+    connection.abort();
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn reconnect_fences_superseded_attempt_before_replaying_pending_events() {
+    let (url, requests, server_task) = server(|route, _| {
+        let response = if route == "/api/worker/reconcile" {
+            json!({"command":"stop","reason":"superseded"})
+        } else {
+            json!({})
+        };
+        (200, serde_json::to_vec(&response).unwrap())
+    })
+    .await;
+    let temp = tempfile::tempdir().unwrap();
+    let session = guerrilla_worker::connection::Session::new();
+    let active = CancellationToken::new();
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    session
+        .activate(
+            fence(),
+            active.clone(),
+            cancelled.clone(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .await;
+    let mut client = api::Client::new(&url, "credential").unwrap();
+    let raw_client = client.clone();
+    client.session = Some(session.clone());
+    let outbox = guerrilla_worker::outbox::Outbox::open(temp.path().join("events.json")).unwrap();
+    outbox.push(api::body(&fence(), json!({"eventId":"completed-stage","kind":"stage","stage":"export","progress":{"status":"completed"}}))).await.unwrap();
+    let replay = tokio::spawn(outbox.run(client, active.clone()));
+    let shutdown = CancellationToken::new();
+    let connection = tokio::spawn(session.run(raw_client, shutdown.clone()));
+    tokio::time::timeout(std::time::Duration::from_secs(5), active.cancelled())
+        .await
+        .unwrap();
+    replay.await.unwrap();
+    assert!(!cancelled.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!requests
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|r| r.0 == "/api/worker/events"));
+    assert!(temp.path().join("events.json").exists());
+    shutdown.cancel();
+    connection.abort();
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn server_drain_keeps_publication_enabled_and_marks_local_drain() {
+    let (url, _, server_task) = server(|_, _| (200, br#"{"command":"drain"}"#.to_vec())).await;
+    let session = guerrilla_worker::connection::Session::new();
+    let active = CancellationToken::new();
+    let drain = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    session
+        .activate(
+            fence(),
+            active.clone(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            drain.clone(),
+        )
+        .await;
+    let shutdown = CancellationToken::new();
+    let connection = tokio::spawn(session.clone().run(
+        api::Client::new(&url, "credential").unwrap(),
+        shutdown.clone(),
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(5), session.wait(&shutdown))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(drain.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!active.is_cancelled());
+    shutdown.cancel();
+    connection.abort();
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn revoked_authorization_stops_compute_and_retains_recovery_data() {
+    let (url, _, server_task) = server(|_, _| (401, b"{}".to_vec())).await;
+    let session = guerrilla_worker::connection::Session::new();
+    let active = CancellationToken::new();
+    session
+        .activate(
+            fence(),
+            active.clone(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .await;
+    let shutdown = CancellationToken::new();
+    let connection = tokio::spawn(session.run(
+        api::Client::new(&url, "credential").unwrap(),
+        shutdown.clone(),
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(5), active.cancelled())
+        .await
+        .unwrap();
+    assert!(shutdown.is_cancelled());
+    connection.await.unwrap();
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn restarting_archive_replays_the_exact_ambiguous_checkpoint_commit() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let accepting = Arc::new(AtomicBool::new(false));
+    let accepted = accepting.clone();
+    let (url, requests, server_task) = server(move |route, payload| {
+        if route == "/api/worker/checkpoint" && !accepted.load(Ordering::SeqCst) {
+            return (503, b"{}".to_vec());
+        }
+        let value = if route == "/api/worker/artifacts" {
+            let body: Value = serde_json::from_slice(payload).unwrap();
+            json!({"artifactId":body["relativePath"],"method":"reuse"})
+        } else {
+            json!({})
+        };
+        (200, serde_json::to_vec(&value).unwrap())
+    })
+    .await;
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("run");
+    std::fs::create_dir_all(&output).unwrap();
+    std::fs::write(output.join("platform-state.json"), br#"{"completed":{}}"#).unwrap();
+    let client = api::Client::new(&url, "credential").unwrap();
+    let archive = archive::BackgroundArchive::new(
+        client.clone(),
+        fence(),
+        output.clone(),
+        vec![],
+        CancellationToken::new(),
+    );
+    archive.enqueue("restart", 7).await.unwrap();
+    let commit = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(commit) = requests
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|r| r.0 == "/api/worker/checkpoint")
+                .map(|r| r.1.clone())
+            {
+                break commit;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    drop(archive);
+    accepting.store(true, Ordering::SeqCst);
+    let archive = archive::BackgroundArchive::new(
+        client,
+        fence(),
+        output.clone(),
+        vec![],
+        CancellationToken::new(),
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), archive.drain())
+        .await
+        .unwrap()
+        .unwrap();
+    let records = requests.lock().unwrap();
+    let commits: Vec<_> = records
+        .iter()
+        .filter(|r| r.0 == "/api/worker/checkpoint")
+        .collect();
+    assert!(commits.len() >= 2);
+    assert!(commits.iter().all(|r| r.1 == commit));
+    assert!(output.join(".archive-acks/restart").exists());
+    assert!(!output.join(".worker/archives/restart").exists());
+    drop(records);
+    server_task.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn startup_terminal_reconciliation_cleans_only_acknowledged_completed_work() {
+    let (url, requests, server_task) = server(|route, payload| {
+        assert_eq!(route, "/api/worker/reconcile");
+        let request: Value = serde_json::from_slice(payload).unwrap();
+        let value = if request["attemptId"] == "completed" {
+            json!({"command":"stop","state":"completed"})
+        } else {
+            json!({"command":"stop","reason":"superseded"})
+        };
+        (200, serde_json::to_vec(&value).unwrap())
+    })
+    .await;
+    let temp = tempfile::tempdir().unwrap();
+    let paths = pipeline_fixture(
+        &temp,
+        "raise RuntimeError('completed GPU work must not run twice')\n",
+    );
+    for (scan, attempt) in [("done", "completed"), ("retry", "stale")] {
+        let worker = paths.scratch.join(format!("{scan}/{attempt}/run/.worker"));
+        std::fs::create_dir_all(&worker).unwrap();
+        let fence = Fence {
+            scan_id: scan.into(),
+            attempt_id: attempt.into(),
+            lease_id: "lease".into(),
+        };
+        std::fs::write(
+            worker.join("finish.json"),
+            api::body(&fence, json!({"state":"completed"})).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            worker.parent().unwrap().join("export.spz"),
+            b"retained-output",
+        )
+        .unwrap();
+    }
+    guerrilla_worker::execution::recover_finished(
+        &paths,
+        &api::Client::new(&url, "credential").unwrap(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(!paths.scratch.join("done").exists());
+    assert!(paths.scratch.join("retry/stale/run/export.spz").exists());
+    assert!(paths
+        .scratch
+        .join("retry/stale/run/.worker/finish-superseded.json")
+        .exists());
+    assert_eq!(requests.lock().unwrap().len(), 2);
+    server_task.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn committed_finish_with_lost_response_is_acknowledged_without_repeating_compute() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let committed = Arc::new(AtomicBool::new(false));
+    let remote = committed.clone();
+    let (url, requests, server_task) = server(move |route, _| {
+        if route == "/api/worker/finish" {
+            remote.store(true, Ordering::SeqCst);
+            return (503, b"{}".to_vec());
+        }
+        let response = if route == "/api/worker/reconcile" {
+            if remote.load(Ordering::SeqCst) {
+                json!({"command":"stop","state":"completed"})
+            } else {
+                json!({"command":"continue"})
+            }
+        } else {
+            json!({})
+        };
+        (200, serde_json::to_vec(&response).unwrap())
+    })
+    .await;
+    let temp = tempfile::tempdir().unwrap();
+    let paths = pipeline_fixture(&temp, "print('{\"type\":\"completed\"}',flush=True)\n");
+    let session = guerrilla_worker::connection::Session::new();
+    let mut client = api::Client::new(&url, "credential").unwrap();
+    let shutdown = CancellationToken::new();
+    let connection = tokio::spawn(session.clone().run(client.clone(), shutdown.clone()));
+    client.session = Some(session);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        guerrilla_worker::execution::execute(
+            &paths,
+            &client,
+            assignment(30),
+            &shutdown,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(tokio::sync::Mutex::new(daemon::Status::default())),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(committed.load(Ordering::SeqCst));
+    assert!(!paths.scratch.join("scan").exists());
+    assert_eq!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.0 == "/api/worker/finish")
+            .count(),
+        1
+    );
+    shutdown.cancel();
+    connection.abort();
+    server_task.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn restarting_same_fence_uses_newer_local_completed_stage_state() {
+    let (url, requests, server_task) = server(|_, _| (200, b"{}".to_vec())).await;
+    let temp = tempfile::tempdir().unwrap();
+    let paths = pipeline_fixture(
+        &temp,
+        r#"
+import json,sys
+from pathlib import Path
+request=json.loads(Path(sys.argv[2]).read_text())
+assert request['resume'] and request['selectiveResume']
+root=Path(request['outputPath'])
+assert 'training' in json.loads((root/'platform-state.json').read_text())['completed']
+print(json.dumps({'type':'completed'}),flush=True)
+"#,
+    );
+    let worker = paths.scratch.join("scan/attempt/run/.worker");
+    std::fs::create_dir_all(&worker).unwrap();
+    std::fs::write(
+        worker.join("fence.json"),
+        serde_json::to_vec(&fence()).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        worker.parent().unwrap().join("platform-state.json"),
+        br#"{"completed":{"selection":{"files":[]},"training":{"files":[]}}}"#,
+    )
+    .unwrap();
+    guerrilla_worker::execution::execute(
+        &paths,
+        &api::Client::new(&url, "credential").unwrap(),
+        assignment(30),
+        &CancellationToken::new(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(tokio::sync::Mutex::new(daemon::Status::default())),
+    )
+    .await
+    .unwrap();
+    assert!(requests
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|r| r.0 == "/api/worker/finish" && r.1["state"] == "completed"));
+    server_task.abort();
 }

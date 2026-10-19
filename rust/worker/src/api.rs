@@ -48,16 +48,33 @@ pub struct Client {
     pub origin: String,
     credential: String,
     pub http: Http,
+    pub session: Option<std::sync::Arc<crate::connection::Session>>,
 }
 impl Client {
     pub fn new(url: &str, credential: &str) -> Result<Self> {
         Ok(Self {
             origin: origin(url)?,
             credential: credential.into(),
+            session: None,
             http: Http::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
         })
+    }
+    pub fn credential(&self) -> &str {
+        &self.credential
+    }
+    pub async fn wait_connected(&self, cancel: &CancellationToken) -> Result<()> {
+        if cancel.is_cancelled() {
+            bail!("Worker operation interrupted");
+        }
+        if let Some(session) = &self.session {
+            session.wait(cancel).await?;
+        }
+        if cancel.is_cancelled() {
+            bail!("Worker operation interrupted");
+        }
+        Ok(())
     }
     pub async fn post<T: DeserializeOwned>(
         &self,
@@ -65,7 +82,9 @@ impl Client {
         body: &Value,
         cancel: &CancellationToken,
     ) -> Result<T> {
-        for attempt in 0..3 {
+        let mut attempt = 0u32;
+        loop {
+            self.wait_connected(cancel).await?;
             let request = self
                 .http
                 .post(format!("{}/api/worker/{}", self.origin, route))
@@ -86,17 +105,20 @@ impl Client {
             match result {
                 Ok(value) => return Ok(value),
                 Err(e) => {
+                    if let Some(session) = &self.session {
+                        session.disconnect();
+                    }
                     let fatal = e
                         .downcast_ref::<ApiError>()
                         .is_some_and(|s| s.0 < 500 && s.0 != 429);
-                    if attempt == 2 || fatal {
+                    if (attempt == 2 && self.session.is_none()) || fatal {
                         return Err(e);
                     }
-                    tokio::select! {_=cancel.cancelled()=>bail!("Worker operation interrupted"),_=tokio::time::sleep(Duration::from_millis(500 * (1<<attempt)))=>{}}
+                    tokio::select! {_=cancel.cancelled()=>bail!("Worker operation interrupted"),_=tokio::time::sleep(Duration::from_millis(500 * (1<<attempt.min(4))))=>{}}
+                    attempt = attempt.saturating_add(1);
                 }
             }
         }
-        unreachable!()
     }
 }
 pub fn body(fence: &crate::protocol::Fence, extra: Value) -> Value {

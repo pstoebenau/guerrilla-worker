@@ -19,7 +19,7 @@ pub struct Registration {
     pub gpus: Vec<Gpu>,
     pub healthy: bool,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Fence {
     pub scan_id: String,
