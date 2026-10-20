@@ -9,6 +9,8 @@ legal/RoMaV2-LICENSE.txt and legal/DINOv3-LICENSE.txt.
 PlayCanvas splat-transform 3.10.1: MIT; legal/SplatTransform-LICENSE.txt.
 Converter dependency versions are pinned in pipeline/docker/converter/package-lock.json.
 Node.js: legal/Node-LICENSE.txt. FFmpeg and OS package notices accompany their distributions.
+Desktop FFmpeg 8.0.3 binaries: Shaka Project static-ffmpeg-binaries n8.0.3-1,
+GPLv3; bundled runtime/ffmpeg/LICENSE, README and configure.txt.
 
 Spirula and RoMa model assets are downloaded from official releases and verified
 against pinned SHA-256 digests. Desktop packages include the notices above;

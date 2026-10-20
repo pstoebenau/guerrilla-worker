@@ -10,7 +10,7 @@ type RuntimeLock = {
   version: number;
   nodeVersion: string;
   ffmpegRelease: string;
-  targets: Record<string, Record<'node' | 'ffmpegArchive' | 'ffmpegConfig' | 'ffmpegLicense' | 'ffmpegReadme', Asset>>;
+  targets: Record<string, Record<'node' | 'ffmpeg' | 'ffprobe' | 'ffmpegLicense' | 'ffmpegReadme', Asset>>;
 };
 const root = path.resolve(import.meta.dir, '..');
 
@@ -35,11 +35,16 @@ export async function verifiedDownload(asset: Asset, cache: string, signal?: Abo
     for (let attempt = 0; ; attempt++) {
       signal?.throwIfAborted();
       let response: Response;
-      try { response = await fetch(asset.url, { signal: AbortSignal.any([AbortSignal.timeout(600_000), ...(signal ? [signal] : [])]) }); }
+      try {
+        response = await fetch(asset.url, { signal: AbortSignal.any([AbortSignal.timeout(600_000), ...(signal ? [signal] : [])]) });
+        // A connection can fail after headers arrive. Retry the whole transfer,
+        // replacing partial bytes before anything can enter the verified cache.
+        if (response.ok) await Bun.write(temporary, response);
+      }
       catch (error) {
         signal?.throwIfAborted();
-        if (attempt === 3) throw error;
-        console.log(`Runtime download interrupted; retrying (${attempt + 1}/3)`);
+        if (attempt === 3) throw new Error(`Runtime download interrupted: ${asset.url}`, { cause: error });
+        console.log(`Runtime download interrupted: ${asset.url}; retrying (${attempt + 1}/3)`);
         await Bun.sleep(1000 * 2 ** attempt);
         continue;
       }
@@ -50,9 +55,8 @@ export async function verifiedDownload(asset: Asset, cache: string, signal?: Abo
           await Bun.sleep(1000 * 2 ** attempt);
           continue;
         }
-        throw new Error(`Runtime download failed: HTTP ${response.status}`);
+        throw new Error(`Runtime download failed: HTTP ${response.status}: ${asset.url}`);
       }
-      await Bun.write(temporary, response);
       break;
     }
     if (await sha256(temporary) !== asset.sha256) throw new Error('Runtime checksum mismatch; download refused');
@@ -109,15 +113,15 @@ export async function vendorRuntime(destination: string): Promise<void> {
     }
     await vendorWindowsCrt(staging);
     await mkdir(path.join(staging, 'ffmpeg'));
-    await extractRuntimeArchive(await verifiedDownload(assets.ffmpegArchive, cache), path.join(staging, 'ffmpeg'));
     for (const name of ['ffmpeg', 'ffprobe'] as const) {
       const installed = path.join(staging, 'ffmpeg', name + suffix);
+      await cp(await verifiedDownload(assets[name], cache), installed);
       await chmod(installed, 0o755);
     }
-    await cp(await verifiedDownload(assets.ffmpegConfig, cache), path.join(staging, 'ffmpeg', 'configure.txt'));
     const ffmpegCheck = Bun.spawnSync([path.join(staging, 'ffmpeg', 'ffmpeg' + suffix), '-version'], { stdout: 'pipe', stderr: 'pipe' });
     const ffmpegConfiguration = ffmpegCheck.stdout.toString() + ffmpegCheck.stderr.toString();
-    if (ffmpegCheck.exitCode !== 0 || !ffmpegConfiguration.includes('--disable-nonfree') || ffmpegConfiguration.includes('--enable-nonfree')) throw new Error('FFmpeg runtime failed the redistribution configuration check');
+    if (ffmpegCheck.exitCode !== 0 || !ffmpegConfiguration.includes('--enable-gpl') || !ffmpegConfiguration.includes('--enable-version3') || ffmpegConfiguration.includes('--enable-nonfree')) throw new Error('FFmpeg runtime failed the redistribution configuration check');
+    await writeFile(path.join(staging, 'ffmpeg', 'configure.txt'), ffmpegConfiguration);
     for (const [name, installed] of [['ffmpegLicense', 'LICENSE'], ['ffmpegReadme', 'README']] as const) {
       await cp(await verifiedDownload(assets[name], cache), path.join(staging, 'ffmpeg', installed));
     }

@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from 'bun:test';
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { extractRuntimeArchive, renameRuntimeDirectory, sha256, verifiedDownload } from '../scripts/vendor-runtime';
@@ -123,5 +123,35 @@ describe('vendored runtime integrity', () => {
       expect(request).toHaveBeenCalledTimes(1);
       expect(await Bun.file(path.join(cache, `${asset.sha256}-runtime.zip`)).exists()).toBe(false);
     } finally { request.mockRestore(); sleep.mockRestore(); await rm(cache, { recursive: true, force: true }); }
+  });
+  test('a response body disconnect retries from scratch before caching', async () => {
+    const cache = await mkdtemp(path.join(tmpdir(), 'guerrilla-runtime-stream-'));
+    const bytes = 'verified replacement';
+    const digest = new Bun.CryptoHasher('sha256').update(bytes).digest('hex');
+    let pulls = 0;
+    const broken = new Response(new ReadableStream({
+      pull(controller) {
+        if (pulls++ === 0) controller.enqueue(new TextEncoder().encode('partial bytes longer than the replacement'));
+        else controller.error(new Error('connection reset'));
+      },
+    }));
+    const request = spyOn(globalThis, 'fetch').mockResolvedValueOnce(broken).mockResolvedValueOnce(new Response(bytes));
+    const sleep = spyOn(Bun, 'sleep').mockResolvedValue(undefined);
+    try {
+      const file = await verifiedDownload({ url: 'https://example.invalid/runtime.zip', sha256: digest }, cache);
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(await readFile(file, 'utf8')).toBe(bytes);
+      expect(await readdir(cache)).toEqual([path.basename(file)]);
+    } finally { request.mockRestore(); sleep.mockRestore(); await rm(cache, { recursive: true, force: true }); }
+  });
+  test('a missing asset reports its URL without retrying or leaving partial files', async () => {
+    const cache = await mkdtemp(path.join(tmpdir(), 'guerrilla-runtime-missing-'));
+    const url = 'https://example.invalid/missing.zip';
+    const request = spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 404 }));
+    try {
+      await expect(verifiedDownload({ url, sha256: 'a'.repeat(64) }, cache)).rejects.toThrow(`HTTP 404: ${url}`);
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(await readdir(cache)).toEqual([]);
+    } finally { request.mockRestore(); await rm(cache, { recursive: true, force: true }); }
   });
 });
